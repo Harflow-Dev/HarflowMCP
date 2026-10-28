@@ -89,7 +89,7 @@ def protected_targets(repo: str | Path, log_dir: Path, environ: Any = None, extr
     state = [resolve(str(p)) for p in state_layout.protected_roots(log_dir=log_dir)]
     settings = [repo_path / ".claude", repo_path / ".claude" / "settings.json", repo_path / ".claude" / "settings.local.json", repo_path / ".mcp.json",
                 config, config / "settings.json", config / "settings.local.json", home / ".claude.json", *map(Path, MANAGED_SETTINGS)]
-    return {"state": [_fold(p) for p in state], "settings": [_fold(resolve(str(p))) for p in settings],
+    return {"project_plans": str(repo_path.absolute() / ".claude" / "plans"), "state": [_fold(p) for p in state], "settings": [_fold(resolve(str(p))) for p in settings],
             "git": None if (git := git_protected(repo_path)) is None else [_fold(p) for p in git],
             "backend": [_fold(resolve(str(p))) for p in extra]}
 
@@ -130,6 +130,17 @@ def protection(targets: dict[str, Any], tool: str, file_path: str, base: str | P
         return "protected_path"
     if tool not in write_tools:
         return None
-    if targets["git"] is None or any(inside(target, root) for root in targets["settings"] + targets["git"] + targets.get("backend", [])) or _in_git_dir(real) or _in_git_dir(lexical):
+    settings = targets["settings"]
+    plans = Path(targets["project_plans"]) if targets.get("project_plans") else None
+    # Only ordinary descendants of this project's plans directory are exempt
+    # from the blanket project .claude rule. Keep every other settings rule,
+    # including a user configuration directory that overlaps the project.
+    if (plans is not None and lexical != plans and inside(lexical, plans)
+            and real == lexical and not any(p.is_symlink() for p in (lexical, *lexical.parents))):
+        settings = [root for root in settings if root != _fold(resolve(str(plans.parent))) ]
+        # A project that itself is the user configuration namespace is never exempt.
+        if sum(root == _fold(resolve(str(plans.parent))) for root in targets["settings"]) > 1:
+            settings = targets["settings"]
+    if targets["git"] is None or any(inside(target, root) or inside(_fold(lexical), root) for root in settings + targets["git"] + targets.get("backend", [])) or _in_git_dir(real) or _in_git_dir(lexical):
         return "protected_path"
     return None

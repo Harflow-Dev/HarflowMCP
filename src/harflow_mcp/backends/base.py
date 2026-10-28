@@ -489,6 +489,15 @@ def control_pipe_problem(backend: Any) -> str | None:
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
 
+    def qualification_features(self):
+        """Versioned unsupported features; no probe runs for ordinary dispatch."""
+        from .qualification import FeatureSpec
+        return {name: FeatureSpec(name, "unsupported-v1") for name in
+                ("caller_approval_tools", "caller_write_tools", "path_safety_prompts", "denial_texts", "allowed_commands")}
+
+    def qualification_version(self, observed):
+        return observed.strip() if isinstance(observed, str) and observed.strip() else None
+
     def accounting_evidence(self, acc, context):
         from ..accounting import unavailable
         return unavailable(context["task_id"], "backend_accounting_unqualified")

@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -219,14 +220,14 @@ async def test_child_mode_prompt_assignment_and_isolation(two_level, tmp_path):
     assert child["child_session_selection"]["requested_policy"] == "agent_decides"
     assert child["child_session_selection"]["selected_mode"] == "fresh"
     assert child["child_session_selection"]["reason"] == "Keep this invocation independent"
-    assert "ORIGINAL PARENT REQUEST" not in json.dumps(child)
+    assert child["inherited_context"]["payload"]["original_request"] == "ORIGINAL PARENT REQUEST"
     # The child has its own orchestrator session, separate from the parent's.
     assert run["sessions"]["orchestrator"]["session_id"] != child["sessions"]["orchestrator"]["session_id"]
-    # Workers never see the parent's original request and boot Fresh.
+    # Workers receive the immutable parent requirements and boot Fresh.
     workers = [call for call in registry.dispatches if call["label"] == "work"]
     assert len(workers) == 1
     assert workers[0]["run"] == "child"
-    assert "ORIGINAL PARENT REQUEST" not in workers[0]["prompt"]
+    assert "ORIGINAL PARENT REQUEST" in workers[0]["prompt"]
     # The parent completes with the child outcome and leaf result refs.
     activation = invocation_activation(run)
     outcome = activation["node_result"]["result"]["child_outcome"]
@@ -778,3 +779,119 @@ def test_child_checkpoint_identity_distinguishes_execution_progress():
     assert checkpoint_identity(child) == after
     token['execution_activation_id'] = 'execution-two'
     assert checkpoint_identity(child) != after
+
+
+def test_inherited_spec_is_immutable_and_delivered_without_traversal_refs(tmp_path):
+    from harflow_mcp.workflow_invocation import inherited_context
+    from harflow_mcp.workflow_context import render_decision_context
+    import hashlib
+
+    spec = "Complete approved specification with late requirements " + "z" * 80000
+    parent = {"workflow_run_id": "a" * 12, "sequence": 9, "prompt": "Build all platforms", "technical_plan": spec, "technical_plan_execution_id": "approved-plan"}
+    invocation = {"inputs": [{"index": 1, "kind": "input_results", "results": []}]}
+    snapshot = inherited_context(parent, {"id": "child-call"}, invocation)
+    saved = json.loads(json.dumps(snapshot))  # persisted/restarted representation
+    parent["technical_plan"] = "Changed after child invocation"
+    invocation["inputs"].clear()
+    payload = saved["payload"]
+    assert payload["technical_plan"] == spec
+    assert payload["source_execution_id"] == "child-call"
+    assert payload["technical_plan_execution_id"] == "approved-plan"
+    assert payload["source_sequence"] == 9
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    assert saved["sha256"] == hashlib.sha256(encoded).hexdigest()
+    for platform in ("ios", "android", "web"):
+        run = {"workflow_run_id": platform, "definition": {"nodes": []}, "activations": [], "tasks": [], "inherited_context": copy.deepcopy(saved)}
+        node = {"role": "planning", "instructions": "Plan platform work"}
+        # A later node has no invocation refs, including a plan-only worker.
+        prompt = d.worker_prompt(run, node, {"assignment_prompt": platform, "input_result_refs": []}, root=tmp_path)
+        assert len(prompt.encode()) < 64000
+        assert saved["sha256"] in prompt
+        from harflow_mcp.workflow_prompt_delivery import bounded_inherited_context
+        manifest = bounded_inherited_context(run, tmp_path)
+        from pathlib import Path
+        restored = json.loads(Path(manifest["retrieval"]["path"]).read_text())
+        assert restored == saved
+        assert restored["payload"]["technical_plan"] == spec
+        from harflow_mcp.workflow_prompt_delivery import render_worker_inputs
+        bounded_prompt, accounting = render_worker_inputs(prompt, run, node, {"token": {"assignment_prompt": platform, "input_result_refs": []}}, root=tmp_path)
+        assert len(bounded_prompt.encode()) < 64000
+        assert manifest["retrieval"]["path"] in bounded_prompt
+        assert accounting["delivery_mode"] == "bounded_inputs"
+    rendered = render_decision_context({"decision_id": "decision", "inherited_context": saved}, session_owner=None, scope="child", budget_bytes=1000)
+    assert spec in rendered.prompt
+    rendered = render_decision_context({"decision_id": "decision", "inherited_context": manifest}, session_owner=None, scope="child")
+    assert len(rendered.prompt.encode()) < 64000
+    assert manifest["retrieval"]["path"] in rendered.prompt
+
+
+def test_inherited_spec_rejects_tampering_and_preserves_ancestors():
+    from harflow_mcp.workflow_invocation import inherited_context
+    from harflow_mcp.workflow_run_documents import _inherited_context
+    parent = {"workflow_run_id": "parent", "sequence": 1, "prompt": "Original", "technical_plan": "Approved text"}
+    original = inherited_context(parent, {"id": "call"}, {"inputs": []})
+    _inherited_context(original, "snapshot")
+    parent["inherited_context"] = original
+    nested = inherited_context(parent, {"id": "nested-call"}, {"inputs": []})
+    assert nested["payload"]["ancestors"] == original
+    _inherited_context(nested, "snapshot")
+    nested["payload"]["technical_plan"] = "Tampered"
+    with pytest.raises(ValueError, match="digest mismatch"):
+        _inherited_context(nested, "snapshot")
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_inherited_spec_refuses_substituted_temp_directory(tmp_path, replacement):
+    from harflow_mcp.workflow_invocation import inherited_context
+    from harflow_mcp.workflow_prompt_delivery import bounded_inherited_context, _CONTEXT_FOLDERS
+    import shutil
+    parent = {"workflow_run_id": "parent", "technical_plan": "z" * 80000}
+    run = {"workflow_run_id": "child-replaced", "inherited_context": inherited_context(parent, {"id": "call"}, {"inputs": []})}
+    manifest = bounded_inherited_context(run, tmp_path)
+    directory = Path(manifest["retrieval"]["path"]).parent
+    shutil.rmtree(directory)
+    outside = tmp_path / "destination"; outside.mkdir()
+    if replacement == "symlink":
+        directory.symlink_to(outside, target_is_directory=True)
+    else:
+        directory.mkdir()
+    try:
+        with pytest.raises((OSError, ValueError)):
+            bounded_inherited_context(run, tmp_path)
+        assert list(outside.iterdir()) == []
+        if replacement == "directory":
+            assert list(directory.iterdir()) == []
+    finally:
+        if directory.is_symlink():
+            directory.unlink()
+        else:
+            directory.rmdir()
+        _CONTEXT_FOLDERS.pop((str(tmp_path), run["workflow_run_id"]), None)
+
+
+@pytest.mark.parametrize("target_key", ["path", "readable_chunks_path"])
+def test_inherited_spec_fifo_substitution_refuses_without_blocking(tmp_path, target_key):
+    from harflow_mcp.workflow_invocation import inherited_context
+    from harflow_mcp.workflow_prompt_delivery import bounded_inherited_context
+    import os
+    import threading
+    parent = {"workflow_run_id": "parent", "technical_plan": "z" * 80000}
+    run = {"workflow_run_id": "child-fifo-" + target_key, "inherited_context": inherited_context(parent, {"id": "call"}, {"inputs": []})}
+    manifest = bounded_inherited_context(run, tmp_path)
+    path = Path(manifest["retrieval"][target_key])
+    path.unlink(); os.mkfifo(path)
+    errors = []
+    def attempt():
+        try:
+            bounded_inherited_context(run, tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+    thread = threading.Thread(target=attempt, daemon=True)
+    thread.start(); thread.join(timeout=1)
+    blocked = thread.is_alive()
+    if blocked:
+        descriptor = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(descriptor)
+        thread.join(timeout=1)
+    assert not blocked, 'FIFO substitution blocked specification delivery'
+    assert errors and isinstance(errors[0], (ValueError, OSError))

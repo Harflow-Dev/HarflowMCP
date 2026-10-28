@@ -14,6 +14,7 @@ QUALIFIED_FORMATS = frozenset({
     "harflow.task.control", "harflow.task.inbox", "harflow.task.artifacts",
     "harflow.task.approvals", "harflow.task-launch", "harflow.task-observations",
     "harflow.notifications", "harflow.resource-ledger", "harflow.workflow.worktree",
+    "harflow.qualification",
 })
 QUALIFIED_SOURCE_LINES = {(0, 0): {name: frozenset({1}) for name in QUALIFIED_FORMATS}}
 

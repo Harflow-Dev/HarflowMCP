@@ -304,9 +304,28 @@ def _attempt(value, path):
     identifier(value["task_id"])
 
 
+def _inherited_context(value, path):
+    import hashlib
+    import json
+    _shape(value, {"version": int, "sha256": str, "payload": dict}, path)
+    if set(value) != {"version", "sha256", "payload"} or value["version"] != 1:
+        raise ValueError(f"{path}: invalid inherited specification envelope")
+    payload = value["payload"]
+    fields = {"source_workflow_run_id": _id, "source_execution_id": str,
+              "source_sequence": _counter, "original_request": str,
+              "technical_plan": str, "technical_plan_execution_id": NULL_STRING,
+              "inputs": _array(_invocation_input), "ancestors": _nullable(_inherited_context)}
+    _shape(payload, fields, path + ".payload")
+    if set(payload) != set(fields):
+        raise ValueError(f"{path}: incomplete inherited specification payload")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if hashlib.sha256(encoded).hexdigest() != value["sha256"]:
+        raise ValueError(f"{path}: inherited specification digest mismatch")
+
+
 def _invocation(value, path):
     _shape(value, {**_fields("stage workflow_id workflow_name orchestrator_mode definition_sha256 assignment child_session_refusal timeout_reason", numbers="timeout_elapsed_seconds timeout_started_at settled_at started_at finished_at active_since", booleans="timeout_paused timeout_expired timeout_confirmed", arrays="inputs artifact_refs"),
-                   "child_workflow_run_id": _id, "revision": _nullable(_counter), "timeout_seconds": NULL_NUMBER, "child_session_selection": _selection, "inputs": _array(_invocation_input), "artifact_refs": _array(_artifact)}, path)
+                   "child_workflow_run_id": _id, "revision": _nullable(_counter), "timeout_seconds": NULL_NUMBER, "inherited_context": _inherited_context, "child_session_selection": _selection, "inputs": _array(_invocation_input), "artifact_refs": _array(_artifact)}, path)
 
 
 def _node_result(value, path):
@@ -450,3 +469,6 @@ def encode(run: dict[str, Any]) -> dict[str, Any]:
 OPTIONAL.update(accepted_inputs=_map(_object({"accepted_at": NUMBER, "delivery": _delivery})), input_deliveries=_map(_delivery), input_delivery_receipt=_object({"workflow_run_id": _id, "decision_id": str, "accepted_at": NUMBER, "delivery_id": str}))
 
 OPTIONAL["input_question_items"] = _array(str)
+
+# Immutable inherited specification content is validated as a JSON object.
+OPTIONAL["inherited_context"] = _inherited_context

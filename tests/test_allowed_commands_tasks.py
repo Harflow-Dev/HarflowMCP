@@ -115,12 +115,12 @@ async def test_workflow_builders_cannot_receive_grants(env):
         await env.registry.start("go", env.repo, backend=get("claude"), workflow_builder=True, allowed_commands=["make test"])
 
 
-async def test_an_unqualified_installed_version_is_refused(env, monkeypatch):
+async def test_unseen_version_with_failed_behavior_probe_is_refused(env, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_VERSION", "2.1.311")
-    with pytest.raises(UnsupportedCapability, match="requires a measured Claude Code version"):
+    with pytest.raises(UnsupportedCapability, match="allowed_commands qualification failed"):
         await env.registry.start("go", env.repo, backend=get("claude"), allowed_commands=["make test"])
     assert env.launches() == []
-    task = await run(env)  # no grants: nothing depends on the table
+    task = await run(env)  # no grants: no permission self-test is required
     assert task.allowed_commands == []
 
 
@@ -134,7 +134,7 @@ async def test_resume_inherits_saved_grants_and_requalifies(env, monkeypatch):
     assert second.allowed_commands == GRANTS and second.enforcement["extra_allowed_commands"] == GRANTS
     assert store.read(env.log_dir, second.task_id).allowed_commands == GRANTS
     monkeypatch.setenv("FAKE_CLAUDE_VERSION", "2.1.311")
-    with pytest.raises(UnsupportedCapability, match="requires a measured Claude Code version"):
+    with pytest.raises(UnsupportedCapability, match="allowed_commands qualification failed"):
         await env.registry.resume(second, "third")
     assert len(env.launches()) == 2
 
@@ -285,7 +285,7 @@ async def test_a_failed_qualification_is_refused_before_reserving(env, monkeypat
     first = await run(env, allowed_commands=GRANTS)
     monkeypatch.setenv("FAKE_CLAUDE_VERSION", "2.1.311")
     for kwargs in ({}, {"allowed_commands": ["cargo build"]}):
-        with pytest.raises(UnsupportedCapability, match="requires a measured Claude Code version"):
+        with pytest.raises(UnsupportedCapability, match="allowed_commands qualification failed"):
             await env.registry.continue_task(first.task_id, "next", **kwargs)
     assert not (env.log_dir / f"{first.task_id}.continuation.json").exists()
     cleared = await env.registry.continue_task(first.task_id, "next", allowed_commands=[])

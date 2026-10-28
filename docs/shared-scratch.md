@@ -160,3 +160,30 @@ than falling back to `/tmp`. Mention the full path of anything the caller should
   impossible, and `writable` is not a claim about the filesystem's own permissions.
 * Shared folders are not per-user quota-limited; use `scratch list` and the age policy to watch disk use.
 * Detail behind these rules: [architecture](architecture.md#shared-scratch-shared_scratchpy).
+
+
+## Task-named plans and review reports
+
+After an observed process exit and complete output drain, Harflow materializes the final
+summary verbatim as `<state root>/outputs/<task_id>/report-<task_id>.md`. A final workflow
+JSON result containing `result.technical_plan` also produces `plan-<task_id>.md` alongside it.
+Both are registered as report artifacts with `engine_output` provenance: use task artifact
+reads (and `artifact_summary` in task results) to discover them. These files are engine
+outputs, **not agent-writable locations**; no repository or home write permission is added.
+Empty output produces no file; output above 16 MiB is not materialized. An unavailable output
+file is disclosed in task notices and does not change the task outcome; the summary remains
+available. Publication refuses existing files and symlinks rather than overwriting them.
+Outputs are retained and removed with their task records. Resumes and continuations have new
+task IDs and output paths, so identical titles and concurrent reviews cannot collide.
+
+During a write-capable task, save and update working plans in writable task scratch as
+`plan-<task_id>.md`, checking `scratch.access.task` first. In Claude plan mode, use Claude's
+built-in plan location under its existing permission policy, then return the final plan in
+`result.technical_plan` for a task-named published copy. Harflow does not control Claude's
+internal random plan filename or redirect it by changing user settings. A human-configured
+project `plansDirectory` of `.claude/plans` is supported by the measured CLI; Harflow's
+approval protection excludes only ordinary descendants of this project directory. All other
+`.claude` configuration, unknown directories, `.mcp.json`, and symlink escapes remain protected.
+This exception does not preapprove harness actions or make arbitrary paths writable in plan mode.
+Reviewers should return their complete report in their final response rather than creating
+an unrelated repository file or changing settings to enable report writes.

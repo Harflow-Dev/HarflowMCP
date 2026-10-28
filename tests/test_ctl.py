@@ -497,6 +497,7 @@ def test_backends_json_reports_the_registry_in_order(
             "binary": backend.binary,
             "installed": name != "claude",
             "capabilities": backends_module.capability_metadata(backend),
+            "qualification": backends_module.qualification_metadata(backend),
         }
         for name, backend in backends_module.BACKENDS.items()
     ]
@@ -553,20 +554,14 @@ def test_backends_plain_text_is_one_line_per_backend(
     ]
 
 
-def test_backends_never_spawns_a_subprocess(
+def test_backends_never_starts_a_provider_probe(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """`backends` answers from `shutil.which` alone — unlike `describe()`, it never probes
-    `--version`, so it stays fast enough for the Monitor's refresh cadence."""
-
-    from harflow_mcp import backends as backends_module
-
+    """Discovery reports version-bound cached results without a provider self-test."""
+    from harflow_mcp.backends import qualification
     def boom(*args, **kwargs):
-        raise AssertionError("ctl backends must never spawn a subprocess")
-
-    monkeypatch.setattr(backends_module.subprocess, "run", boom)
-    monkeypatch.setattr(backends_module.subprocess, "Popen", boom)
-
+        raise AssertionError("ctl backends must never start provider probes")
+    monkeypatch.setattr(qualification, '_probe', boom)
     assert ctl.main(["backends", "--json"]) == 0
     assert ctl.main(["backends"]) == 0
 

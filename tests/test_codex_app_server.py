@@ -528,15 +528,28 @@ def test_the_qualification_table_records_the_facts_the_design_depends_on():
     assert qualification.parse_user_agent("harflow/0.163.0 (Mac OS 26; arm64) iTerm (x; 0)") == "0.163.0" and qualification.parse_user_agent("junk") is None
 
 
-def test_qualify_requires_a_measured_version_on_a_measured_platform(monkeypatch):
+def test_qualify_requires_supported_platform_and_passing_behavior(monkeypatch):
+    from harflow_mcp.backends import qualification as shared
     backend = get("codex")
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(backends, "version", lambda b: "codex-cli 0.163.0")
+    def identify(value):
+        version = value.qualification_version(backends.version(value))
+        if not version:
+            raise UnsupportedCapability("qualification could not determine the installed version")
+        return shared.Identity(value.name, version, "/fixture/codex", "a" * 64, sys.platform)
+    monkeypatch.setattr(shared, "identify", identify)
+    monkeypatch.setattr(shared, "_probe", lambda *_a: shared.ProbeResult(False, "simulated approval protocol mismatch"))
     assert qualification.qualify(backend, "darwin") == "0.163.0"
-    with pytest.raises(UnsupportedCapability, match="measured only on darwin"):
+    with pytest.raises(UnsupportedCapability, match="platform differs"):
         qualification.qualify(backend, "linux")
-    for observed in ("codex-cli 0.162.0", "codex-cli 0.164.0", None, "weird"):
+    for observed in ("codex-cli 0.162.0", "codex-cli 0.164.0"):
         monkeypatch.setattr(backends, "version", lambda b, o=observed: o)
-        with pytest.raises(UnsupportedCapability, match="not qualified"):
+        with pytest.raises(UnsupportedCapability, match="simulated approval protocol mismatch"):
+            qualification.qualify(backend, "darwin")
+    for observed in (None, "weird"):
+        monkeypatch.setattr(backends, "version", lambda b, o=observed: o)
+        with pytest.raises(UnsupportedCapability, match="could not determine"):
             qualification.qualify(backend, "darwin")
 
 
@@ -654,7 +667,7 @@ def test_a_directory_without_a_git_root_is_refused(prepared, tmp_path_factory):
 
 def test_a_non_darwin_platform_refuses_at_qualification_and_at_configuration(prepared, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
-    with pytest.raises(UnsupportedCapability, match="measured only on darwin"):
+    with pytest.raises(UnsupportedCapability, match="no qualified OS isolation adapter"):
         get("codex").qualify_caller_approvals()
     with pytest.raises(UnsupportedCapability):
         get("codex").configure_caller_approvals(exec_invocation(prepared.repo), "write_in_repo", None, "0.163.0", False)

@@ -23,7 +23,7 @@ from pathlib import Path
 from .state_layout import resolve_layout
 from .state_ownership import assert_owned
 
-VERSION = "scratch-guidance-1"
+VERSION = "scratch-guidance-2"
 FIRST_TURN_STICKY = "first_turn_sticky"
 PER_RUN = "per_run"
 MODES = frozenset({FIRST_TURN_STICKY, PER_RUN})
@@ -33,11 +33,11 @@ REUSED_FROM_SESSION = "reused_from_session"
 UNAVAILABLE = "unavailable"
 
 TEXT = (
-    "Harflow scratch folders. When set, $HARFLOW_SCRATCH is private to this task, $HARFLOW_CHAIN_SCRATCH is "
-    "shared with every resume and continuation of this conversation, and $HARFLOW_GROUP_SCRATCH is shared with "
-    "every task in the same group. Prefer them over /tmp for screenshots, logs and notes; the chain and group "
-    "folders persist, so put there anything a later run or a sibling task should find. A folder may be read-only "
-    "for this run: say so instead of writing to /tmp."
+    "Harflow: prefer $HARFLOW_SCRATCH for temporary files; $HARFLOW_CHAIN_SCRATCH and $HARFLOW_GROUP_SCRATCH persist across related tasks. "
+    "Use writable task scratch for plan-<task_id>.md; otherwise use the backend built-in plan location. "
+    "Never change settings to enable plan writes. Return final plans as result.technical_plan in workflow JSON. "
+    "Harflow publishes final summaries and plans as task-named output artifacts without granting agent writes. "
+    "A folder may be read-only: respect scratch.access and do not fall back to /tmp."
 )
 MAX_BYTES = 600
 

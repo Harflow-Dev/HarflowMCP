@@ -433,7 +433,7 @@ def test_other_backends_refuse_with_their_reason(name, repo):
 
 def test_capability_metadata_reports_support(repo):
     metadata = backends.capability_metadata(CLAUDE)["allowed_commands"]
-    assert metadata["supported"] is True and metadata["versions"] == ["2.1.310"]
+    assert metadata["supported"] is True and set(metadata["versions"]) == {"2.1.310", "2.1.312"}
     assert metadata["freedoms"] == ["write_in_repo", "publish"]
     assert (metadata["max_patterns"], metadata["max_pattern_bytes"], metadata["max_total_bytes"]) == (16, 256, 2048)
     assert "not a security boundary" in metadata["boundary"]
@@ -441,13 +441,21 @@ def test_capability_metadata_reports_support(repo):
         assert backends.capability_metadata(get(name))["allowed_commands"]["supported"] is False
 
 
-def test_qualification_uses_the_shared_table(monkeypatch):
-    monkeypatch.setattr(backends, "version", lambda backend, **kwargs: "2.1.310 (Claude Code)")
-    assert CLAUDE.qualify_allowed_commands() == "2.1.310"
-    for observed in ("2.1.302 (Claude Code)", "2.1.311", "garbage", None):
-        monkeypatch.setattr(backends, "version", lambda backend, observed=observed, **kwargs: observed)
-        with pytest.raises(UnsupportedCapability, match="allowed_commands requires a measured Claude Code version"):
-            CLAUDE.qualify_allowed_commands()
+def test_qualification_uses_the_shared_framework(monkeypatch):
+    from types import SimpleNamespace
+    from harflow_mcp.backends import qualification
+    calls = []
+    def require(backend, feature):
+        calls.append((backend, feature))
+        return SimpleNamespace(identity=SimpleNamespace(version="9.9.9"))
+    monkeypatch.setattr(qualification, "require", require)
+    assert CLAUDE.qualify_allowed_commands() == "9.9.9"
+    assert calls == [(CLAUDE, "allowed_commands")]
+    def unavailable(backend, feature):
+        raise UnsupportedCapability("isolated probe unavailable")
+    monkeypatch.setattr(qualification, "require", unavailable)
+    with pytest.raises(UnsupportedCapability, match="isolated probe unavailable"):
+        CLAUDE.qualify_allowed_commands()
 
 
 # --- argv composition and assert_safe -------------------------------------------------------------
@@ -655,3 +663,28 @@ def test_cross_check_names_the_feature_and_both_versions():
         check_event(TOOL, {**GRANTS_Q, "version": None})
     with pytest.raises(backends.base.ApprovalRefused, match="caller approvals were qualified"):
         check_event(INIT, {"version": "2.1.302", "observed": None, "write": False})
+
+
+@pytest.mark.parametrize("pattern", [
+    "git fetch origin", "git fetch origin develop", "git pull --ff-only origin develop",
+    "git switch develop", "git switch -c feature/63 origin/develop",
+    "git checkout -b feature/63 develop", "git -C . pull --ff-only origin develop",
+])
+def test_git_preparation_exact_publish_grants(repo, pattern):
+    build(repo, "publish", (pattern,))
+    with pytest.raises(CommandGrantError):
+        claude_commands.validate(pattern, "write_in_repo", repo)
+
+
+@pytest.mark.parametrize("pattern", [
+    "git fetch:*", "git fetch origin *", "git pull origin develop", "git pull --rebase origin develop",
+    "git reset --hard", "git switch -C feature", "git checkout -B feature", "git checkout .",
+    "git fetch origin --force", "git fetch https://example.com/repo develop", "git fetch origin +main:main",
+    "git -c core.hooksPath=x fetch origin", "git --git-dir=x fetch origin", "git -C escape fetch origin",
+    "git -C ../outside fetch origin", "git -C . -C . fetch origin", "git switch -c x HEAD~1",
+    "git switch --detach develop", "git branch -D feature", "uv run git fetch origin",
+    "git fetch origin refs/../heads", "git push origin develop", "git commit -m x",
+])
+def test_git_preparation_refuses_other_grammar(repo, pattern):
+    with pytest.raises(CommandGrantError):
+        claude_commands.validate(pattern, "publish", repo)

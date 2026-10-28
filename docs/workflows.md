@@ -1877,3 +1877,31 @@ resets the 3600-second resource wait and FIFO position. A `creating` worktree re
 Every pinned invocation path is checked before preview or launch: child run declarations and
 connected/on-demand node resources must fit the nearest enclosing run declaration. Children can
 narrow that scope and undeclared children inherit it. Reused definitions are checked per path.
+
+### Inherited child specifications
+
+Each Run workflow invocation freezes a complete inherited context in the child run
+record: the parent's original request, current technical plan and its execution ID,
+selected complete result inputs and assigned descriptors, and any inherited ancestor
+snapshot. The snapshot identifies its source run, invocation execution and run sequence;
+its SHA-256 identifies the exact canonical JSON payload revision. Later parent edits
+and child traversal do not replace this snapshot. Every child worker, including later
+planning nodes and plan-only executions, receives it independently of predecessor result
+references. Child orchestrator context also carries the snapshot.
+
+Small inherited specifications remain inline. Oversized snapshots use a complete,
+immutable engine-owned UTF-8 JSON file in a private operating-system temporary
+directory with source identities, byte count and SHA-256 in the prompt. Temporary
+files use normal operating-system temporary-file retention; after restart they are
+recreated from the persisted snapshot. Workers must read the whole file through ordinary filesystem access
+before working; this adds no permission grant. A worker unable to read the file must
+report the unsupported capability or permission block explicitly. Workers do not need
+Harflow read tools to retrieve these requirements. Selected artifact references remain metadata
+and do not imply that referenced file content was copied into the specification.
+
+
+Large inherited specifications include a short-line JSONL companion for plan-mode `Read`
+access. Read `readable_chunks_path` in pages of `read_page_lines` until `chunk_lines` are
+consumed, decode each line as a JSON string, concatenate verbatim, then decode the resulting
+snapshot JSON. Its UTF-8 SHA-256 must equal `file_sha256`. This avoids long-line and tool-output
+truncation and does not require Bash classification or Harflow read tools.

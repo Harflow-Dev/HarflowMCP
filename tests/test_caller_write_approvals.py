@@ -58,9 +58,9 @@ def test_table_scopes_tools_by_version_and_opt_in():
 
 def test_support_reports_versions_as_a_list_with_per_version_tools():
     value = support()
-    assert value["versions"] == ["2.1.302", "2.1.310"]
-    assert value["tools_by_version"] == {"2.1.302": ["Bash"], "2.1.310": ["Bash", "Read", "Write", "Edit"]}
-    assert value["path_safety_prompt_versions"] == ["2.1.310"]
+    assert value["versions"] == ["2.1.302", "2.1.310", "2.1.312"]
+    assert value["tools_by_version"] == {"2.1.302": ["Bash"], "2.1.310": ["Bash", "Read", "Write", "Edit"], "2.1.312": ["Bash", "Read", "Write", "Edit"]}
+    assert value["path_safety_prompt_versions"] == ["2.1.310", "2.1.312"]
     assert value["tools"] == ["Bash", "Read", "Write", "Edit"]
 
 
@@ -148,7 +148,12 @@ def test_write_without_opt_in_decodes_as_a_system_rejection():
 def test_encode_delivers_only_the_harflow_refusal_for_system_rows(reason):
     row = {"native_request_id": "n", "action": {"input": {"file_path": "/x"}}, "system_rejection": reason}
     message = json.loads(encode(row, "reject"))["response"]["response"]
-    assert message == {"behavior": "deny", "message": f"Harflow refused this action: {reason}"}
+    assert message["behavior"] == "deny"
+    assert message["message"].startswith(f"Harflow refused this action: {reason}")
+    if reason == "protected_path":
+        assert "HARFLOW_SCRATCH" in message["message"] and "result.technical_plan" in message["message"]
+    else:
+        assert message["message"] == f"Harflow refused this action: {reason}"
     with pytest.raises(ValueError):
         encode(row, "approve")
     with pytest.raises(ValueError):

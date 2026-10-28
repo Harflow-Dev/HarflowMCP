@@ -596,3 +596,51 @@ separate from the public question identity to prevent automatic answer loops. Th
 receipts. Replies preserve complete actionable questions and item lists even above the compact
 informational byte target; informational output remains bounded. New input presentations after
 acceptance use fresh decision identities.
+
+## Backend qualification receipts (private state)
+
+`<state_root>/qualification/<key>.json` stores private feature qualification evidence. It is not a
+public wire contract or proof of binary authorship. Schema 1 carries `product: "harflow"`,
+`format: "harflow.qualification"`, `product_version`, integer `v: 1`, an `identity` object,
+`revision`, and `features`. Product and storage-line compatibility are checked before reading any
+feature. Missing, incompatible, malformed, oversized or unreadable evidence cannot authorize a
+feature; no automatic repair or conversion is provided.
+
+The identity contains backend name, observed version, resolved executable path, executable
+SHA-256 and platform. The key hashes that identity together with the backend's probe revision.
+Each feature row contains boolean `ok`, `source` (`seeded`, `auto-probed`, `failed`, or
+`failed-at-runtime`), bounded `reason`, and a facts object. A successful row must establish its
+named feature. Seeds trust the maintainer's measured version/platform, rather than proving the
+installed executable's provenance. Runtime failures target the original launch identity and
+invalidate the dependent bundle, including over a seed. Explicit refresh is required to retry a
+failed result.
+
+The complete receipt and probe response are bounded to 64 KiB. Cache reads and writes use the
+selected store's ownership guard. A per-identity/revision file lock serializes the probe bundle;
+receipts publish by atomic replacement after flushing. Directory-relative descriptors and
+no-follow opens reject symlink cache directories, locks and receipt files. Inspection opens only
+existing ownership infrastructure, never initializes or promotes the store, and never runs a
+provider probe. Private cache files remain subject to the existing cooperative same-user state
+boundary; they are not authenticated against a malicious same-user writer.
+
+
+### Task outputs and inherited child specifications
+
+Permission previews add optional `task_outputs` guidance with deterministic report and
+plan paths, the engine writer identity, and `agent_writable: false`. Final drained task
+summaries are published under `<state root>/outputs/<task_id>/report-<task_id>.md`;
+workflow JSON `result.technical_plan` is also published as `plan-<task_id>.md`.
+Existing artifact references expose these paths with additive private provenance
+`method: engine_output`. Publication grants no agent filesystem permission and does not
+certify content validity. Output files are retained and pruned with their task.
+Existing readers accept the new registrar string and optional fields; canonical fixtures
+and independent Mac wire-version gates are unchanged.
+
+Private workflow invocation and child-run records may carry `inherited_context`, a
+versioned SHA-256-bound snapshot of the parent request, selected predecessor inputs and
+technical-plan revision at invocation preparation. The snapshot is reused after restart,
+validated on read, and delivered independently of child graph traversal. Large snapshots
+use complete digest-bound private temporary files rather than truncated prose. A short-line
+JSONL string-chunk companion supports ordinary paged Read tools in plan mode, with complete
+reconstruction bound to the original file digest. These
+fields are private storage additions; no public event kind or wire requirement changes.

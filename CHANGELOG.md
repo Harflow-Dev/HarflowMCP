@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Publish task-identifiable review reports and workflow plans without widening read-only permissions; allow ordinary project `.claude/plans` files through caller approval protection while retaining configuration and symlink protections (#62, #73).
+- Support exact, publish-level Git branch-preparation command grants, including fast-forward-only pulls, with explicit configuration required on existing workflow nodes (#63).
+- Pin complete parent specifications into linked child runs and deliver them to later workers with revision digests and a lossless file fallback (#72).
+- Add binary-bound feature qualification receipts, isolated automatic permission probes for Claude and Codex, explicit `harflow-ctl qualify`, and runtime failure invalidation (#79). Unsupported probe platforms and unimplemented feature adapters refuse safely.
+
 - Clear resolved workflow attention and input presentation when execution resumes (#64). Report unreadable approval sources with bounded task-specific diagnostics, preserving readable approvals without falsely requesting caller attention (#67).
 
 - Expose all pending descendant workflow questions and attention checkpoints, accept independent answers through the root, confirm durable child delivery, and give re-asked questions fresh identities (#70, #71, #74). Preserve complete caller questions and structured clarification items in status and wait replies (#66).

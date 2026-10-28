@@ -2996,7 +2996,7 @@ class WorkflowSupervisor:
                 baseline = self.context_baselines.pop(session_owner, None)
                 from .workflow_prompt_delivery import orchestrator_input_manifests, project_orchestrator_context
                 manifests = orchestrator_input_manifests(run, decision_context)
-                rendered = render_decision_context(project_orchestrator_context(run, decision_context), session_owner=session_owner, scope=run["workflow_run_id"], baseline=baseline if use_resume else None, force_bootstrap=strict_child_resume or classification in {"protocol_repair", "fallback"}, classification=classification, evidence_manifests=manifests)
+                rendered = render_decision_context(project_orchestrator_context(run, decision_context, root=self.store.root), session_owner=session_owner, scope=run["workflow_run_id"], baseline=baseline if use_resume else None, force_bootstrap=strict_child_resume or classification in {"protocol_repair", "fallback"}, classification=classification, evidence_manifests=manifests)
                 dispatch_prompt, receipt, accounting = rendered.prompt, rendered.receipt, rendered.accounting
                 receipt["owner_prefix"] = owner_prefix
             elif optimized(run) and role == "node":

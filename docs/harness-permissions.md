@@ -149,7 +149,7 @@ specificity. Compound commands still need approval for their individual operatio
 
 Prefer `allowed_commands` over `unrestricted` when a task only needs to run specific commands, such as a test
 runner or build, that `write_in_repo` would otherwise refuse with "This command requires approval". It is a bounded
-list of Bash command patterns for one run, supported on Claude Code 2.1.310 (see `capabilities.allowed_commands` in
+list of Bash command patterns for one run, supported on Claude Code 2.1.310 and 2.1.312 (see `capabilities.allowed_commands` in
 `list_backends`) at `write_in_repo` and `publish` only. Every other backend and access level refuses the field.
 
 ```sh
@@ -184,7 +184,7 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
   accept only exact patterns, and every operand, bare names included, must resolve inside the repository.
 - Refused programs: shells and evaluators (`bash sh env eval command`), `sudo ssh rsync`, wrappers (`nohup nice
   timeout time xargs arch caffeinate`), code evaluators (`awk sed perl ruby java swift osascript`), system tools
-  (`kill launchctl defaults`), `docker podman kubectl nix`, and `git` at every access level.
+  (`kill launchctl defaults`), and `docker podman kubectl nix`.
 - Interpreters (`python`, `python3`, `pythonX.Y`, `node`, `deno`, `bun`) are accepted only as `python3 -m <module>`
   or `<interpreter> <script with a script extension>`; `-c`, `-e` and similar forms are refused.
 - Package launchers (`npx uvx bunx pnpx`, `npm exec`, `pnpm exec`, `yarn exec`, `uv run`, `poetry run`, `mise exec` and
@@ -193,8 +193,14 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
 - `find` is refused with a wildcard or with `-exec`, `-delete` and similar actions.
 - `gh` is refused below `publish`, where it is limited to `workflow run|view`, `run view|watch|list` and
   `pr create|view|list|checks|status`. This deviates from allowing `gh workflow run *` at `write_in_repo`.
-- `git` is refused everywhere: `publish` already allows `git commit` and `git push`, read-only git needs no grant on
-  2.1.310, and aliases make a subcommand list incomplete.
+- Git grants are supported only at `publish`, as exact commands: `git fetch <remote> [branch]`,
+  `git pull --ff-only <remote> <branch>`, `git switch <branch>`, `git switch -c <branch> [start]`, or
+  `git checkout -b <branch> [start]`. Each may have one `-C <directory>` before the subcommand; the directory
+  must resolve inside the dispatch repository. Remote, branch and start names use letters, digits, `_`, `-` and
+  `/`, start with a letter or digit, and have no empty, `.` or `..` path components. No wildcard, URL, refspec,
+  revision expression, additional option, launcher, config override, reset or force form is accepted.
+  Other Git grant patterns remain refused. `publish` still independently allows commit and push; these grants
+  do not make it a Git sandbox. Repository configuration, hooks, remote helpers and credentials remain effective.
 
 **What it is not.** The grammar is a guard against caller mistakes and obvious escalation, not a security boundary.
 A grant is a prefix approval in Claude's permission layer, not OS enforcement; a granted program can run code from the
@@ -207,14 +213,34 @@ writes the grant and the nested rule below; the access level's deny patterns ref
 caller holds, unless the caller is `unrestricted`. Omitting grants does not inherit them, and an undecidable caller
 refuses the dispatch. Resume and continuation inheritance is subject to the same check.
 
-**Version gating.** The installed Claude Code is re-qualified against the measured table before every launch, resume
-and continuation. A run that carries grants is stopped, with a bridge notice naming both versions, when its init event
+**Qualification.** Optional permission features require a receipt for the installed backend, version,
+resolved binary SHA-256, platform and probe revision. Known measurements remain trusted version/platform seeds;
+a seed does not verify binary provenance. A version/platform without a seed runs only the required feature's bounded no-paid
+probe. A shared probe bundle is serialized across concurrent launches and its outcomes persist in the selected
+Harflow state root. An unavailable isolation mechanism, timeout, malformed result or failed behavior check
+refuses the feature with its reason; ordinary runs that request no gated feature do not wait for these probes.
+An explicit refresh reruns behavior checks, including for a seeded version. Runtime protocol failures invalidate
+the affected bundle's receipt for that launch identity. Cache failures are never interpreted as permission.
+A run that carries grants is stopped, with a bridge notice naming both versions, when its init event
 reports a different version or none, or a tool event arrives before init.
 
 **Workflows.** Saved agent candidates (primary, fallbacks, on-demand nodes) carry their own `allowed_commands`; see
 [workflows](workflows.md#candidate-command-grants). They are validated at save and launch for each candidate's backend
 and freedom, an agent caller cannot save or start grants beyond its own, and a fallback never inherits the primary's.
 `start_workflow` itself takes no `allowed_commands`.
+
+**Prepare Branches migration (per run).** A saved workflow with `publish`, network enabled and
+`caller_approvals=false` does not automatically allow fetch or pull. Inspect and explicitly update the saved
+Prepare Branches candidate's `allowed_commands`, including every fallback that needs these operations. For
+example, when the node dispatches from the workspace containing `app`, use exact patterns such as
+`git -C app fetch origin develop`, `git -C app pull --ff-only origin develop`, and
+`git -C app switch -c feature/63 develop`. Substitute the actual contained repository and agreed branch;
+repeat for each repository. Dynamic targets and feature names must be selected before saving these exact
+grants for each run; this list is not a reusable wildcard permission for arbitrary future assignments. Preview the same backend, freedom, repository and list using
+`preview_task_permissions` or `harflow-ctl permission-preview` before starting a new workflow run.
+The engine does not rewrite saved user workflows or retry a blocked node with a grant. Existing runs retain
+their saved permissions; changing a workflow is a separately authorized save and a new execution. No
+tracked workflow template is required for this candidate-owned grant.
 
 **Disclosure.** `enforcement.extra_allowed_commands` lists the patterns, with caveats; the booleans are unchanged
 (`direct_commit_commands_denied` stays true at `write_in_repo`). Task snapshots and `harflow-ctl status` also carry
@@ -442,8 +468,7 @@ foreground-owned permission requests. Other backends, native children, explicit 
 read-only and unrestricted launches reject the opt-in before spawning. The capability catalog
 reports `supports_caller_approvals` and `caller_approval_support` (`versions` as a list, `tools_by_version`
 and `path_safety_prompt_versions`); the installed version is qualified again at every launch, resume
-and continuation, and a persisted version is never trusted for authority. The Claude qualification
-table (`backends/claude_qualification.py`) is the single source:
+and continuation, and a persisted version is never trusted for authority. The shared qualification cache is authoritative for each installed binary; the Claude table (`backends/claude_qualification.py`) supplies trusted historical seeds:
 
 | Claude Code | Caller-approvable tools |
 | --- | --- |
@@ -455,7 +480,7 @@ version other than the one qualified before launch, or a permission request arri
 was reported, the run is stopped, pending approvals are invalidated and a bridge notice names both
 versions.
 
-**Opt-ins.** `caller_approvals` covers Bash and, on 2.1.310, Read. Approving a Read can disclose files
+**Opt-ins.** `caller_approvals` covers the tools in the qualified receipt, including Bash and Read on the recent measured versions. Approving a Read can disclose files
 outside the repository. `caller_write_approvals` (strict boolean, default `false`, requires
 `caller_approvals`, available on `start_task`, `preview_task_permissions`, `harflow-ctl run` and
 `permission-preview` as `--caller-write-approvals`, and as a saved workflow candidate field) additionally
@@ -490,7 +515,7 @@ still valid is kept as a bounded audit row (ids, tool, `file_path` under 4 KiB, 
 the original action, no content). A full or invalid ledger keeps the stop-the-run behavior.
 
 **Protected paths.** Write and Edit approvals are refused (`protected_path`) for the Harflow state root,
-repository and user Claude settings and policy (the whole `<repo>/.claude/` directory, including hooks,
+repository and user Claude settings and policy (the `<repo>/.claude/` directory except ordinary, non-symlink descendants of its `plans/` directory, including hooks,
 agents, commands and settings, `CLAUDE_CONFIG_DIR` or `~/.claude`, managed settings, `~/.claude.json`, `.mcp.json`) and the effective Git
 hooks and `config` locations (`git rev-parse --git-path hooks`, the common directory and the worktree
 gitdir) plus the `hooks/`, `config` and `config.worktree` of every Git directory above the target: one named `.git`, or holding `HEAD` with `objects/` and `refs/` or a `commondir` (bare repositories, submodule and linked-worktree gitdirs). Read is refused only for the state
@@ -498,6 +523,13 @@ root. Targets are resolved through symlinks (or their nearest existing parent) a
 case-insensitively; if the Git locations cannot be resolved, Write and Edit are refused. These checks are re-resolved at every Write and Edit admission (nothing is cached on the task, so a mid-run
 `core.hooksPath` change is honored, and a resolution failure refuses). A Bash approval is checked only as the exact
 command shown to the caller. The 64 KiB request limit covers the whole control-request JSON.
+
+Project plan files are excluded only from Harflow's configuration protection; the harness still decides
+whether an action needs approval. Symlinks from the plan directory, and aliases into protected
+configuration, are refused. A protected-path refusal names the rule and recommends writable task
+scratch or the backend built-in plan location. Final reports and `result.technical_plan` are also
+published by the engine as task-named artifacts without granting agent writes; see
+[task output guidance](shared-scratch.md#task-named-plans-and-review-reports).
 
 **Delivery-time path re-check.** Admission records, per row, a private `path_snapshot` (each path as the backend named it and as resolved through symlinks; it is not
 exposed by `get_approval_request` or `list_approval_requests`). Immediately before the pump writes an approve for an action that names paths (Read, Write, Edit, Codex file changes), it
@@ -692,3 +724,44 @@ rejected. Built-in artifact provenance is an observation of the tool result, not
 or exclusive authorship. Unreported tools, subagent-only writes, disappeared files, replaced config
 and failed bookkeeping can leave tracking incomplete; a notice reports observation failures. The
 permission caveat still applies when artifact capture is unavailable.
+
+
+## Automatic feature qualification
+
+Claude and Codex declare permission features through the shared qualification seam. New
+versions run bounded no-paid behavior probes when a launch or permission preview first
+needs a feature. Probes use fresh vendor configuration and fake credentials, a local
+synthetic provider, and an OS sandbox allowing only that provider's exact loopback port
+and writes within the disposable probe directory. Missing OS isolation, timeouts, malformed
+protocols, absent approval requests, or ignored denials refuse the feature with a specific
+reason. Automatic probes currently support macOS; other platforms fail closed for unseen
+versions. Ordinary launches without gated features do not run these probes.
+
+Receipts live in the selected state root's `qualification` directory and bind backend,
+installed version, resolved executable SHA-256, platform and probe revision. One lock
+serializes each probe bundle; concurrent launches reuse its result. Feature results report
+`seeded`, `auto-probed`, `failed`, or `failed-at-runtime`. Historical version/platform seeds
+are trusted maintainer measurements, not verification of binary provenance; explicit refresh
+always probes the current binary. Version deny lists take precedence. Corrupt or incompatible
+cache data refuses qualification rather than being silently trusted.
+
+`list_backends`, `harflow-ctl backends --json`, and permission previews expose per-feature
+qualification, reasons and the rerun command. Discovery inspects identity and cached results
+without running provider probes or initializing a state store. Refresh explicitly:
+
+```sh
+harflow-ctl qualify claude --json
+harflow-ctl qualify codex --feature caller_approval_tools --json
+```
+
+The command reports progress on stderr and exits nonzero for a failed requested feature.
+Vibe, opencode and Antigravity expose version-bound unsupported permission-feature results;
+this framework does not invent an approval transport or command-grant implementation for
+them. Future backends must declare their features and probes through the same seam.
+
+Runtime protocol/version failures stop the task and invalidate the captured launch binary's
+qualification bundle. A requested action reporting success before an approval was sent also
+stops the task. These checks cannot undo an action already executed or infer whether every
+auto-allowed harness action should have requested approval; automatic preflight tests and
+runtime guards are complementary. HarflowMac presentation of qualification progress is a
+separate integration; no new Mac UI or required public wire capability is introduced here.

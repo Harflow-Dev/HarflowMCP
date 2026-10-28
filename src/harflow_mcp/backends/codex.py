@@ -281,6 +281,14 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class CodexBackend(ExtraPathsUnsupported):
+    def qualification_features(self):
+        from .codex_qualification import feature_specs
+        return feature_specs()
+
+    def qualification_version(self, observed):
+        from .codex_qualification import parse_version
+        return parse_version(observed)
+
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability

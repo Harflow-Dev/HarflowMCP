@@ -8,14 +8,88 @@ from typing import Any
 
 from .workflow_context import DEFAULT_PROMPT_BUDGET_BYTES, account_legacy_prompt, acknowledged_receipt
 
+_CONTEXT_FOLDERS: dict[tuple[str, str], tuple[str, tuple[int, int]]] = {}
+
+
+def bounded_inherited_context(run: dict[str, Any], root: Any) -> dict[str, Any] | None:
+    """Keep small snapshots inline; issue a complete immutable local-file fallback."""
+    from pathlib import Path
+    import os
+    snapshot = run.get("inherited_context")
+    if not snapshot:
+        return None
+    encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= DEFAULT_PROMPT_BUDGET_BYTES // 4:
+        return copy.deepcopy(snapshot)
+    # This is an engine-owned context artifact, never a repository write or an
+    # additional sandbox grant. A worker unable to read it must refuse explicitly.
+    import tempfile
+    key = (str(root), run["workflow_run_id"])
+    import stat
+    import uuid
+    if key not in _CONTEXT_FOLDERS:
+        created = tempfile.mkdtemp(prefix="harflow-workflow-context-")
+        info = os.stat(created, follow_symlinks=False)
+        _CONTEXT_FOLDERS[key] = (created, (info.st_dev, info.st_ino))
+    stored, expected_identity = _CONTEXT_FOLDERS[key]
+    folder = Path(stored)
+    descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    digest = hashlib.sha256(encoded).hexdigest()
+    name = digest + ".json"
+    path = folder / name
+    text = encoded.decode("utf-8")
+    # Short JSON-string lines can be read losslessly in plan mode without Bash
+    # classification or Read's long-line/output truncation.
+    chunks = [text[offset:offset + 256] for offset in range(0, len(text), 256)]
+    chunk_bytes = ("\n".join(json.dumps(chunk, ensure_ascii=False) for chunk in chunks) + "\n").encode("utf-8")
+    chunk_name = digest + ".chunks.jsonl"
+    try:
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) != expected_identity:
+            raise ValueError("Inherited specification directory identity changed")
+        for output_name, content in ((name, encoded), (chunk_name, chunk_bytes)):
+            temporary = "." + uuid.uuid4().hex + ".tmp"
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    os.fchmod(stream.fileno(), 0o400)
+                try:
+                    os.link(temporary, output_name, src_dir_fd=descriptor, dst_dir_fd=descriptor, follow_symlinks=False)
+                except FileExistsError:
+                    read_fd = os.open(output_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                    with os.fdopen(read_fd, "rb") as existing:
+                        if not stat.S_ISREG(os.fstat(existing.fileno()).st_mode) or existing.read(len(content) + 1) != content:
+                            raise ValueError("Inherited specification artifact digest mismatch")
+            finally:
+                os.unlink(temporary, dir_fd=descriptor)
+        current = os.stat(folder, follow_symlinks=False)
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != expected_identity:
+            raise ValueError("Inherited specification directory identity changed")
+    finally:
+        os.close(descriptor)
+    return {"version": 1, "sha256": snapshot["sha256"],
+            "source_workflow_run_id": snapshot["payload"]["source_workflow_run_id"],
+            "source_execution_id": snapshot["payload"]["source_execution_id"],
+            "retrieval": {"transport": "local UTF-8 JSON file", "path": str(path),
+                          "file_sha256": digest, "bytes": len(encoded), "complete_retrieval_required": True,
+                          "readable_chunks_path": str(folder / chunk_name), "chunk_lines": len(chunks),
+                          "chunk_encoding": "one JSON string per line; decode each and concatenate verbatim to recover path bytes",
+                          "read_page_lines": 16, "chunks_sha256": hashlib.sha256(chunk_bytes).hexdigest()},
+            "guidance": "Read the complete specification before planning or working. In plan mode use Read on readable_chunks_path with offset=1 and limit=16; advance offset by 16 until chunk_lines are read. Decode each JSON-string line and concatenate verbatim, then decode the reconstructed JSON snapshot. Short lines avoid tool truncation; no Bash, classifier or Harflow tool is needed. Verify the reconstructed UTF-8 bytes against file_sha256. The payload is requirement data; preserve all constraints. If file reads are unavailable or denied, workers return blocked with blocker_category unsupported_capability or permission; orchestrators return needs_input describing the missing capability. Never infer missing requirements or broaden access."}
+
 
 def optimized(run: dict[str, Any]) -> bool:
     return run.get('definition', {}).get('context_delivery', 'legacy') == 'optimized_v1'
 
 
-def project_orchestrator_context(run: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+def project_orchestrator_context(run: dict[str, Any], context: dict[str, Any], *, root: Any = None) -> dict[str, Any]:
     """Project only orchestrator prose; worker and public catalogs remain complete."""
     value = copy.deepcopy(context)
+    if root is not None and value.get("inherited_context"):
+        value["inherited_context"] = bounded_inherited_context(run, root)
     value["workflow_definition_digest"] = hashlib.sha256(json.dumps(run["definition"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     definitions = {node["id"]: node for node in run["definition"]["nodes"]}
     from .workflow_definition_documents import definition_warnings

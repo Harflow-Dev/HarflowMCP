@@ -33,7 +33,7 @@ _REFUSED_GROUPS = {
     "container, remote and flake launchers are not supported": "docker podman kubectl nix",
 }
 REFUSED_PROGRAMS = {name: reason for reason, names in _REFUSED_GROUPS.items() for name in names.split()}
-_GIT_REASON = "git is refused at every access level: publish already allows git commit and git push, read-only git needs no grant, and aliases make a subcommand list incomplete"
+_GIT_REASON = "git is refused outside the dedicated exact publish preparation grammar; aliases, arbitrary subcommands and non-publish grants are unsupported"
 
 # Exact-only: no wildcard, and every operand (bare names included) must resolve inside the repository.
 _PATH_SENSITIVE = frozenset("cp mv tee install touch mkdir truncate dd diskutil chmod chown chflags rm rmdir shred unlink ln".split())
@@ -71,11 +71,12 @@ GRAMMAR = {
     "freedoms": list(FREEDOMS),
     "characters": "[A-Za-z0-9 _./:=@%+-] and a single *",
     "wildcard": "`*` only as a separate final token (`cmd sub *`) or as the `:*` suffix (`cmd sub:*`); a wildcard needs a literal non-option token after the program",
-    "program": "a lowercase bare name; shells, wrappers, evaluators, system tools, git, docker, podman, kubectl and nix are refused",
+    "program": "a lowercase bare name; shells, wrappers, evaluators, system tools, docker, podman, kubectl and nix are refused",
     "paths": "tokens containing / must be plain relative paths or absolute paths that resolve inside the repository, optionally as --option=path",
     "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
     "launchers": f"the launched command is validated recursively, at most {MAX_LAUNCHER_DEPTH} deep",
     "gh": "publish only, for a fixed list of subcommand pairs",
+    "git": "publish only; exact fetch, ff-only pull and non-force branch preparation, optionally with one contained -C path",
 }
 
 
@@ -171,6 +172,11 @@ def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenie
     program = literal[0]
     if not _PROGRAM.fullmatch(program):
         raise _Refusal(f"the program {program!r} must be a lowercase bare name without a path, quotes or environment assignment")
+    if program == "git":
+        if depth:
+            raise _Refusal("git is refused in launchers")
+        _git(literal, wildcard, freedom, root)
+        return
     prefix = _launcher(literal, root)
     if prefix:
         if depth >= MAX_LAUNCHER_DEPTH:
@@ -230,6 +236,36 @@ def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenie
                 _check_path(token[2:], root)
             elif token.startswith("--") and "=" in token:
                 _check_path(token.partition("=")[2], root)
+
+
+def _git(tokens: list[str], wildcard: bool, freedom: str, root: str | None) -> None:
+    """Closed exact-command route; never grant an extensible Git prefix."""
+    if freedom != "publish":
+        raise _Refusal(_GIT_REASON)
+    if wildcard:
+        raise _Refusal("git is refused with wildcards; grants accept only exact commands")
+    args = tokens[1:]
+    if args[:1] == ["-C"]:
+        if len(args) < 3:
+            raise _Refusal("git -C needs one contained directory and a subcommand")
+        _check_path(args[1], root)
+        args = args[2:]
+    # Literal names only: no URLs, refspecs, revision expressions, options or Git special refs.
+    def name(value: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_/-]*", value)) and not any(
+            part in ("", ".", "..") for part in value.split("/"))
+    accepted = False
+    if args and args[0] == "fetch":
+        accepted = len(args) in (2, 3) and all(name(v) for v in args[1:])
+    elif args[:2] == ["pull", "--ff-only"]:
+        accepted = len(args) == 4 and all(name(v) for v in args[2:])
+    elif args and args[0] == "switch":
+        accepted = (len(args) == 2 and name(args[1])) or (
+            len(args) in (3, 4) and args[1] == "-c" and all(name(v) for v in args[2:]))
+    elif args[:2] == ["checkout", "-b"]:
+        accepted = len(args) in (3, 4) and all(name(v) for v in args[2:])
+    if not accepted:
+        raise _Refusal("git is refused except exact fetch <remote> [branch], pull --ff-only <remote> <branch>, switch <branch>, switch -c <branch> [start], or checkout -b <branch> [start], optionally after one -C <contained path>")
 
 
 def _interpreter(program: str, rest: list[str]) -> None:

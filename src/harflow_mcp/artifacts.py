@@ -497,7 +497,8 @@ def _task_lock(log_dir, task_id):
 
 
 def _valid_provenance(value, task_id):
-    if value == {'method': 'verified_process_lineage', 'task_id': task_id}:
+    if value in ({'method': 'verified_process_lineage', 'task_id': task_id},
+                  {'method': 'engine_output', 'task_id': task_id}):
         return True
     legacy = {'method', 'task_id', 'tool_use_id'}
     if (not isinstance(value, dict) or value.get('method') != 'observed_backend_plan' or
@@ -563,6 +564,64 @@ def record_backend_plan(log_dir: Path, task_id: str, reference: dict) -> dict:
             raise ValueError('Task artifact limit reached')
         item = {'artifact_id': str(uuid.uuid4()), 'task_id': task_id, 'path': str(target),
                 'kind': 'report', 'note': 'Built-in plan file observed after successful tool result',
+                'registered_at': _now(), 'provenance': provenance, 'registered_observation': observed}
+        if binding is not None:
+            item['workflow'] = binding
+        raw = json.dumps({'product': PRODUCT, 'format': 'harflow.task.artifacts', 'v': 1,
+                          'product_version': PRODUCT_VERSION, 'task_id': task_id,
+                          'items': items + [item]}, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if len(raw) > MAX_BYTES:
+            raise ValueError('Task artifact manifest limit reached')
+        name = f'{task_id}.artifacts-{uuid.uuid4().hex}.tmp'
+        with catalog_lock(log_dir, layout=task_layout(log_dir)):
+            fd = open_descriptor(log_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=storage_fd, layout=task_layout(log_dir))
+            try:
+                with os.fdopen(fd, 'wb', closefd=False) as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(name, _path(log_dir, task_id).name, src_dir_fd=storage_fd, dst_dir_fd=storage_fd)
+                os.fsync(storage_fd)
+            finally:
+                fd.close()
+                try:
+                    os.unlink(name, dir_fd=storage_fd)
+                except FileNotFoundError:
+                    pass
+        return item
+
+
+def _engine_output_target(log_dir, record, path):
+    from .scratch import output_directory
+    target = Path(path)
+    expected = output_directory(log_dir, record.task_id)
+    if (target.parent != expected or target.name not in {f'report-{record.task_id}.md', f'plan-{record.task_id}.md'}
+            or any(p.is_symlink() for p in (target, *target.parents))):
+        raise ValueError('Unsafe engine output path')
+    return target, _observation(_regular_stat(target))
+
+
+@metadata_request()
+@task_operation
+def record_engine_output(log_dir: Path, task_id: str, path: Path) -> dict:
+    """Register only the engine's fixed, task-owned output names; grants no agent writes."""
+    store.validate_task_id(task_id)
+    with _task_lock(log_dir, task_id) as storage_fd:
+        record = _read_owner(log_dir, task_id)
+        if record is None:
+            raise ValueError('Engine output requires a task record')
+        binding = _authority(log_dir, record, registering=False)
+        target, observed = _engine_output_target(log_dir, record, path)
+        provenance = {'method': 'engine_output', 'task_id': task_id}
+        items, _ = _load(log_dir, task_id, storage_fd)
+        for item in items:
+            if item['path'] == str(target) and item['registered_observation'] == observed:
+                return item
+        if len(items) >= 100:
+            raise ValueError('Task artifact limit reached')
+        item = {'artifact_id': str(uuid.uuid4()), 'task_id': task_id, 'path': str(target),
+                'kind': 'report', 'note': 'Final task output materialized by Harflow; no agent write grant',
                 'registered_at': _now(), 'provenance': provenance, 'registered_observation': observed}
         if binding is not None:
             item['workflow'] = binding
@@ -678,6 +737,8 @@ def _availability(log_dir, record, item):
             try:
                 _, observed = (_backend_plan_target(record, str(path), item['provenance'])
                                if item['provenance'].get('method') == 'observed_backend_plan'
+                               else _engine_output_target(log_dir, record, path)
+                               if item['provenance'].get('method') == 'engine_output'
                                else _target(log_dir, record, str(path)))
                 if os.access(path, os.R_OK):
                     state = 'available' if observed == item['registered_observation'] else 'changed'

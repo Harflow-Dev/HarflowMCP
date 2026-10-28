@@ -154,3 +154,49 @@ def test_git_commit_is_denied_at_write_in_repo_even_when_a_pattern_covers_it(tmp
 def test_wildcard_forms_match_with_and_without_arguments_and_respect_the_word_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str, command: str, refused: bool) -> None:
     result, _texts = direct(tmp_path, monkeypatch, command, f"Bash({pattern})")
     assert bool(result["permission_denials"]) is refused, result["permission_denials"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command,denied,grants_enabled", [
+    ("git -C . fetch origin develop", False, True),
+    ("git -C . pull --ff-only origin develop", False, True),
+    ("git -C . switch -c feature/prep", False, True),
+    ("git -C . reset --hard", True, True),
+    ("git -C . pull --ff-only origin develop --force", True, True),
+    pytest.param("git -C . switch -c feature/prep develop", True, False, id="no-grants-create"),
+    pytest.param("git -C . switch develop", True, False, id="no-grants-switch"),
+    pytest.param("git -C . fetch origin develop", True, False, id="no-grants-fetch"),
+    pytest.param("git -C . pull --ff-only origin develop", True, False, id="no-grants-pull"),
+])
+async def test_git_preparation_grants_real_cli(tmp_path, monkeypatch, command, denied, grants_enabled):
+    require_claude("allowed_commands", monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # A local remote proves fetch/pull execution without any paid API or external Git writes.
+    def git(*args):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=repo,
+                              check=True, capture_output=True, text=True)
+    git("init", "-b", "develop")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "seed")
+    git("clone", "--bare", str(repo), str(tmp_path / "remote.git"))
+    git("remote", "add", "origin", str(tmp_path / "remote.git"))
+    grants = ["git -C . fetch origin develop", "git -C . pull --ff-only origin develop", "git -C . switch -c feature/prep"] if grants_enabled else []
+    with fake_anthropic_api(steps=bash(command)) as (url, requests):
+        isolate(monkeypatch, tmp_path, url)
+        registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
+        preview = await registry.preview_permissions(repo, backend=get("claude"), freedom="publish", allowed_commands=grants)
+        assert preview["enforcement"].get("extra_allowed_commands", []) == grants
+        task = await registry.start("run scripted Git preparation", repo, backend=get("claude"), freedom="publish", allowed_commands=grants)
+        try:
+            await asyncio.wait_for(task.done.wait(), timeout=90)
+        finally:
+            if not task.done.is_set():
+                await registry.cancel(task.task_id)
+        snapshot = task.snapshot()
+    assert requests
+    assert (denial_for(snapshot) is not None) == denied, snapshot
+    if not denied:
+        if "switch" in command:
+            assert git("branch", "--show-current").stdout.strip() == "feature/prep"
+        else:
+            assert (repo / ".git" / "FETCH_HEAD").is_file()

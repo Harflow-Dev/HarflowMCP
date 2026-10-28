@@ -16,6 +16,7 @@ from .state_ownership import StateOwnershipError, owned_job
 import asyncio
 import copy
 import json
+import hashlib
 import os
 import time
 import uuid
@@ -383,7 +384,8 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
             "depth": invocation_depth(parent_run) + 1,
         },
         "interaction_owner": parent_run.get("interaction_owner", "caller"),
-        "invocation_inputs": invocation.get("inputs", []),
+        "invocation_inputs": copy.deepcopy(invocation.get("inputs", [])),
+        "inherited_context": copy.deepcopy(invocation.get("inherited_context") or inherited_context(parent_run, activation, invocation)),
         # Selected references stay out of the indexed inputs, which seed the child's Start token.
         **({"invocation_artifact_refs": copy.deepcopy(invocation["artifact_refs"])} if invocation.get("artifact_refs") else {}),
     }
@@ -422,6 +424,22 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         if mode == "child" and selection.get("selected_mode") == "resume":
             child["inherited_orchestrator_binding"] = copy.deepcopy(selection)
     return child
+
+
+def inherited_context(parent_run: dict[str, Any], activation: dict[str, Any], invocation: dict[str, Any]) -> dict[str, Any]:
+    """Freeze complete parent context once, independently of traversal references."""
+    payload = {
+        "source_workflow_run_id": parent_run["workflow_run_id"],
+        "source_execution_id": activation["id"],
+        "source_sequence": parent_run.get("sequence", 0),
+        "original_request": parent_run.get("prompt", ""),
+        "technical_plan": parent_run.get("technical_plan", ""),
+        "technical_plan_execution_id": parent_run.get("technical_plan_execution_id"),
+        "inputs": copy.deepcopy(invocation.get("inputs", [])),
+        "ancestors": copy.deepcopy(parent_run.get("inherited_context")),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"version": 1, "sha256": hashlib.sha256(encoded).hexdigest(), "payload": payload}
 
 
 def invocation_inputs(parent_run: dict[str, Any], token: dict[str, Any], *, root: Any = None) -> list[dict[str, Any]]:
@@ -899,7 +917,10 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
             supervisor.attention(str(exc))
             return
         invocation["child_session_selection"] = selection
-        invocation["inputs"] = invocation_inputs(run, token, root=store.root)
+        if "inputs" not in invocation:
+            invocation["inputs"] = invocation_inputs(run, token, root=store.root)
+        if "inherited_context" not in invocation:
+            invocation["inherited_context"] = inherited_context(run, activation, invocation)
         invocation["assignment"] = token.get("assignment_prompt", "")
         if token.get("authorized_artifact_refs"):
             invocation["artifact_refs"] = copy.deepcopy(token["authorized_artifact_refs"])

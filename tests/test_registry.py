@@ -828,6 +828,12 @@ class _TrivialBackend:
     binary = "/bin/echo"
     capabilities = SimpleNamespace(chooses_session_id=False, supports_live_input=False)
 
+    def qualification_features(self):
+        return {}
+
+    def qualification_version(self, observed):
+        return "test-double"
+
     def build_start_argv(self, prompt, **kwargs):
         return Invocation([self.binary, "{}"])
 

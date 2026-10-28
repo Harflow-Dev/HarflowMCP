@@ -19,8 +19,7 @@ died without leaving a task record; `run`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
-`list_backends` — including bounded extra-path support) — no
-`--version` probe, no subprocess. Every command prints one Harflow ctl v1 JSON document
+`list_backends` — including bounded extra-path support) — plus cached binary-bound feature qualification. Discovery may inspect the installed version and binary hash but never starts provider self-tests. Every command prints one Harflow ctl v1 JSON document
 with `--json`; command payloads retain their existing fields. The separate version-info command
 reports compatibility without importing the task runtime through the installed lazy entrypoint.
 """
@@ -145,6 +144,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "backends", help="list the registered backends, PATH presence and declared capabilities"
     )
     backends_p.add_argument("--json", action="store_true")
+
+    qualify_p = sub.add_parser("qualify", help="run isolated, no-paid backend feature self-tests and refresh cached results")
+    qualify_p.add_argument("backend", choices=sorted(backends.BACKENDS))
+    qualify_p.add_argument("--feature", help="test only one declared feature (default: all)")
+    qualify_p.add_argument("--json", action="store_true")
 
     status_p = sub.add_parser("status", help="show one task's full state")
     status_p.add_argument("task_id")
@@ -621,6 +625,7 @@ def _cmd_backends(args: argparse.Namespace) -> int:
             "binary": backend.binary,
             "installed": backends.is_installed(backend),
             "capabilities": backends.capability_metadata(backend),
+            "qualification": backends.qualification_metadata(backend),
         }
         for backend in backends.BACKENDS.values()
     ]
@@ -631,6 +636,37 @@ def _cmd_backends(args: argparse.Namespace) -> int:
             state = "installed" if entry["installed"] else "not found on PATH"
             print(f"{entry['backend']}  {state}")
     return 0
+
+
+def _cmd_qualify(args: argparse.Namespace) -> int:
+    from .backends import qualification
+    from .backends.base import UnsupportedCapability
+    backend = backends.get(args.backend)
+    specs = backend.qualification_features()
+    if args.feature is not None and args.feature not in specs:
+        return _fail(args, "invalid_params", "Unknown qualification feature: " + args.feature)
+    results = {}
+    refreshed = set()
+    failed = False
+    for feature in ([args.feature] if args.feature else specs):
+        spec = specs[feature]
+        try:
+            print(f"Qualifying {backend.name}: {feature}…", file=sys.stderr)
+            # One probe may qualify an entire revision bundle. Do not repeat it
+            # for sibling features after the first refresh.
+            row = qualification.require(backend, feature, refresh=spec.revision not in refreshed)
+            refreshed.add(spec.revision)
+            results[feature] = row.as_dict()
+        except UnsupportedCapability as exc:
+            failed = True
+            refreshed.add(spec.revision)
+            try:
+                results[feature] = qualification.inspect(backend).get(feature, {"ok": False, "reason": str(exc)})
+            except (UnsupportedCapability, OSError, ValueError):
+                results[feature] = {"ok": False, "reason": str(exc)}
+    result = {"backend": backend.name, "features": results, "ok": not failed}
+    print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
+    return 1 if failed else 0
 
 
 class _StatusReadRefused(Exception):
@@ -1480,7 +1516,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 
-    mutation_commands = {"run", "resume", "continue", "send", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact"}
+    mutation_commands = {"run", "resume", "continue", "send", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact", "qualify"}
     from .workflow_reads import READ_ONLY_CLI_COMMANDS
     if args.command in mutation_commands or args.command.startswith("workflow-") and args.command not in READ_ONLY_CLI_COMMANDS or args.command == "mcp-allowlist" and (args.allow is not None or args.remove is not None):
         from .caller_policy import require_mutation
@@ -1610,6 +1646,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, 'invalid_params', str(exc))
     if args.command == "backends":
         return _cmd_backends(args)
+    if args.command == "qualify":
+        return _cmd_qualify(args)
     if args.command == "send":
         return _cmd_send(args)
     if args.command == "worktree-list":

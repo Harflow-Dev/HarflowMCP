@@ -1,9 +1,6 @@
-"""The one measured Codex qualification table for caller approvals through `codex app-server`.
+"""Codex seed measurements and shared behavior-qualification adapter.
 
-Only a version listed here, on a listed platform, may run a task with `caller_approvals`; every other
-version refuses at dispatch and again against the version the app-server reports. A row records the
-measured facts the design depends on (docs/backend-cli-facts.md, "Codex app-server"), so a version bump
-must re-measure each of them rather than inherit the row.
+Seeds retain their measured platform scope. Unknown identities require an isolated behavior probe.
 """
 from __future__ import annotations
 
@@ -63,7 +60,10 @@ def parse_user_agent(user_agent: Any) -> str | None:
 
 
 def measured(version: Any) -> dict[str, Any] | None:
-    return MEASURED.get(version) if isinstance(version, str) else None
+    from .qualification import runtime_facts
+    if not isinstance(version, str):
+        return None
+    return runtime_facts("codex", version) or MEASURED.get(version)
 
 
 def supports(version: Any, feature: str) -> bool:
@@ -78,12 +78,17 @@ def platform_supported(version: Any, platform: str | None = None) -> bool:
     return (platform or sys.platform) in (measured(version) or {}).get("platforms", ())
 
 
+def feature_specs():
+    from .qualification import FeatureSpec
+    from .qualification_probes import codex_probe
+    features = ("caller_approval_tools", "caller_write_tools")
+    return {feature: FeatureSpec(feature, "codex-permissions-v1",
+                                seeds={v: dict(row) for v, row in MEASURED.items() if row.get(feature)},
+                                probe=codex_probe, timeout_seconds=180, seed_platforms=("darwin",)) for feature in features}
+
+
 def qualify(backend: Any, platform: str | None = None) -> str:
-    """The exact installed version, which must be measured on this platform; probed before every spawn."""
-    from . import version as probe
-    observed = parse_version(probe(backend))
-    if observed is None or not supports(observed, "caller_approval_tools"):
-        raise UnsupportedCapability(f"caller approvals require a measured Codex version ({', '.join(MEASURED)}); the observed version is not qualified")
-    if not platform_supported(observed, platform):
-        raise UnsupportedCapability(f"caller approvals on Codex {observed} were measured only on {', '.join(MEASURED[observed]['platforms'])}")
-    return observed
+    from .qualification import require
+    if platform is not None and platform != sys.platform:
+        raise UnsupportedCapability("qualification platform differs from the running platform")
+    return require(backend, "caller_approval_tools").identity.version

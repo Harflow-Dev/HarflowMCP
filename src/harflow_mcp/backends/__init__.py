@@ -105,6 +105,20 @@ def capability_metadata(backend: Backend) -> dict[str, Any]:
     return {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support(), "caller_approval_support": backend.caller_approval_support() if backend.capabilities.supports_caller_approvals else {"supported": False}, "allowed_commands": backend.allowed_commands_support()}
 
 
+
+def qualification_metadata(backend: Backend) -> dict[str, Any]:
+    """Inspect binary-bound cached feature results without starting self-tests."""
+    from . import qualification
+    from .base import UnsupportedCapability
+    try:
+        features = qualification.inspect(backend)
+        return {"features": features, "retry_command": f"harflow-ctl qualify {backend.name}",
+                "automatic": "Required features are tested before launch; discovery never runs provider probes."}
+    except (UnsupportedCapability, OSError, ValueError) as exc:
+        return {"features": {}, "unavailable_reason": str(exc),
+                "retry_command": f"harflow-ctl qualify {backend.name}"}
+
+
 def describe(backend: Backend) -> dict[str, Any]:
     """Everything a caller needs to choose a backend deliberately."""
     installed = is_installed(backend)
@@ -113,6 +127,7 @@ def describe(backend: Backend) -> dict[str, Any]:
         "binary": backend.binary,
         "installed": installed,
         "version": version(backend) if installed else None,
+        "qualification": qualification_metadata(backend),
         "capabilities": capability_metadata(backend),
         "freedoms": {
             freedom: backend.enforcement(freedom).as_dict()  # type: ignore[arg-type]

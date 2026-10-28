@@ -46,7 +46,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from typing import Any, Literal, NamedTuple
 
-from . import control, followups, identity, inbox, lineage, retention, shared_scratch, store, system_guidance
+from . import backends, control, followups, identity, inbox, lineage, retention, shared_scratch, store, system_guidance
 from .backends import (
     Accumulator,
     Backend,
@@ -1277,7 +1277,7 @@ class TaskRegistry:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
             if getattr(backend, "with_shared_directories", None) is not None:
                 enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_CHAIN_SCRATCH_ROOT, FUTURE_GROUP_SCRATCH_ROOT))
-        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+        return {"backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
 
     @_with_authority_check_budget
     @layout_operation
@@ -2227,6 +2227,10 @@ class TaskRegistry:
             # `_note_input_written`). Non-live runs owe nothing: no pump ever runs for them.
             results_owed=1 if invocation.live_input else 0,
         )
+        if caller_approvals or allowed_commands:
+            from .backends.qualification import identity_for
+            task.qualification_identity = identity_for(backend, approval_version or command_version)
+
 
         if invocation.control_context is not None:
             # Backend-private settings for the frames its `outgoing_frames` originates.
@@ -5226,7 +5230,6 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                         log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
                 if task.caller_approvals and task.exit_code is not None and task.output_drained:
                     task.approval_view = {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
-                task.done.set()
                 try:
                     if getattr(task, 'native_observation_generation', None):
                         if task.native_observation_failed:
@@ -5247,6 +5250,19 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                         mark(registry.log_dir, task.task_id, launch_generation,
                              continuation_scheduling='pending')
                     registry.persist(task)
+                    if task.output_drained and task.exit_code is not None and task.latest_record_landed:
+                        try:
+                            from .scratch import materialize_outputs
+                            from .artifacts import record_engine_output
+                            paths = await asyncio.to_thread(materialize_outputs, registry.log_dir, task.task_id, task.acc.summary)
+                            for path in paths:
+                                await asyncio.to_thread(record_engine_output, registry.log_dir, task.task_id, path)
+                        except StateOwnershipError:
+                            raise
+                        except Exception:
+                            task.bridge_notices.append("Final task output file unavailable; use the task summary. Existing output files are never overwritten.")
+                            registry.persist(task)
+                            log.warning("task %s: output materialization unavailable", task.task_id, exc_info=True)
                     if task.auto_continue and task.output_drained and task.latest_record_landed:
                         from .task_continuation import schedule_automatic
                         schedule_automatic(registry, task)
@@ -5275,6 +5291,8 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     log.exception("task %s: could not write the task_finished event", task.task_id)
         finally:
             _close_events_after_writers(task)
+            if not abandoned:
+                task.done.set()
 
 
 def _maintain(log_dir: Path) -> Any:

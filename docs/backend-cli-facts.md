@@ -611,7 +611,7 @@ Anthropic API, an isolated `HOME`/`CLAUDE_CONFIG_DIR` and no model calls. Re-run
 - The freedom's own entries and the extra patterns work in one comma-separated `--allowedTools` value, and also
   when split across two `--allowedTools` options. Harflow always writes one value, freedom entries first.
 - Read-only commands (`uname -a`, `git status`, chains of them) and in-cwd filesystem commands (`touch`) are
-  auto-approved by 2.1.310 `acceptEdits` and need no grant, which is one reason git is never grantable.
+  auto-approved by 2.1.310 `acceptEdits` and need no grant. Git preparation grants were added separately below.
 
 ### Claude caller approvals and Read/Write/Edit prompts (2.1.310, 2026-10-24)
 
@@ -1024,3 +1024,61 @@ and idle/background waits do not establish that a matching execution stopped wor
 therefore uses elapsed execution duration with `elapsed_may_include_waits`. The accounting seam
 can retain bounded, explicitly qualified matching-execution intervals; union/clamping tests are
 algorithm evidence only, not production pause qualification.
+
+
+## Claude Git preparation grants (2.1.312, 2026-10-28)
+
+The installed Claude Code 2.1.312 passed the no-paid candidate suite using the localhost fake
+Anthropic API and isolated HOME/CLAUDE_CONFIG_DIR: 36 tests across `test_claude_denials_cli.py`,
+`test_claude_caller_approvals_cli.py`, `test_claude_approval_resume_cli.py`,
+`test_claude_write_approvals_cli.py` and `test_claude_commands_cli.py`. The measured qualification
+row therefore enables the same caller approval tools, write approvals, path prompts, denial texts
+and command grants as 2.1.310. No paid model or external Git remote was used.
+
+At `publish`, exact grants for `git -C . fetch origin develop`,
+`git -C . pull --ff-only origin develop` and `git -C . switch -c feature/prep` executed against a
+local Git fixture: fetch/pull created FETCH_HEAD and switch changed the observed branch. With those
+grants, `git -C . reset --hard` and appending `--force` to the granted pull were refused by the
+real harness. The test also checks permission preview includes the exact grants. Unit cases
+refuse wildcard patterns, other Git subcommands, config overrides, force/rebase forms, URL/refspec
+operands, outside paths and launcher nesting. These measurements establish the tested matching
+behavior, not an OS Git boundary: `publish` independently permits commit/push, and Git config,
+hooks, remote helpers and credentials remain effective. Saved workflow candidates require an
+explicitly authorized grant update; dynamic targets/branch names need concrete per-run grants.
+
+
+### Claude plan files (2.1.312, 2026-10-28)
+
+The candidate-enabled `tests/test_claude_plan_files_cli.py` passed both no-paid CLI probes on
+2.1.312: plan mode created and updated the actual built-in plan file in the default config/plans
+location and the project-configured `.claude/plans` location. Ordinary repository and outside
+writes, and writes to settings, settings.local, hooks, agents, commands, skills and `.mcp.json`,
+were refused. The output-route change added system guidance and version evidence, not backend
+argv changes. This preserves the disclosed plan-file exception; it is not a universal read-only
+filesystem claim.
+
+
+A separate no-grant 2.1.312 probe at `publish`, with caller approvals disabled, observed
+`This command requires approval` for all four exact commands: `git -C . fetch origin develop`,
+`git -C . pull --ff-only origin develop`, `git -C . switch develop`, and
+`git -C . switch -c feature/prep develop`. Branch preparation is therefore not implicitly allowed
+by acceptEdits on this measured harness. Dynamic branch names need a concrete grant selected for
+the run; static fetch/pull grants alone do not complete the saved workflow migration.
+
+### Automatic permission probe bundles
+
+The production callbacks were measured against Claude Code 2.1.312 and codex-cli
+0.163.0 on macOS using `HARFLOW_CLI_INTEGRATION=1 uv run pytest -q
+tests/test_qualification_probes.py` (15 passed). These runs use spawned qualification
+workers, isolated vendor configuration, fake credentials, synthetic local providers,
+and `sandbox-exec` restricted to disposable writes and the fixture's exact loopback port.
+They make no paid model calls. A separate real Claude plan-mode check reconstructs a
+complete inherited specification through paged Read calls, byte-identically, without
+Bash classification or Harflow tools (`tests/test_child_spec_delivery_cli.py`).
+
+Caller approvals, write approvals, path prompts, command matching and denial text have
+independent outcomes. Synthetic protocol/provider drift tests verify that one failed
+feature does not erase unrelated observed successes. Unavailable OS isolation refuses
+auto qualification; no support is inferred for unmeasured platforms or unimplemented
+backend permission adapters. See `docs/harness-permissions.md` for the cache and runtime
+invalidation boundaries.

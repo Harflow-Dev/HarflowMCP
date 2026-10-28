@@ -386,6 +386,7 @@ async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
     """Version or qualification refusal: notice, invalidate pending approvals and stop the run now."""
     if str(exc) not in task.bridge_notices:
         task.bridge_notices.append(str(exc))
+    registry._stop_native_transport(task)
     if task.caller_approvals:
         audit = getattr(exc, "audit", None)
         if audit:
@@ -415,7 +416,28 @@ async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
         except Exception:
             pass
     registry.persist(task)
-    registry._stop_native_transport(task)
+    # Poison the exact binary receipt captured at launch, never a newly updated
+    # executable discovered while handling an older run's protocol failure.
+    captured_identity = getattr(task, "qualification_identity", None)
+    if captured_identity is not None:
+        from .backends import get
+        from .backends.qualification import invalidate
+        features = []
+        if task.caller_approvals:
+            features.append("caller_approval_tools")
+            if task.caller_write_approvals:
+                features.append("caller_write_tools")
+        if getattr(task, "allowed_commands", None):
+            features.append("allowed_commands")
+        for feature in features:
+            try:
+                await asyncio.to_thread(invalidate, get(task.backend), feature, str(exc),
+                                        root=registry.log_dir.parent, identity=captured_identity)
+            except StateOwnershipError:
+                raise
+            except Exception:
+                # Cache failure must never prevent stopping the unsafe transport.
+                pass
 
 
 async def _check_version(registry: Any, task: Any, backend: Any, event: dict[str, Any]) -> bool:
@@ -484,8 +506,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
                     raise
                 except Exception:
                     pass
-            registry.persist(task)
-            registry._stop_native_transport(task)
+            await _stop_refused(registry, task, exc if refused else ApprovalRefused("Unsupported, invalid or over-budget permission request; stopping execution without approval"))
         task.approval_view = await asyncio.to_thread(approvals.summary, registry.log_dir, task.task_id)
         task.approval_receiving = False
         task.pump_wake.set()
@@ -505,6 +526,9 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         for tool_id, outcome in getattr(backend, "observed_approval_outcomes", lambda e, _acc: backend.approval_outcomes(e))(event, task.acc):
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
                 if row["tool_use_id"] == tool_id and row["generation"] == task.approval_generation:
+                    if outcome == "succeeded" and (row.get("effective_decision") != "approve" or row.get("delivery") not in {"sending", "sent", "delivery_unknown"}):
+                        await _stop_refused(registry, task, ApprovalRefused("Harness reported successful execution without a delivered approval; stopping execution and invalidating qualification"))
+                        return False
                     await asyncio.to_thread(approvals.observe_outcome, registry.log_dir, task.task_id, row["request_id"], row["generation"], outcome)
     return False
 

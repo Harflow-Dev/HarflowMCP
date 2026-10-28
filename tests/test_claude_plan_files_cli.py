@@ -19,13 +19,14 @@ def test_claude_plan_file_write_exception(tmp_path, monkeypatch, custom):
     if not executable:
         pytest.skip('Claude not installed')
     version = subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout
-    if not version.startswith('2.1.310 '):
+    candidate = os.environ.get('HARFLOW_QUALIFY_CLAUDE_VERSION', '2.1.310')
+    if not version.startswith(candidate + ' '):
         pytest.skip('Plan file exception measured on Claude 2.1.310')
     tmp_path = tmp_path.resolve()
     repo = tmp_path / 'repo'; repo.mkdir()
     if custom:
         (repo / '.claude').mkdir()
-        (repo / '.claude/settings.json').write_text('{"plansDirectory":"custom-plans"}')
+        (repo / '.claude/settings.json').write_text('{"plansDirectory":".claude/plans"}')
     plan_paths = []
     tool_results = []
 
@@ -38,11 +39,11 @@ def test_claude_plan_file_write_exception(tmp_path, monkeypatch, custom):
             matches = re.findall(r'/[^\s<>"\\]*plans/[^\s<>"\\]*\.md', json.dumps(body))
             assert matches, 'CLI must disclose its actual built-in plan path'
             plan_paths[:] = [matches[-1]]
-        paths = [plan_paths[0], str(repo / 'ordinary.md'), str(tmp_path / 'outside.md')]
+        paths = [plan_paths[0], plan_paths[0], str(repo / 'ordinary.md'), str(tmp_path / 'outside.md'), *[str(repo / p) for p in ('.claude/settings.json', '.claude/settings.local.json', '.claude/hooks/x', '.claude/agents/x', '.claude/commands/x', '.claude/skills/x', '.mcp.json')]]
         index = len(results)
         if index < len(paths):
             return ([{'type': 'tool_use', 'id': f'plan_probe_{index}', 'name': 'Write',
-                      'input': {'file_path': paths[index], 'content': 'local plan fixture'}}], 'tool_use')
+                      'input': {'file_path': paths[index], 'content': 'updated plan fixture' if index == 1 else 'local plan fixture'}}], 'tool_use')
         return ([{'type': 'text', 'text': 'finished'}], 'end_turn')
 
     with serve(decide) as (base_url, requests):
@@ -54,10 +55,11 @@ def test_claude_plan_file_write_exception(tmp_path, monkeypatch, custom):
     assert requests
     from pathlib import Path
     plan = Path(plan_paths[0])
-    assert plan.parent == (repo / 'custom-plans' if custom else tmp_path / 'config/plans')
-    assert plan.read_text() == 'local plan fixture'
+    assert plan.parent == (repo / '.claude/plans' if custom else tmp_path / 'config/plans')
+    assert plan.read_text() == 'updated plan fixture'
     assert not tool_results[0].get('is_error')
-    assert all(block.get('is_error') for block in tool_results[1:])
+    assert not tool_results[1].get('is_error')
+    assert all(block.get('is_error') for block in tool_results[2:])
     assert not (repo / 'ordinary.md').exists()
     assert not (tmp_path / 'outside.md').exists()
     # Feed actual CLI stream frames through the metadata-only worker seam, after process exit.
@@ -69,6 +71,6 @@ def test_claude_plan_file_write_exception(tmp_path, monkeypatch, custom):
         except ValueError:
             continue
         observed.extend(observe_candidates(candidates(event), state, repo))
-    assert [item['path'] for item in observed] == [str(plan)]
+    assert [item['path'] for item in observed] == [str(plan), str(plan)]
     assert observed[0]['plan_directory'] == str(plan.parent)
     assert observed[0]['plan_directory_identity']['inode'] == plan.parent.stat().st_ino

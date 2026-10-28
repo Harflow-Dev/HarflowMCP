@@ -118,7 +118,7 @@ async def test_a_target_that_becomes_protected_without_moving_is_refused_as_prot
     decide(world.directory, row)
     subprocess.run(["git", "-C", str(repo.repo), "config", "core.hooksPath", "custom-hooks"], check=True)
     await approval_runtime.pump(world.registry, world.task)
-    assert wire_response(world.writes[0])["message"] == "Harflow refused this action: protected_path"
+    assert wire_response(world.writes[0])["message"].startswith("Harflow refused this action: protected_path")
     assert final_row(world.directory)["disposition"] == "system_rejected"
 
 
@@ -166,7 +166,7 @@ async def test_a_failure_to_resolve_the_targets_at_delivery_is_refused(repo, mon
     decide(world.directory, row)
     monkeypatch.setattr(approval_paths, "protected_targets", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom")))
     await approval_runtime.pump(world.registry, world.task)
-    assert wire_response(world.writes[0])["message"] == "Harflow refused this action: protected_path"
+    assert wire_response(world.writes[0])["message"].startswith("Harflow refused this action: protected_path")
 
 
 @pytest.mark.asyncio
@@ -176,7 +176,7 @@ async def test_a_failure_to_rebuild_the_snapshot_at_delivery_is_refused_as_prote
     decide(world.directory, row)
     monkeypatch.setattr(approval_runtime, "_path_snapshot", lambda *_a: (_ for _ in ()).throw(OSError("boom")))
     await approval_runtime.pump(world.registry, world.task)
-    assert wire_response(world.writes[0])["message"] == "Harflow refused this action: protected_path"
+    assert wire_response(world.writes[0])["message"].startswith("Harflow refused this action: protected_path")
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_unresolvable_git_locations_at_delivery_refuse_writes_as_protected
     decide(world.directory, row)
     monkeypatch.setattr(approval_paths, "git_protected", lambda _repo: None)
     await approval_runtime.pump(world.registry, world.task)
-    assert wire_response(world.writes[0])["message"] == "Harflow refused this action: protected_path"
+    assert wire_response(world.writes[0])["message"].startswith("Harflow refused this action: protected_path")
 
 
 @pytest.mark.asyncio

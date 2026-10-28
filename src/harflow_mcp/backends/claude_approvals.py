@@ -42,7 +42,7 @@ def validate_write(write: bool, enabled: bool, version: str | None = None) -> No
         return
     if not enabled:
         raise ValueError("caller_write_approvals requires caller_approvals")
-    if version is not None and not qualification.measured(version).get("caller_write_tools"):
+    if version is not None and not (qualification.measured(version) or {}).get("caller_write_tools"):
         raise UnsupportedCapability(f"caller_write_approvals is not qualified on Claude Code {version}")
 
 
@@ -169,7 +169,7 @@ def decode(event: dict[str, Any], qualified: dict[str, Any] | None = None) -> di
     decoded = {"native_request_id": native_id, "tool_use_id": tool_id, "action": {"tool_name": tool, "input": copy.deepcopy(action_input)},
                "decision_reason": reason.encode("utf-8")[:1024].decode("utf-8", "ignore") if isinstance(reason, str) else None,
                "decision_reason_type": kind[:64] if isinstance(kind, str) else None}
-    if tool in qualification.MEASURED[version].get("caller_write_tools", ()) and not write:
+    if tool in WRITE_SCHEMAS and not write:
         decoded["system_rejection"] = "write_approvals_not_enabled"
     return decoded
 
@@ -184,7 +184,10 @@ def encode(request: dict[str, Any], decision: str) -> bytes:
     if system is not None and (decision != "reject" or system not in SYSTEM_REASONS):
         raise ValueError("A Harflow system rejection can only be delivered as a rejection")
     if system is not None:
-        response = {"behavior": "deny", "message": f"Harflow refused this action: {system}"}
+        message = f"Harflow refused this action: {system}"
+        if system == "protected_path":
+            message += ". Protected state, configuration or Git policy cannot be changed. Save plans in writable HARFLOW_SCRATCH or the backend built-in plan location; return final plan text as result.technical_plan for a task-named output artifact."
+        response = {"behavior": "deny", "message": message}
     else:
         response = {"behavior": "allow", "updatedInput": copy.deepcopy(request["action"]["input"])} if decision == "approve" else {"behavior": "deny", "message": "Caller rejected this exact action"}
     return (json.dumps({"type": "control_response", "response": {"subtype": "success", "request_id": request["native_request_id"], "response": response}}, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")

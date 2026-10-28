@@ -460,6 +460,14 @@ class ClaudeBackend(ExtraPathsUnsupported):
         live_input_message_is_turn=False,
     )
 
+    def qualification_features(self):
+        from .claude_qualification import feature_specs
+        return feature_specs()
+
+    def qualification_version(self, observed):
+        from .claude_qualification import parse_version
+        return parse_version(observed)
+
     def caller_approval_support(self):
         from .claude_approvals import support
         return support()
