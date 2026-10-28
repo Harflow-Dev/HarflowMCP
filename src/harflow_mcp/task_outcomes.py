@@ -220,12 +220,46 @@ def _strip(value: str | None) -> str | None:
     return value.strip() if value is not None else None
 
 
+COMMIT_ATTRIBUTION = (
+    "new_commits means newly reachable from initial HEAD, including imported history; "
+    "task-created commits and authorship are unavailable."
+)
+
+
+def project_outcome(outcome: Any) -> Any:
+    """Clarify range semantics on reads without rewriting persisted observations."""
+    if not isinstance(outcome, dict):
+        return outcome
+    return {**outcome, "attribution": COMMIT_ATTRIBUTION}
+
+
+def endpoint_projection(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Bounded endpoint provenance only; intermediate transitions are unobserved."""
+    def bounded(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.encode("utf-8")
+        if len(raw) <= 160:
+            return value
+        return raw[:146].decode("utf-8", "ignore") + "...[truncated]"
+
+    result = {}
+    for phase in ("baseline", "terminal"):
+        value = outcome.get(phase)
+        if isinstance(value, dict):
+            result[phase] = {
+                key: bounded(value.get(key))
+                for key in ("head", "branch", "provenance")
+            }
+    return result
+
+
 def capture(path: Path, start: dict[str, Any] | None, evidence: dict[str, Any]) -> dict[str, Any]:
     end = baseline(path)
     result: dict[str, Any] = {"baseline": start, "terminal": end, "base_commit": (start or {}).get("head"),
         "head_commit": end["head"], "new_commits": None, "committed_diff_stat": None,
         "local_upstream": None, "pushed": None, "publication_evidence": None,
-        "attribution": "Shared-repository observations do not establish task authorship or goal completion.",
+        "attribution": COMMIT_ATTRIBUTION,
         "external_writes": evidence.get("external_writes") or None,
         "last_build_test": evidence.get("last_build_test"),
         "evidence_provenance": "normalized structured tool calls/results; unavailable when absent or unsupported"}

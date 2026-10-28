@@ -10,6 +10,8 @@ back, replay the log for the outcome, and check whether the process is still ali
 
 from __future__ import annotations
 
+from .task_outcomes import project_outcome
+
 from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .workflow_run_documents import WorkflowRunDocumentError
 
@@ -1198,7 +1200,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "owned_by_live_server": owned if status == "running" else None,
         "base_commit": record.base_commit,
         "start_dirty": record.start_dirty,
-        "outcome": record.outcome,
+        "outcome": project_outcome(record.outcome),
         "events_log": str(events.events_path(log_dir, record.task_id)),
         "resume_command": None if has_extra_path_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
         "extra_writable_paths": record.extra_writable_paths,

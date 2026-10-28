@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .task_outcomes import project_outcome, endpoint_projection
 
 BRIEF_BYTES = 8192
 TEXT_BYTES = 1024
@@ -102,6 +103,8 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
                 truncated.append(key)
     for key, allowed in (('outcome', ('base_commit', 'head_commit', 'new_commits', 'new_commits_truncated', 'local_upstream', 'pushed', 'publication_evidence', 'attribution')), ('failure_diagnostic', ('category', 'reason', 'source', 'reset_at', 'background_idle_seconds', 'elapsed_background_wait_seconds', 'background_tasks', 'latest_result', 'successful_agent_result'))):
         value = payload.get(key)
+        if key == 'outcome':
+            value = project_outcome(value)
         if isinstance(value, dict):
             def compact(value, depth=0):
                 if value is None or isinstance(value, (bool, int, float)):
@@ -114,6 +117,10 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
                     return {_text(k, 32): compact(v, depth + 1) for k, v in list(value.items())[:4]}
                 return None
             result[key] = {name: compact(value[name]) for name in allowed if name in value}
+            if key == 'outcome':
+                result[key].update(endpoint_projection(value))
+                if isinstance(value.get('new_commits'), list):
+                    result[key]['new_commits_truncated'] = bool(value.get('new_commits_truncated') or len(value['new_commits']) > 3)
             if result[key] != value:
                 truncated.append(key)
         elif value is not None:

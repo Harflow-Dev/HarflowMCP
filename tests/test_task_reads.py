@@ -215,3 +215,47 @@ def test_brief_artifact_summary_preserves_only_exact_matching_ref():
     invalid = task_reads.brief_status({'task_id': 'x' * 10000, 'artifact_summary': summary})
     assert 'detail_ref' not in invalid['artifact_summary']
     assert len(json.dumps(invalid).encode()) <= task_reads.BRIEF_BYTES
+
+
+@pytest.mark.parametrize('attribution', [None, 'Shared-repository observations do not establish task authorship.'])
+def test_legacy_outcome_read_projection(attribution):
+    from harflow_mcp.task_outcomes import COMMIT_ATTRIBUTION, project_outcome
+    outcome = {'new_commits': ['a' * 40] * 100, 'baseline': {'head': 'a' * 40, 'branch': 'feature', 'provenance': 'local Git'},
+               'terminal': {'head': 'b' * 40, 'branch': 'master', 'provenance': 'local Git'}}
+    if attribution is not None:
+        outcome['attribution'] = attribution
+    before = json.dumps(outcome)
+    projected = project_outcome(outcome)
+    assert projected['attribution'] == COMMIT_ATTRIBUTION
+    brief = task_reads.brief_status({'task_id': 'legacy', 'status': 'completed', 'outcome': outcome})
+    assert brief['outcome']['attribution'] == COMMIT_ATTRIBUTION
+    assert brief['outcome']['baseline'] == outcome['baseline']
+    assert brief['outcome']['terminal'] == outcome['terminal']
+    assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES
+    assert json.dumps(outcome) == before
+
+
+def test_live_snapshot_clarifies_legacy_outcome_without_mutation(tmp_path):
+    from datetime import datetime, timezone
+    from harflow_mcp.tasks import Task
+    from harflow_mcp.task_outcomes import COMMIT_ATTRIBUTION
+    task = Task(task_id='legacy', backend='codex', session_id=None, repo_path=tmp_path,
+        prompt='test', max_turns=None, log_path=tmp_path / 'legacy.jsonl',
+        started_at=datetime.now(timezone.utc))
+    task.outcome = {'new_commits': ['a' * 40], 'attribution': 'weak legacy prose'}
+    before = json.dumps(task.outcome)
+    assert task.snapshot()['outcome']['attribution'] == COMMIT_ATTRIBUTION
+    assert json.dumps(task.outcome) == before
+
+
+def test_compact_endpoint_truncation_is_visible():
+    from harflow_mcp.task_outcomes import endpoint_projection
+    outcome = {'baseline': {'head': 'a' * 40, 'branch': '猫' * 1000, 'provenance': '猫' * 1000}}
+    projected = endpoint_projection(outcome)
+    for key in ('branch', 'provenance'):
+        assert projected['baseline'][key].endswith('...[truncated]')
+        assert len(projected['baseline'][key].encode()) <= 160
+    brief = task_reads.brief_status({'task_id': 'legacy', 'status': 'completed',
+        'outcome': {**outcome, 'terminal': outcome['baseline'], 'new_commits': ['a' * 40] * 100}})
+    assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES
+    assert brief['outcome']['new_commits_truncated'] is True

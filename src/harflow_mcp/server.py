@@ -1040,7 +1040,10 @@ async def get_task_status(
     provider-supplied reset_at). It is retained during process settlement and after failure;
     a running status during settlement does not authorize a replacement dispatch.
 
-    Terminal `outcome` records starting and ending Git observations, commits and diff statistics,
+    Terminal `outcome` records starting and ending Git observations and diff statistics.
+    `new_commits` means newly reachable from initial HEAD, including imported history;
+    task-created commits and authorship are unavailable. Branch/HEAD are endpoint observations
+    only; intermediate transitions are unobserved even when endpoints match. It also records
     local upstream comparison, optional bounded phase/probe diagnostics and partial-result status,
     and best-effort structured tool evidence for external file writes
     and the last build/test command. Missing evidence is null, including pushed state without

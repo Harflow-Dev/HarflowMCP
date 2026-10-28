@@ -186,7 +186,11 @@ def test_recovered_outcome_is_persisted_not_reprobed(tmp_path):
     store.write(tmp_path, record)
     recovered = store.read(tmp_path, record.task_id)
     assert recovered.outcome == record.outcome
-    assert store.snapshot(tmp_path, recovered)['outcome'] == record.outcome
+    from harflow_mcp.task_outcomes import COMMIT_ATTRIBUTION
+    projected = store.snapshot(tmp_path, recovered)['outcome']
+    assert projected == {**record.outcome, 'attribution': COMMIT_ATTRIBUTION}
+    assert recovered.outcome == record.outcome == {'head_commit': 'observed'}
+    assert store.read(tmp_path, record.task_id).outcome == record.outcome
 
 
 def test_local_git_environment_contract_is_covered():
@@ -336,3 +340,45 @@ def test_exhausted_baseline_reports_skipped_probes_and_retains_provenance(tmp_pa
     assert result['diagnostics']['budget_ms'] == 0
     assert all(item['status'] == 'skipped_budget_exhausted' for item in result['diagnostics']['probes'])
     assert result['provenance'] == 'local Git observation with executable filters disabled'
+
+
+@pytest.mark.parametrize('scenario', ['checkout', 'checkout_ff', 'same_ff', 'commit', 'detached', 'external', 'roundtrip', 'truncated'])
+def test_new_commits_are_reachability_observations(tmp_path, scenario):
+    from harflow_mcp.task_outcomes import COMMIT_ATTRIBUTION
+    repo = repository(tmp_path)
+    git(repo, 'branch', '-M', 'master')
+    initial = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'checkout', '-b', 'target')
+    count = 102 if scenario == 'truncated' else 2
+    for i in range(count):
+        git(repo, 'commit', '--allow-empty', '-m', f'imported {i}')
+    imported = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'checkout', 'master')
+    if scenario in ('checkout_ff', 'roundtrip'):
+        git(repo, 'checkout', '-b', 'feature')
+    start = baseline(repo)
+    if scenario in ('checkout', 'truncated'):
+        git(repo, 'checkout', 'target')
+    elif scenario == 'detached':
+        git(repo, 'checkout', '--detach', imported)
+    elif scenario == 'external':
+        # Another actor writes through the same checkout; capture cannot identify it.
+        subprocess.run(['git', '-C', str(repo), 'merge', '--ff-only', 'target'], check=True, capture_output=True)
+    else:
+        if scenario in ('checkout_ff', 'roundtrip'):
+            git(repo, 'checkout', 'master')
+        git(repo, 'merge', '--ff-only', 'target')
+        if scenario == 'roundtrip':
+            git(repo, 'checkout', 'feature')
+            git(repo, 'merge', '--ff-only', 'master')
+    if scenario == 'commit':
+        git(repo, 'commit', '--allow-empty', '-m', 'actual new commit')
+    result = capture(repo, start, {})
+    expected = git(repo, 'rev-list', f'{initial}..HEAD').splitlines()
+    assert result['base_commit'] == initial
+    assert result['new_commits'] == expected[:100]
+    assert result['new_commits_truncated'] == (len(expected) > 100)
+    assert result['baseline']['branch'] == start['branch']
+    assert result['terminal']['branch'] == (None if scenario == 'detached' else git(repo, 'branch', '--show-current'))
+    assert result['attribution'] == COMMIT_ATTRIBUTION
+    assert len(COMMIT_ATTRIBUTION.encode()) <= 160

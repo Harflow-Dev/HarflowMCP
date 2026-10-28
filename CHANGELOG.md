@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify observed commit ranges, including legacy read projections: imported history is newly reachable, never proof of task-created commits or authorship (#60). Compact status and notifications retain bounded Git endpoint provenance and disclose truncated commit lists.
+
 - Fix waits repeatedly returning approval attention after a decision was recorded but before delivery (#59). Preserve approval summary semantics, keep unanswered and uncertain requests actionable, and avoid claiming a recovered process is gone solely because an approval needs attention.
 - Return the Codex network-control caveat as one complete entry in `list_backends` instead of individual characters (#61).
 

@@ -19,6 +19,8 @@ Three invariants keep the state machine honest:
 
 from __future__ import annotations
 
+from .task_outcomes import project_outcome
+
 from . import supervision
 
 import json
@@ -982,7 +984,7 @@ class Task:
             "enforcement": self.enforcement,
             "base_commit": self.base_commit,
             "start_dirty": self.start_dirty,
-            "outcome": self.outcome,
+            "outcome": project_outcome(self.outcome),
             "continuation_of_task_id": self.continuation_of_task_id,
             "chain_root_task_id": self.chain_root_task_id,
             "auto_continue": self.auto_continue,

@@ -586,3 +586,21 @@ def test_unsubscribe_corrupt_database_is_not_initialized(setup):
     with pytest.raises(sqlite3.DatabaseError):
         n.unsubscribe(setup, 'reserved')
     assert path.read_bytes() == before
+
+
+def test_legacy_outcome_notification_provenance(setup):
+    from harflow_mcp.task_outcomes import COMMIT_ATTRIBUTION
+    r = record(setup)
+    from dataclasses import replace
+    r = replace(r, outcome={'new_commits': ['a' * 40] * 11,
+                 'baseline': {'head': 'a' * 40, 'branch': 'feature', 'provenance': 'local Git'},
+                 'terminal': {'head': 'b' * 40, 'branch': 'master', 'provenance': 'local Git'}})
+    before = json.dumps(r.outcome)
+    body = n._payload({'id': 'stable'}, r)
+    outcome = json.loads(body)['outcome']
+    assert outcome['attribution'] == COMMIT_ATTRIBUTION
+    assert outcome['baseline'] == r.outcome['baseline']
+    assert outcome['terminal'] == r.outcome['terminal']
+    assert outcome['new_commits_truncated'] is True
+    assert json.dumps(r.outcome) == before
+    assert len(body) <= n.MAX_PAYLOAD

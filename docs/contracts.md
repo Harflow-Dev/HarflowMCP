@@ -404,7 +404,17 @@ Outcome baseline/terminal objects add optional `observation_status` and bounded 
 the outcome root adds capture diagnostics. Each diagnostic uses a phase, millisecond budgets and
 timings, and at most 16 probe entries with bounded labels/categories and optional numeric byte
 counts/return codes. Outer baseline interruption can retain partial evidence and name its outer
-status/budget. Existing outcome fields and attribution/provenance semantics are unchanged.
+status/budget.
+
+The existing `new_commits` field means newly reachable commits from initial HEAD, including
+history imported by checkout or fast-forward; task-created commits and authorship are unavailable.
+`base_commit` remains the original baseline and the range algorithm is unchanged. Full response
+attribution clarifies these semantics for legacy records without rewriting saved observations.
+Brief and notification outcomes add bounded `baseline`/`terminal` endpoint projections (`head`,
+`branch`, `provenance`) and disclose shortened commit lists with `new_commits_truncated`.
+Endpoints cannot reveal intermediate branch transitions, even when equal. This is an existing-field
+semantic clarification and additive v1 projection; canonical fixtures contain neither `new_commits`
+nor `committed_diff_stat`, so the fixture bundle and consumer version gates remain unchanged.
 
 These are additive v1 response fields; decoders and version gates remain unchanged. Canonical
 approval-status fixtures include the observer projections, using an isolated deterministic

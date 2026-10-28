@@ -7,7 +7,17 @@ whose owner could not inspect the result return `null`.
 
 The outcome records a starting `baseline` and `terminal` observation: HEAD, branch and working tree
 status. `base_commit`, `head_commit`, `new_commits` (at most 100, with a truncation flag) and
-`committed_diff_stat` describe the committed range. A missing/non-Git repository, absent Git,
+`committed_diff_stat` describe the original `base_commit..head_commit` range.
+`new_commits` means commits newly reachable from the initial HEAD, including history imported by
+checkout or fast-forward. It never identifies task-created commits: commit creation and authorship
+are unavailable, even when a task actually committed or another actor wrote into a shared checkout.
+The original baseline is never reset after a branch change. HEAD and branch are endpoint
+observations only; intermediate transitions are unobserved, even when both endpoints match.
+Full status reads clarify this attribution for older records without rewriting their saved evidence.
+Brief status and completion notifications retain bounded baseline/terminal HEAD, branch and
+provenance when the outcome is retained (oversized endpoint strings visibly end in `...[truncated]`), and carry the same attribution alongside commit lists.
+Their shorter lists use `new_commits_truncated` to disclose omission; full outcome limits remain
+unchanged. No reflog or narration is used to infer authorship. A missing/non-Git repository, absent Git,
 oversized output or timeout produces explicit unavailable fields. Failures never affect the
 agent's execution status.
 

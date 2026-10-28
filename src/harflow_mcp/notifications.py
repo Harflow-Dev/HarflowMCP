@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .state_access import task_operation
+from .task_outcomes import COMMIT_ATTRIBUTION, endpoint_projection
 from .notification_database import NotificationDatabaseError
 from .state_ownership import StateOwnershipError
 
@@ -171,6 +172,7 @@ def _payload(row, record, *, recovered=False, evidence=None):
     # Only durable data; never resolve inferred deaths or replay prompt/raw output logs.
     outcome = record.outcome if isinstance(record.outcome, dict) else {}
     projection = {'pushed': outcome.get('pushed') if type(outcome.get('pushed')) is bool else None}
+    projection.update(endpoint_projection(outcome))
     for key in ('base_commit', 'head_commit', 'committed_diff_stat', 'publication_evidence'):
         if key in outcome:
             projection[key] = _text(outcome[key], 512)
@@ -178,6 +180,8 @@ def _payload(row, record, *, recovered=False, evidence=None):
         projection['local_upstream'] = {key: _text(outcome['local_upstream'].get(key), 256)
                                         for key in ('ref', 'ahead_behind', 'provenance')}
     if isinstance(outcome.get('new_commits'), list):
+        projection['attribution'] = COMMIT_ATTRIBUTION
+        projection['new_commits_truncated'] = bool(outcome.get('new_commits_truncated') or len(outcome['new_commits']) > 10)
         projection['new_commits'] = [_text(item, 128) for item in outcome['new_commits'][:10] if isinstance(item, str)]
     diagnostic = record.failure_diagnostic if isinstance(record.failure_diagnostic, dict) else {}
     failure = {key: _text(diagnostic[key], 256) for key in ('category', 'reason', 'source', 'reset_at') if key in diagnostic}
