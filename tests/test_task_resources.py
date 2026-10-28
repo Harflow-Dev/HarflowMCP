@@ -427,7 +427,7 @@ async def finished_task(reg, root: Path, task_id: str, **kwargs):
     log_dir = tasks_dir(root)
     task = await reg.start("reply done", root, backend=get("claude"), freedom="read_only", max_turns=3, task_id=task_id, **kwargs)
     await wait_for(lambda: (record := store.read(log_dir, task_id)) is not None and record.finished_at and record.output_drained)
-    await wait_for(lambda: launch_state(root, task_id) in {"settled", "spawned"})
+    await wait_for(lambda: launch_state(root, task_id) == "settled")
     return store.read(log_dir, task_id)
 
 

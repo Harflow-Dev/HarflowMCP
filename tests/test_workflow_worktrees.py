@@ -13,6 +13,15 @@ import pytest
 from harflow_mcp import resources, workflow_resources, workflows, worktrees
 
 
+@pytest.fixture(autouse=True)
+def isolated_git_configuration(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+
+
 def definition(*, freedom: str = "write_in_repo") -> dict:
     return {
         "name": "worktree fixture",
@@ -58,6 +67,21 @@ def test_worktree_plan_refused_when_all_agent_nodes_are_read_only(tmp_path: Path
 
     with pytest.raises(workflows.WorkflowError, match="worktree"):
         workflows.preview_workflow_run(value["name"], repo, root=state, worktree={})
+
+
+@pytest.mark.parametrize("scope", ["global", "system"])
+def test_ambient_git_filter_configuration_is_refused(scope, git_repo: Path, tmp_path: Path, monkeypatch):
+    config = tmp_path / "filter.cfg"
+    config.write_text('[filter "ci-probe"]\nclean = cat\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config) if scope == "global" else "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(config) if scope == "system" else "/dev/null")
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+
+    with pytest.raises(worktrees.WorktreeError) as refused:
+        worktrees.check_filters(git_repo)
+    assert refused.value.code == "worktree_filters_unsupported"
 
 
 @pytest.fixture
@@ -109,7 +133,8 @@ async def test_workflow_worktree_creation_leaves_dirty_source_checkout_untouched
         def attention(self, reason):
             raise AssertionError(reason)
 
-    assert await workflow_resources.prepare_run(Supervisor())
+    prepared = await workflow_resources.prepare_run(Supervisor())
+    assert prepared, workflow_storage.get_run(run_id)["worktree"].get("error")
     created = workflow_storage.get_run(run_id)
     after_status = subprocess.run(["git", "-C", str(source), "status", "--porcelain"],
                                   capture_output=True, text=True, check=True).stdout

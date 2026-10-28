@@ -139,7 +139,7 @@ async def test_resume_serializes_with_removal_whatever_the_current_worktree_root
     reg = registry(tmp_path)
     await reg.start("reply done", source, backend=get("claude"), freedom="write_in_repo", max_turns=3, worktree={}, task_id="a" * 32)
     await wait_for(lambda: (r := store.read(log_dir, "a" * 32)) is not None and r.finished_at and r.output_drained)
-    await wait_for(lambda: launch_state(tmp_path, "a" * 32) in {"settled", "spawned"})
+    await wait_for(lambda: launch_state(tmp_path, "a" * 32) == "settled")
     record = store.read(log_dir, "a" * 32)
     path = Path(record.worktree["path"])
     monkeypatch.setenv("HARFLOW_WORKTREE_ROOT", str(tmp_path / "somewhere-else"))  # the configuration moved on
@@ -149,7 +149,7 @@ async def test_resume_serializes_with_removal_whatever_the_current_worktree_root
         with pytest.raises(worktrees.WorktreeError) as busy:
             await reg.resume_record(record, "reply again")
         assert busy.value.code == "worktree_busy"
-    assert launch_state(tmp_path, "a" * 32) in {"settled", "spawned"}
+    assert launch_state(tmp_path, "a" * 32) == "settled"
     resumed = await reg.resume_record(record, "reply again")  # and it is not blocked once the lock is free
     assert resumed.task_id != "a" * 32
 

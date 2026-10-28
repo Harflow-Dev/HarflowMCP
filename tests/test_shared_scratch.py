@@ -1213,6 +1213,7 @@ def test_a_lock_won_on_a_replaced_file_is_dropped_and_retried(tmp_path, monkeypa
         pass
     stale = os.open(path, os.O_RDWR)
     stale_inode = os.fstat(stale).st_ino
+    stale_hold = os.dup(stale)
     path.unlink()  # the old file is gone from the path; stale still refers to it
     real = shared_scratch._open_lock
     opened = []
@@ -1223,12 +1224,15 @@ def test_a_lock_won_on_a_replaced_file_is_dropped_and_retried(tmp_path, monkeypa
         return descriptor
 
     monkeypatch.setattr(shared_scratch, "_open_lock", reopen)
-    descriptor = shared_scratch._try_lock(log_dir, "chain", "c1")
+    descriptor = None
     try:
+        descriptor = shared_scratch._try_lock(log_dir, "chain", "c1")
         assert descriptor is not None and len(opened) == 2  # the first attempt was dropped, the second held
         assert os.fstat(descriptor).st_ino == os.stat(path).st_ino != stale_inode
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(stale_hold)
 
 
 def test_shared_scratch_state_access_needs_the_owned_state_root(tmp_path):
