@@ -78,7 +78,7 @@ async def test_mcp_rejects_monitor_channel_before_mutation() -> None:
 
 def test_caller_approval_capability_is_additive() -> None:
     assert "caller-approvals.monitor-respond.v1" in wire_contracts.CAPABILITIES
-    assert wire_contracts.PRODUCT_VERSION == "0.0.3"
+    assert wire_contracts.PRODUCT_VERSION == "0.0.4"
 
 
 def test_typed_reservation_refusals_preserve_reason(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 # Getting started
 
-HarflowMCP requires Python 3.11+ and the agent CLIs you intend to use. Version 0.0.3 is unreleased; install from this source checkout:
+HarflowMCP requires Python 3.11+ and the agent CLIs you intend to use. Version 0.0.4 is unreleased; install from this source checkout:
 
 ```sh
 uv tool install . --force --no-cache

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.4
+
 - Add the capability-gated `statistics-page` command with bounded retained-history projection, execution accounting snapshots, separate duration and usage qualification, requested-model identity and explicit history coverage. Legacy or unqualified usage remains unavailable; reads do not replay historical agent streams or launch agents.
 
 - Add optional workflow `finished_at` and pinned-definition `workflow_id` to history projections, and explicit standalone task ownership nulls. Preserve classification and completion evidence within bounded headers, rebuilding derivative task/run projections without migrating authoritative history. A private sequence witness prevents compatible older writers from leaving stale completion dates authoritative; builders omit projected saved-workflow identity. Independent v10 derivative caches coexist with older caches without migrating authoritative history. Unknown completion or unreadable ownership remains unavailable for retained-history summaries.
