@@ -113,10 +113,10 @@ def test_list_preserves_valid_rows_when_record_disappears_after_scan(
     store.write(log_dir, make_record(task_id="gone"))
     original = store.brief
 
-    def brief(directory: Path, record: store.TaskRecord) -> dict:
+    def brief(directory: Path, record: store.TaskRecord, **options) -> dict:
         if record.task_id == "gone":
             raise store.TaskDocumentError("gone", "Task metadata disappeared", code="task_unavailable")
-        return original(directory, record)
+        return original(directory, record, **options)
 
     monkeypatch.setattr(store, "brief", brief)
     assert ctl.main(["list", "--json"]) == 0

@@ -1098,7 +1098,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 
 
 @task_operation
-def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, responding_server=None) -> dict[str, Any]:
+def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, responding_server=None, ctl_observation: bool = False, parent_observer=None) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts, recovery_activity
     qualified = read(log_dir, record.task_id, include_prompt=False)
@@ -1134,7 +1134,9 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
     from . import followups
     queued_followups = followups.view(log_dir, record.task_id)
     from . import approvals
-    supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server)
+    supervision_reader = supervision.ctl_fields if ctl_observation else supervision.fields
+    observer_options = {"parent_observer": parent_observer} if ctl_observation else {"responding_server": responding_server}
+    supervision_fields = supervision_reader(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), **observer_options)
     approved_writes, write_notice = approvals.backend_approved_writes(log_dir, record.task_id, get_backend(record.backend)) if record.caller_write_approvals else ([], None)
     denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
     return {
@@ -1213,7 +1215,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
 
 
 @task_operation
-def brief(log_dir: Path, record: TaskRecord, *, responding_server=None) -> dict[str, Any]:
+def brief(log_dir: Path, record: TaskRecord, *, responding_server=None, ctl_observation: bool = False) -> dict[str, Any]:
     """Listing shape for a recovered task, using the same status resolution as `snapshot`.
 
     Carries the bridge's own notices but not the backend's, matching `Task.brief` so `list_tasks`
@@ -1236,7 +1238,7 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None) -> dict[
         **({"scratch": record.scratch} if record.scratch else {}),
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
-        **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server),
+        **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server, allow_adoption=not ctl_observation),
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,
         "session_id": record.session_id,

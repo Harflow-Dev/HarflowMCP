@@ -784,8 +784,8 @@ This describes adoption of observation only: execution ownership and task state 
 `at` is the current reader's process start time converted from local `ps lstart` evidence to
 UTC, or null if that timestamp cannot be parsed. It is not a measured instant of the old
 server's crash or an ownership-transfer timestamp. The previous/current identities contain
-only PID and process-generation start time. Full reads retain this stable metadata on every
-observation; compact replies emit it and its quiet observation note once per task and reader
+only PID and process-generation start time. Full MCP reads retain this stable metadata on every
+observation; compact MCP replies emit it and its quiet observation note once per task and reader
 generation. Display deduplication is in-memory, shared by clients of that MCP process and
 bounded to 1024 recently observed tasks; eviction or a new process can re-emit the note.
 There is no acknowledgement ledger and waits write no execution state.
@@ -823,3 +823,24 @@ report filenames and atomic updates; peers can overwrite a file with the same na
 and qualified configuration are checked before launch, without an atomic pin against independent
 external writers. See [shared scratch](shared-scratch.md) for the supported backend matrix and limits.
 These are optional v1 additions; canonical fixtures and existing consumer gates are unchanged.
+
+
+### ctl parent observation continuity
+
+`status` and `status-batch` accept optional `--observer-parent`. This read-only mode
+qualifies the actual immediate parent using PID plus process-generation start time,
+once per invocation (shared by every batch entry). No caller-supplied identity is
+accepted. The parent must be confirmed alive; absent, dead, changed or undecidable
+identity produces no adoption and never falls back to the ephemeral ctl process.
+Task fields add `observer_kind: "parent_process"`, nullable `observing_process`
+(`{pid, start_time}`), and tri-state `observer_state`. `responding_server` remains
+the actual ctl responder; observation mode describes the qualified parent.
+
+For this mode, `supervision.adopted_after_restart` has `{at, previous_server,
+observer_kind: "parent_process", observing_process}` and omits `current_server`.
+The same dispatcher/owner/process/capture/input gates apply. `at` is the parent's
+local process-start evidence converted to UTC, not the polling time. Default ctl
+status and list reads preserve identity and liveness diagnostics but suppress synthetic
+adoption by their ephemeral process. Actual MCP server adoption retains its
+existing `{at, previous_server, current_server}` shape. Nothing writes ownership
+or task state; older consumers can ignore these optional v1 fields.

@@ -14,6 +14,7 @@ graph. Prefer wait holds of 50 seconds or less on remote MCP connections. See th
 After a dispatch server restart, surviving execution is reported as a quiet observation change;
 lost or uncertain owner/capture evidence remains visible. Full diagnostics retain the original
 dispatcher identity. See [supervision](docs/supervision.md#dispatch-origin-owner-and-responding-server).
+For stable read-only parent-process observation continuity, use `harflow-ctl status TASK_ID --observer-parent --json` (also supported by `status-batch`); see [public contracts](docs/contracts.md#ctl-parent-observation-continuity).
 
 Workflow callers can see every pending child question in status and wait replies and answer them independently by decision ID through the root run. Questions and structured clarification items remain complete, and forwarded answers return a durable child acceptance receipt. Resolved attention reasons disappear when execution resumes; unreadable workflow approval metadata is reported separately from requests needing a decision. See [workflow input and recovery](docs/workflows.md).
 

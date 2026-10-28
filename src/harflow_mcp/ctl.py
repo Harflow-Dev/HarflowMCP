@@ -153,6 +153,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_p = sub.add_parser("status", help="show one task's full state")
     status_p.add_argument("task_id")
     status_p.add_argument("--json", action="store_true")
+    status_p.add_argument("--observer-parent", action="store_true", help="use qualified immediate-parent identity for read-only observation continuity")
     status_p.add_argument("--brief", action="store_true", help="bounded display projection")
 
     recovery_p = sub.add_parser("recovery-activity", help="bounded display-only backend transcript activity")
@@ -168,6 +169,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "--task-ids", required=True, help="comma-separated exact task ids, at most 100"
     )
     status_batch_p.add_argument("--json", action="store_true")
+    status_batch_p.add_argument("--observer-parent", action="store_true", help="use qualified immediate-parent identity for read-only observation continuity")
 
     send_p = sub.add_parser(
         "send",
@@ -610,7 +612,7 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
     entries = []
     for record in records:
         try:
-            entries.append(store.brief(log_dir, record))
+            entries.append(store.brief(log_dir, record, ctl_observation=True))
         except store.TaskDocumentError as exc:
             scanned.refusals[record.task_id] = exc
     entries = decorate_tasks(entries, log_dir)
@@ -693,7 +695,7 @@ class _StatusReadRefused(Exception):
         self.data = data
 
 
-def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any]:
+def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observer=None) -> dict[str, Any]:
     """One task's full snapshot — the shared body of `status` and `status-batch`.
 
     Raises `_StatusReadRefused` with the same `code`/`message` a single `status` reports for this
@@ -720,7 +722,15 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
                 {"launch_state": receipt["state"], **({"not_started_reason": receipt["not_started_reason"]} if receipt.get("not_started_reason") else {})})
         raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
     from .workflow_inspection import decorate_tasks
-    return decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
+    snapshot = store.snapshot(log_dir, record, ctl_observation=True, parent_observer=parent_observer)
+    return decorate_tasks([snapshot], log_dir)[0]
+
+
+def _status_observer_options(args):
+    if not getattr(args, "observer_parent", False):
+        return {}
+    from .supervision import capture_parent_observer
+    return {"parent_observer": capture_parent_observer()}
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -741,7 +751,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         return _fail(args, "workflow_read_refused", str(exc))
 
     try:
-        snapshot = _status_snapshot(log_dir, task_id, managed)
+        snapshot = _status_snapshot(log_dir, task_id, managed, **_status_observer_options(args))
     except _StatusReadRefused as exc:
         return _fail(args, exc.code, exc.message, exc.data)
 
@@ -790,10 +800,11 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
         # Undecidable caller authority refuses the whole batch — never partial data.
         return _fail(args, "workflow_read_refused", str(exc))
 
+    observer_options = _status_observer_options(args)
     tasks: list[dict[str, Any]] = []
     for task_id in valid:
         try:
-            tasks.append(_status_snapshot(log_dir, task_id, managed))
+            tasks.append(_status_snapshot(log_dir, task_id, managed, **observer_options))
         except store.TaskDocumentError as exc:
             errors[task_id] = {"code": exc.code, "message": str(exc)}
         except _StatusReadRefused as exc:

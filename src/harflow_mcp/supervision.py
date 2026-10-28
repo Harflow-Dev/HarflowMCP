@@ -1,6 +1,7 @@
 """Read-only supervision evidence, separate from conservative execution guards."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,7 @@ def evidence(record: Any, raw_log: Path, *, observed_terminal: bool = False,
             "last_captured_output_source": "raw_stream_log_mtime" if stamp else None}
 
 
-def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> dict[str, Any]:
+def fields(record: Any, raw_log: Path, *, responding_server=None, allow_adoption: bool = True, observer_kind: str = "server_process", **kwargs) -> dict[str, Any]:
     value = evidence(record, raw_log, **kwargs)
     observation = observation_fields(record, responding_server=responding_server)
     origin = observation["dispatch_origin"]
@@ -98,7 +99,7 @@ def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> d
             "undecidable" if kwargs.get("observed_terminal", False) else
             identity.identity_check(origin)
         )
-    if (observation["observation_mode"] == "recovered"
+    if (allow_adoption and observation["observation_mode"] == "recovered"
             and value.get("dispatch_origin_state") == "dead"
             and value["owner_state"] == "alive"
             and value["process_state"] != "dead"
@@ -110,7 +111,8 @@ def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> d
         value["adopted_after_restart"] = {
             "at": _observer_started_at(responder),
             "previous_server": origin,
-            "current_server": responder,
+            **({"current_server": responder} if observer_kind == "server_process" else
+               {"observer_kind": observer_kind, "observing_process": responder}),
         }
         observation["observation_note"] = (
             "The dispatch server has exited; this reader observes the surviving execution owner. "
@@ -120,3 +122,33 @@ def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> d
             "input_channel": value["live_input_state"],
             **({"input_closed_reason": value["live_input_closed_reason"]} if 'live_input_closed_reason' in value else {}),
             "last_captured_output_at": value["last_captured_output_at"]}
+
+
+def capture_parent_observer() -> dict[str, Any]:
+    """Qualify the actual immediate parent once per ctl read; never accept caller identities."""
+    pid = os.getppid()
+    candidate = identity.capture(pid, []) if pid > 1 else None
+    if (not isinstance(candidate, dict) or type(candidate.get("pid")) is not int
+            or candidate["pid"] != pid or not isinstance(candidate.get("start_time"), str)
+            or not 1 <= len(candidate["start_time"]) <= 128):
+        return {"identity": None, "state": "undecidable"}
+    state = identity.identity_check(candidate)
+    if state not in {"alive", "dead", "undecidable"} or os.getppid() != pid:
+        state = "undecidable"
+    return {"identity": candidate if state == "alive" else None, "state": state}
+
+
+def ctl_fields(record: Any, raw_log: Path, *, parent_observer=None, **kwargs) -> dict[str, Any]:
+    """Read-only ctl evidence: an ephemeral ctl process never adopts observation."""
+    if parent_observer is None:
+        return fields(record, raw_log, allow_adoption=False, **kwargs)
+    observer = parent_observer["identity"]
+    result = fields(record, raw_log, responding_server=observer or {},
+                    allow_adoption=observer is not None, observer_kind="parent_process", **kwargs)
+    result["observing_process"] = result["responding_server"]
+    result["responding_server"] = observation_fields(record)["responding_server"]
+    result["observer_kind"] = "parent_process"
+    result["observer_state"] = parent_observer["state"]
+    if observer is None:
+        result["observation_note"] = "Parent-process identity could not be qualified alive; observer continuity cannot be determined."
+    return result
