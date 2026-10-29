@@ -2602,3 +2602,118 @@ async def test_multiline_plain_quota_with_outage_cannot_dispatch_fallback(storag
     run, registry = await execute(storage, tmp_path, graph, [{'summary': '', 'status': 'failed', 'backend': backend, 'stderr': lines}, 'unauthorized fallback'])
     assert run['status'] == 'needs_attention'
     assert len(registry.calls) == 1
+
+
+def test_resumed_at_is_absent_until_the_caller_continues_and_ignores_engine_activity(storage, tmp_path, monkeypatch):
+    from harflow_mcp.workflow_responses import compact
+    monkeypatch.setattr(w, "_launch", lambda *a: None)
+    run = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)
+    rid = run["workflow_run_id"]
+    assert "resumed_at" not in run
+    # Pausing never stamps.
+    storage.control(rid, "pause")
+    paused = storage.get_run(rid)
+    assert paused["status"] == "paused" and "resumed_at" not in paused
+    resumed = storage.control(rid, "resume")
+    assert resumed["resumed_at"] == resumed["updated_at"]
+    assert compact(resumed)["resumed_at"] == resumed["resumed_at"]
+    assert "resumed_at" not in compact(paused)
+    stamp = resumed["resumed_at"]
+    storage.control(rid, "pause")
+    later = storage.get_run(rid)
+    assert later["updated_at"] > stamp and later["resumed_at"] == stamp
+
+
+def test_resumed_at_recover_and_internal_resume(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "_launch", lambda *a: None)
+    run = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda r: r.update(status="paused"), "fixture")
+    storage.control(rid, "resume", _internal=True)
+    assert "resumed_at" not in storage.get_run(rid)
+    storage.update_run(rid, lambda r: r.update(status="failed", failure_reason="boom"), "fixture")
+    recovered = storage.control(rid, "recover", "Inspected; retry")
+    assert recovered["status"] == "running"
+    assert recovered["resumed_at"] == recovered["updated_at"]
+
+
+def test_resumed_at_requires_a_real_continuation(storage, tmp_path):
+    run = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)
+    rid = run["workflow_run_id"]
+    # A no-op mutation requested as a resume leaves the run unstamped.
+    storage.update_run(rid, lambda r: None, "noop", resumed=True)
+    assert "resumed_at" not in storage.get_run(rid)
+    storage.update_run(rid, lambda r: r.update(status="running"), "start", resumed=True)
+    assert "resumed_at" not in storage.get_run(rid)
+    storage.update_run(rid, lambda r: r.update(status="needs_input", input_decision_id="d"), "ask")
+    storage.update_run(rid, lambda r: r.update(status="running"), "answer", resumed=True)
+    assert storage.get_run(rid)["resumed_at"] is not None
+
+
+async def test_builder_followup_stamps_only_when_it_restarts_the_builder(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "_launch", lambda *a: None)
+    run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Build", tmp_path, kind="builder", freedom="read_only")
+    rid = run["workflow_run_id"]
+    # Queued feedback to a live builder is not a restart.
+    monkeypatch.setattr(w, "_supervisor_present", lambda r: True)
+    storage.update_run(rid, lambda r: r.update(status="running"), "fixture")
+    await w.followup_workflow_builder(rid, "live feedback", root=storage.root)
+    live = storage.get_run(rid)
+    assert live["status"] == "running" and "resumed_at" not in live
+    # A completed builder is restarted (completed -> starting) and stamped.
+    monkeypatch.setattr(w, "_supervisor_present", lambda r: False)
+    storage.update_run(rid, lambda r: r.update(status="completed"), "fixture")
+    await w.followup_workflow_builder(rid, "restart feedback", root=storage.root)
+    restarted = storage.get_run(rid)
+    assert restarted["status"] == "starting"
+    assert restarted["resumed_at"] == restarted["updated_at"]
+
+
+async def test_supervisor_start_and_reconcile_preserve_resumed_at(storage, tmp_path):
+    run = storage.create_run(w.validate_definition(definition()), "build it", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda r: r.update(status="starting", resumed_at=123.0), "fixture")
+    # supervisor_started moves starting -> running without stamping.
+    registry = FakeRegistry(storage.root, ["done"])
+    await w.WorkflowSupervisor(registry, storage).execute(rid)
+    finished = storage.get_run(rid)
+    assert finished["status"] == "completed" and finished["resumed_at"] == 123.0
+    storage.update_run(rid, lambda r: r.update(status="paused", finished_at=None), "fixture")
+    before = storage.get_run(rid)["resumed_at"]
+    storage.reconcile_run(rid)
+    assert storage.get_run(rid)["resumed_at"] == before == 123.0
+    # An unstamped run stays unstamped through the same paths.
+    other = storage.create_run(w.validate_definition(definition()), "build it", tmp_path)
+    await w.WorkflowSupervisor(FakeRegistry(storage.root, ["done"]), storage).execute(other["workflow_run_id"])
+    assert "resumed_at" not in storage.get_run(other["workflow_run_id"])
+
+
+async def test_resumed_at_send_workflow_message_now_on_paused_run_stamps(storage, tmp_path, monkeypatch):
+    from harflow_mcp import workflow_messages
+    monkeypatch.setattr(w, "_launch", lambda *a: None)
+    run = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda r: r.update(status="paused"), "fixture")
+    queued = workflow_messages.send(storage, rid, "carry on", delivery="now", interaction_owner="caller")
+    assert "resumed_at" not in storage.get_run(rid)
+    result = await workflow_messages.deliver_now(storage, queued, interaction_owner="caller")
+    assert result.get("delivery_started") is True
+    resumed = storage.get_run(rid)
+    assert resumed["status"] == "running" and resumed["resumed_at"] == resumed["updated_at"]
+
+
+def test_run_page_headers_carry_resumed_at_only_after_a_resume(storage, tmp_path, monkeypatch):
+    import time
+    monkeypatch.setattr(w, "_launch", lambda *a: None)
+    resumed = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)["workflow_run_id"]
+    plain = storage.create_run(w.validate_definition(definition()), "Task", tmp_path)["workflow_run_id"]
+    storage.control(resumed, "pause")
+    storage.control(resumed, "resume")
+    for _ in range(100):
+        page = storage.list_run_page()
+        if not page.get("bootstrap_pending"):
+            break
+        time.sleep(0.05)
+    items = {item["workflow_run_id"]: item for item in page["items"]}
+    assert items[resumed]["resumed_at"] == items[resumed]["updated_at"]
+    assert "resumed_at" not in items[plain]

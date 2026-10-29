@@ -902,15 +902,15 @@ def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, 
     store.update_run(parent['workflow_run_id'], seed, 'fixture')
     original = store.update_run
     failed = False
-    def injected(identifier, change, event, detail=None):
+    def injected(identifier, change, event, detail=None, **options):
         nonlocal failed
         target = identifier == child['workflow_run_id'] and event in {'control:resume', 'control:recover'} if failure_target.startswith('child') else identifier == parent['workflow_run_id'] and event in {'forwarded_input_answered', 'forwarded_attention_resumed'}
         if target and not failed:
             failed = True
             if failure_target == 'child-after-write':
-                original(identifier, change, event, detail)
+                original(identifier, change, event, detail, **options)
             raise OSError('injected write failure')
-        return original(identifier, change, event, detail)
+        return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(store, 'update_run', injected)
     options = {'decision_id': 'question-one'} if kind == 'input' else {}
     with pytest.raises(OSError, match='injected'):
@@ -944,11 +944,11 @@ def test_forwarded_delivery_retry_preserves_and_allows_new_parent_question(store
     write_run(store, child)
     store.update_run(parent['workflow_run_id'], lambda r: r.update(status='needs_input', input_source=source, input_decision_id='one', input_question='First'), 'fixture')
     original = store.update_run
-    def moved(identifier, change, event, detail=None):
+    def moved(identifier, change, event, detail=None, **options):
         if event == 'forwarded_input_answered':
             original(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='two', input_question='Second'), 'fixture')
             original(parent['workflow_run_id'], lambda r: r.update(input_decision_id='two', input_question='Second'), 'fixture')
-        return original(identifier, change, event, detail)
+        return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(store, 'update_run', moved)
     store.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
     restarted = w.WorkflowStore(root=store.root)
@@ -970,10 +970,10 @@ def test_forwarded_attention_new_source_uses_its_own_control_action(store, tmp_p
     new_source = {'workflow_run_id': new_child['workflow_run_id'], 'workflow_name': 'child'}
     store.update_run(parent['workflow_run_id'], lambda r: r.update(status='needs_attention', attention_source=old_source), 'fixture')
     original = store.update_run
-    def moved(identifier, change, event, detail=None):
+    def moved(identifier, change, event, detail=None, **options):
         if event == 'forwarded_attention_resumed':
             original(parent['workflow_run_id'], lambda r: r.update(attention_source=new_source), 'fixture')
-        return original(identifier, change, event, detail)
+        return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(store, 'update_run', moved)
     with pytest.raises(w.WorkflowError, match='moved on'):
         store.control(parent['workflow_run_id'], 'resume', 'Recover old child', 2)
@@ -998,11 +998,11 @@ def test_forwarded_attention_same_child_new_checkpoint_survives_prior_ack(store,
     inv.publish_attention(store, store.update_run(cid, lambda r: r.update(instructions='unchanged suspension'), 'poll'))
     assert store.get_run(parent['workflow_run_id'])['attention_source'] == first_source
     original = store.update_run
-    def moved(identifier, change, event, detail=None):
+    def moved(identifier, change, event, detail=None, **options):
         if event == 'forwarded_attention_resumed':
             again = original(cid, lambda r: r.update(status='paused', attention_reason='Same reason'), 'suspend_again')
             inv.publish_attention(store, again)
-        return original(identifier, change, event, detail)
+        return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(store, 'update_run', moved)
     with pytest.raises(w.WorkflowError, match='moved on'):
         store.control(parent['workflow_run_id'], 'resume', 'First answer', 2)

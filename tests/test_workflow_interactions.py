@@ -124,6 +124,7 @@ def test_recovery_keeps_scheduler_gate(pending, monkeypatch, scheduler):
     with pytest.raises(w.WorkflowError, match="scheduler is live or uncertain"):
         workflow_recovery.request(storage, run, "restore", "monitor")
     assert storage.get_run(run["workflow_run_id"])["interaction_owner"] == "caller"
+    assert "resumed_at" not in storage.get_run(run["workflow_run_id"])
 
 
 def test_recovery_handover_only_after_validation(pending, monkeypatch):
@@ -136,6 +137,29 @@ def test_recovery_handover_only_after_validation(pending, monkeypatch):
     accepted = workflow_recovery.request(storage, run, "restore", "monitor")
     assert accepted["interaction_handover"]["action"] == "recover"
     assert accepted["scheduler_recovery"]["reason"] == "restore"
+    assert accepted["resumed_at"] == accepted["updated_at"]
+
+
+def test_repeated_scheduler_recovery_request_stamps_once(pending, monkeypatch):
+    from harflow_mcp import workflow_recovery
+    storage, run = pending
+    monkeypatch.setattr(identity, "check_detail", lambda evidence: ("dead", "pid_absent"))
+    monkeypatch.setattr(identity, "identity_check", lambda evidence: "dead")
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    run = storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", supervisor_identity={"pid": 7777, "start_time": "scheduler", "markers": []}), "prepare")
+    first = workflow_recovery.request(storage, run, "restore", "monitor")
+    stamp = first["resumed_at"]
+    again = storage.update_run(run["workflow_run_id"], lambda r: None, "poll")
+    assert again["scheduler_recovery"]
+    second = workflow_recovery.request(storage, again, "restore again", "monitor")
+    assert second["scheduler_recovery"]["reason"] == "restore again"
+    assert second["resumed_at"] == stamp
+    # A replacement scheduler that later dies makes the next request a new continuation.
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(supervisor_identity={"pid": 8888, "start_time": "replacement", "markers": []}), "replacement_started")
+    third = workflow_recovery.request(storage, storage.get_run(run["workflow_run_id"]), "restore after second death", "monitor")
+    assert third["resumed_at"] > stamp
+    assert third["resumed_at"] == third["updated_at"]
+    assert third["scheduler_recovery"]["replaced_owner"]["pid"] == 8888
 
 
 def test_managed_changed_record_remains_unknown(pending, monkeypatch):

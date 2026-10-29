@@ -459,6 +459,7 @@ def test_bounded_header_preserves_lifecycle_identity_and_classification_metadata
     required = {
         "task_id": "task-id",
         "finished_at": "2026-10-27T00:00:00+00:00",
+        "resumed_at": 1_700_000_000.5,
         "workflow_run_id": "run-id",
         "workflow_id": "workflow-generation-id",
         "workflow_builder": False,
@@ -671,3 +672,5 @@ def test_canonical_metadata_page_fixtures_are_manifested_and_wire_valid():
     workflow_items = workflow_fixture["result"]["items"]
     assert any(isinstance(row.get("workflow_id"), str) and isinstance(row.get("finished_at"), (int, float)) for row in workflow_items)
     assert any("finished_at" not in row or row["finished_at"] is None for row in workflow_items)
+    assert any(isinstance(row.get("resumed_at"), (int, float)) for row in workflow_items)
+    assert any("resumed_at" not in row for row in workflow_items)

@@ -1,6 +1,7 @@
 """Explicit recovery of a positively identified interrupted scheduler tree."""
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any
 
@@ -80,21 +81,25 @@ def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: 
     verdict = identity.identity_check(owner) if owner else "undecidable"
     if verdict == "alive" and root.get("scheduler_recovery"):
         from .workflow_interactions import authorize
-        import copy
         authorize(storage, copy.deepcopy(root), interaction_owner, "recover", pending=True)
         return root
     if verdict != "dead":
         raise WorkflowError("Workflow scheduler is live or uncertain; confirmed owner death is required for recovery")
     validate(storage, root)
+    had_pending = False
     def reserve(run: dict[str, Any]) -> None:
+        nonlocal had_pending
         if _supervisor_present(run):
             raise WorkflowError("Workflow scheduler changed before recovery")
         if run.get("status") != root.get("status") or run.get("sequence") != root.get("sequence"):
             raise WorkflowError("Workflow changed before recovery; read it again")
         from .workflow_interactions import authorize
         authorize(storage, run, interaction_owner, "recover", pending=True)
-        run["scheduler_recovery"] = {"reason": reason, "requested_at": time.time()}
-    result = storage.update_run(root["workflow_run_id"], reserve, "scheduler_recovery_requested")
+        prior = run.get("scheduler_recovery") or {}
+        # A reservation is pending only while it still replaces the same dead owner.
+        had_pending = bool(prior) and prior.get("replaced_owner") == run.get("supervisor_identity")
+        run["scheduler_recovery"] = {"reason": reason, "requested_at": time.time(), "replaced_owner": copy.deepcopy(run.get("supervisor_identity"))}
+    result = storage.update_run(root["workflow_run_id"], reserve, "scheduler_recovery_requested", resumed=lambda r: not had_pending)
     _launch(storage, root["workflow_run_id"])
     return result
 

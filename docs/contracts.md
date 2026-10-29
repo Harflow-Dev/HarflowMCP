@@ -511,6 +511,15 @@ Optional workflow-run `finished_at` is nullable finite numeric Unix seconds, per
 and projected in compact/history headers. It records the latest nonterminal-to-terminal
 status transition, clears on reopening, and remains independent of settlement. Terminal
 bookkeeping never invents missing historical completion evidence from `updated_at`.
+Optional workflow-run `resumed_at` is finite numeric Unix seconds, persisted and projected in
+compact/history headers and run detail. Absent means never resumed. The engine
+stamps it with the same time as `updated_at` only when the caller continues the run: a first-accepted
+`decision_id` answer, `resume_workflow` or `recover_workflow` leaving `needs_input`,
+`needs_attention`, `paused` or `failed`, a newly reserved scheduler recovery, or a builder follow-up
+that restarts the builder; a repeated recovery request while one is pending does not stamp again.
+Node and decision activity, supervisor starts, engine retries, hook pauses, reconciliation,
+parent-orchestrator answers, queued feedback to a running builder and receipt replays never change it.
+An answer routed through a root run stamps the root, not the child that asked.
 Private optional `finished_at_sequence` is a nonnegative exact integer witness matching
 `sequence`; a numeric completion is qualified only with that witness and terminal status.
 Older writers invalidate completion by advancing sequence alone. Reads expose unknown

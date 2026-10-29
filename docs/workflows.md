@@ -1551,6 +1551,12 @@ its ancestor and orchestrator session-owner headers. Root-tree totals do not dep
 historical page is visible. Loading, indexing and retry states remain explicit; exhausted history
 simply ends without an end-of-history row.
 
+Workflow headers carry `created_at`, `updated_at` and, once the caller has continued the run,
+`resumed_at`. `updated_at` moves on every write, including node progress and reconciliation;
+`resumed_at` moves only when the caller answers a question, resumes, recovers, or restarts a
+builder with follow-up, so a Monitor can order runs by when they were started or last resumed.
+Runs never resumed have no `resumed_at`.
+
 `task-list-page` and `workflow-list-page` use opaque chronology cursors rather than shifting
 array offsets. Existing listing callers retain their original interfaces. A compact local catalog
 stores bounded headers; modern record writes maintain it. Legacy records are indexed through a

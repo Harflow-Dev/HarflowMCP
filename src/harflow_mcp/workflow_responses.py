@@ -149,7 +149,7 @@ def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
-    keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
+    keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     if "monitor_controls" in run:
         result["monitor_controls"] = copy.deepcopy(run["monitor_controls"])

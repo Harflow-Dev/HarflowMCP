@@ -2586,6 +2586,8 @@ async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
 
     Preserve spaces and word boundaries in prompt rather than compressing natural
     prose; the caller's source text is retained unchanged before builder input assembly.
+    Restarting an idle or completed builder sets the run's resumed_at; feedback queued to a
+    running builder does not.
     """
     _guard_launch_layout()
     from .caller_policy import require_mutation
@@ -2799,7 +2801,7 @@ async def revise_workflow_goal(run_id: str, goal: str, expected_revision: Strict
 @mcp.tool()
 @_task_document_errors
 async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]:
-    """List recorded workflow runs."""
+    """List recorded workflow runs. Each carries resumed_at once the caller has resumed it."""
     from .workflow_responses import compact
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise MCPError(INVALID_PARAMS, "offset must be nonnegative; limit must be 1–20")
@@ -2822,7 +2824,9 @@ async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, ac
 
     Deferred explicit run_ids and ancestor reads report preparation; preserve loaded headers
     and retry the read. Oversized or unsupported metadata reports blocked diagnostics with
-    incomplete counts, without publishing unknown placeholder outcomes.
+    incomplete counts, without publishing unknown placeholder outcomes. A header's optional
+    resumed_at (Unix seconds) is the caller's last continuation; it is absent if never resumed,
+    unlike updated_at, which changes on every write.
     """
     return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
 
@@ -2840,6 +2844,7 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     separately from known pending or uncertain approvals. interaction_state reports qualified
     caller liveness, advisory human Monitor availability and any persisted handover audit.
     Unknown caller identity never authorizes handover; server death alone is insufficient.
+    resumed_at (Unix seconds) appears once the caller has resumed or answered the run.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("status", run_id=workflow_run_id))
@@ -3007,6 +3012,7 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     configured recovery candidate for the preserved decision. Other prose does not approve replacement dispatch.
     Use pause_workflow to wait or cancel_workflow to stop. A paused quota checkpoint retains
     its decision_id and still requires the exact offered recovery answer (fallback or retry_current) on resume.
+    An accepted resume or answer sets the run's resumed_at; an answer routed through the root stamps the root.
     Worker usage-limit recovery is selected explicitly by the
     orchestrator using an issued retry continuation and candidate_id, within attempt limits.
     The orchestrator may instead ask the caller to pause, cancel, or choose a configured
@@ -3066,6 +3072,7 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
 
     Supply a reason and retain completed work. Interrupted scheduler recovery preserves
     existing attempts and decision budgets; uncertain execution ownership blocks recovery.
+    Accepted recovery sets the run's resumed_at.
 
     Preserve spaces and word boundaries in reason rather than compressing natural
     prose; the caller's source text is retained unchanged before workflow input assembly.

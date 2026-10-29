@@ -1222,7 +1222,12 @@ class WorkflowStore:
             logging.getLogger(__name__).warning("Unable to record notification point for %s", run.get("workflow_run_id"), exc_info=True)
 
     @layout_operation
-    def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
+    def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None, *, resumed: Any = False) -> dict[str, Any]:
+        """Persist one mutation. `resumed` marks a caller continuation and stamps `resumed_at`.
+
+        True stamps when the mutator newly accepted an input decision or left a suspended or failed
+        status for an active one; a callable decides from the mutated run. Replays and no-ops never stamp.
+        """
         observed, _ = self._read_run(run_id, refresh_atomic=True)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         # All tree mutations serialize with the human cancellation eligibility check.
@@ -1245,6 +1250,7 @@ class WorkflowStore:
             # presentation state when execution becomes active again.
             suspension_fields = ("attention_reason", "attention_source", "input_question", "input_question_items", "input_decision_id", "input_source", "optional_review_skip_available")
             suspension_before = {key: copy.deepcopy(run[key]) for key in suspension_fields if key in run}
+            accepted_before = set(run.get("accepted_inputs") or {})
             mutator(run)
             from .workflow_messages import reconcile as reconcile_messages
             reconcile_messages(run)
@@ -1264,6 +1270,12 @@ class WorkflowStore:
             else:
                 run["finished_at"] = None
             run["updated_at"] = now
+            if callable(resumed):
+                stamp = bool(resumed(run))
+            else:
+                stamp = bool(resumed) and (bool(set(run.get("accepted_inputs") or {}) - accepted_before) or attention_before[0] in {"needs_input", "needs_attention", "paused", "failed"} and run.get("status") in {"running", "building", "starting", "pending"})
+            if stamp:
+                run["resumed_at"] = now
             run["sequence"] = run.get("sequence", 0) + 1
             run["finished_at_sequence"] = run["sequence"]
             self._record_notification_point(run, attention_before[0], event, checkpoint_before)
@@ -1496,7 +1508,7 @@ class WorkflowStore:
                             r.pop(key, None)
                         if r.get('status') not in TERMINAL and r.get('status') != 'cancelling':
                             r['status'] = 'running'
-                result = self.update_run(run_id, finish_input, 'forwarded_input_answered', {'source': source_id})
+                result = self.update_run(run_id, finish_input, 'forwarded_input_answered', {'source': source_id}, resumed=not _internal and not _ordinary_answer)
                 from .workflow_invocation import publish_input
                 publish_input(self, child)
                 result = self.get_run(run_id, refresh_atomic=True)
@@ -1621,7 +1633,7 @@ class WorkflowStore:
                     token["decision_attempts"] = 0
                     token["on_demand_count"] = 0
                     token.pop("decision_error", None)
-            result = self.update_run(run_id, clear_forwarded, "forwarded_input_answered", {"source": source_id})
+            result = self.update_run(run_id, clear_forwarded, "forwarded_input_answered", {"source": source_id}, resumed=not _internal and not _ordinary_answer)
             if not _supervisor_present(result) and not result.get("parent_link"):
                 _launch(self, run_id)
             return result
@@ -1647,7 +1659,7 @@ class WorkflowStore:
                 r.pop("optional_review_skip_available", None)
                 r.pop("attention_reason", None)
                 r.pop("suspended_via_root", None)
-            result = self.update_run(run_id, clear_attention, "forwarded_attention_resumed", {"source": source_id})
+            result = self.update_run(run_id, clear_attention, "forwarded_attention_resumed", {"source": source_id}, resumed=not _internal and not _ordinary_answer)
             if not _supervisor_present(result) and not result.get("parent_link"):
                 _launch(self, run_id)
             return result
@@ -1789,7 +1801,7 @@ class WorkflowStore:
                 if instructions:
                     r["instructions"] = instructions
             record_delivery(r)
-        result = self.update_run(run_id, change, f"control:{action}", control_detail)
+        result = self.update_run(run_id, change, f"control:{action}", control_detail, resumed=action in {"resume", "recover"} and not _internal and not _ordinary_answer)
         if action in {"resume", "recover", "cancel"} and not _supervisor_present(result) and not result.get("parent_link"):
             _launch(self, run_id)
         return result
@@ -2352,7 +2364,7 @@ async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | No
             baseline = copy.deepcopy(r["generated_definition"])
             r.update(editing_definition=copy.deepcopy(r.get("builder_draft", baseline)), editing_source={"name": r["name"], "revision": baseline.get("revision", 0), "saved_definition": baseline}, source_name=r["name"], source_revision=baseline.get("revision", 0), source_saved_definition=baseline)
         r.setdefault("builder_messages", []).append(message)
-    run = storage.update_run(run_id, queue, "builder_feedback_queued", message)
+    run = storage.update_run(run_id, queue, "builder_feedback_queued", message, resumed=lambda r: launch)
     if launch:
         _launch(storage, run_id)
     tasks = [t for a in run["activations"] for t in a["tasks"]]

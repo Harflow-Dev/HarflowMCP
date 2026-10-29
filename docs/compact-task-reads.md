@@ -117,7 +117,9 @@ notification worker. See the Monitor contract notes in CLAUDE.md.
 ## Retained-history metadata
 
 Workflow history headers and compact status may include nullable numeric `finished_at`
-(Unix seconds) and `workflow_id`. New runs start with `finished_at: null`. The engine
+(Unix seconds), `workflow_id` and, once the caller has resumed the run, numeric
+`resumed_at` (Unix seconds; absent otherwise, and unaffected by node or engine activity).
+New runs start with `finished_at: null`. The engine
 stamps one observed time on a nonterminal-to-terminal status transition (`completed`,
 `failed`, `cancelled`, or `timed_out`), using that same time for `updated_at`. Reopening
 a terminal run clears completion time; a subsequent terminal transition records a new

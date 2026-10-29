@@ -123,14 +123,14 @@ async def test_forwarded_consent_delivery_is_exact_and_idempotent(storage, tmp_p
     storage.update_run(child['workflow_run_id'], lambda r: r.update(optional_skip_authorizations={execution_id: prior}), 'fixture')
     original = storage.update_run
     failed = False
-    def injected(identifier, change, event, detail=None):
+    def injected(identifier, change, event, detail=None, **options):
         nonlocal failed
         target = identifier == child['workflow_run_id'] and event == 'control:resume' if failure != 'parent_write' else identifier == root['workflow_run_id'] and event == 'forwarded_input_answered'
         if target and not failed:
             failed = True
-            if failure == 'after_child_write': original(identifier, change, event, detail)
+            if failure == 'after_child_write': original(identifier, change, event, detail, **options)
             raise OSError('injected failure')
-        return original(identifier, change, event, detail)
+        return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(storage, 'update_run', injected)
     options = dict(instructions=ANSWER, decision_id=child['input_decision_id'], allow_optional_review_skip=allow)
     with pytest.raises(OSError): storage.control(root['workflow_run_id'], 'resume', **options)

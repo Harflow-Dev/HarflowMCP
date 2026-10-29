@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Record `resumed_at` on workflow runs when the caller answers a question, resumes, recovers, or restarts a builder with follow-up, and include it in run headers and detail; node activity and engine retries never change it (#68).
 - Report `enforcement.local_commit` as denied, allowed, or not enforced. On Claude Code, `write_in_repo` denies a direct `git commit` and `publish` is the level that allows committing (#91).
 - Accept exact `git commit --no-edit` and `git merge --continue` at `write_in_repo` only while `MERGE_HEAD` exists, and stop claiming the broad commit deny when that carve-out omits it (#87).
 - Let `start_task` create one branch from a fetched base before the agent starts, and reuse that branch on resume and continuation (#94).

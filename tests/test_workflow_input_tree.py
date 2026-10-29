@@ -719,3 +719,67 @@ def test_root_local_checkpoint_revalidated_under_answer_lock(store, tmp_path, mo
     if moved_checkpoint == 'accepted_and_paused':
         assert persisted['status'] == 'paused'
         assert persisted['accepted_inputs'] == {'quota-X': {'accepted_at': 1.0}}
+
+
+def test_resumed_at_stamps_root_when_caller_answers_nested_child(store, tmp_path, monkeypatch):
+    root, parent, child = nested_question(store, tmp_path)
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    assert store.get_run(root['workflow_run_id'])['status'] == 'running'
+    assert 'resumed_at' not in store.get_run(root['workflow_run_id'])
+    result = store.control(root['workflow_run_id'], 'resume', 'nested answer', decision_id='nested')
+    assert result['resumed_at'] == result['updated_at']
+    # Internal child control never stamps its own run or an intermediate parent.
+    assert 'resumed_at' not in store.get_run(child['workflow_run_id'])
+    assert 'resumed_at' not in store.get_run(parent['workflow_run_id'])
+    stamp = result['resumed_at']
+    # Receipt replay of the same answer does not stamp again.
+    replay = store.control(root['workflow_run_id'], 'resume', 'nested answer', decision_id='nested')
+    assert replay['resumed_at'] == stamp
+    assert store.get_run(root['workflow_run_id'])['resumed_at'] == stamp
+
+
+def test_resumed_at_stamps_root_for_direct_child_answer_but_not_child(store, tmp_path, monkeypatch):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = question(store, root, root['activations'][0], decision='first')
+    inv.publish_input(store, child)
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    result = store.control(root['workflow_run_id'], 'resume', 'answer', decision_id='first')
+    assert result['resumed_at'] == result['updated_at']
+    assert 'resumed_at' not in store.get_run(child['workflow_run_id'])
+
+
+def test_resumed_at_forwarded_attention_resume_stamps_root_only(store, tmp_path, monkeypatch):
+    parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = finished_child(store, parent, parent['activations'][0], status='paused')
+    child['attention_reason'] = 'Child needs confirmation'
+    write_run(store, child)
+    inv.publish_attention(store, child)
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    result = store.control(parent['workflow_run_id'], 'resume', 'Resume child')
+    assert result['resumed_at'] == result['updated_at']
+    assert 'resumed_at' not in store.get_run(child['workflow_run_id'])
+
+
+def test_resumed_at_local_checkpoint_answer_stamps_and_rejects_second_answer(store, tmp_path, monkeypatch):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    store.update_run(root['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='local', input_question='Local?', activations=[], pending=[], input_source={'workflow_run_id': root['workflow_run_id'], 'workflow_name': root['name'], 'path': [root['workflow_run_id']]}), 'fixture')
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    result = store.control(root['workflow_run_id'], 'resume', 'answer', decision_id='local')
+    assert result['resumed_at'] == result['updated_at']
+    stamp = result['resumed_at']
+    with pytest.raises(workflows.WorkflowError):
+        store.control(root['workflow_run_id'], 'resume', 'answer', decision_id='local')
+    assert store.get_run(root['workflow_run_id'])['resumed_at'] == stamp
+
+
+def test_resumed_at_parent_orchestrator_answer_stamps_neither_child_nor_root(store, tmp_path, monkeypatch):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = question(store, root, root['activations'][0], decision='first')
+    inv.publish_input(store, child)
+    store.update_run(root['workflow_run_id'], lambda r: r.update(resumed_at=42.0), 'fixture')
+    store.update_run(child['workflow_run_id'], lambda r: r.update(resumed_at=43.0), 'fixture')
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    store.control(child['workflow_run_id'], 'resume', 'ordinary answer', decision_id='first', _internal=True, _ordinary_answer=True)
+    assert store.get_run(child['workflow_run_id'])['status'] == 'running'
+    assert store.get_run(child['workflow_run_id'])['resumed_at'] == 43.0
+    assert store.get_run(root['workflow_run_id'])['resumed_at'] == 42.0

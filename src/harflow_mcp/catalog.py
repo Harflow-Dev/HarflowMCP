@@ -225,7 +225,7 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     if isinstance(result.get('sessions'), dict):
         result['sessions'] = {'orchestrator': str(result['sessions']['orchestrator'])[:128]} if result['sessions'].get('orchestrator') else {}
     protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'needs_direct_lookup', 'sessions'}
-    metadata = {'finished_at', 'workflow_id', 'workflow_builder', 'kind', 'settling', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id'}
+    metadata = {'finished_at', 'resumed_at', 'workflow_id', 'workflow_builder', 'kind', 'settling', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id'}
     protected.update(metadata)
     protected.update({'persisted_status', 'observed_exit', 'process_identity_state', 'needs_reconciliation', 'status_reconciled'})
     for key, value in list(result.items()):
