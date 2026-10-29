@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Report `enforcement.local_commit` as denied, allowed, or not enforced. On Claude Code, `write_in_repo` denies a direct `git commit` and `publish` is the level that allows committing (#91).
+- Accept exact `git commit --no-edit` and `git merge --continue` at `write_in_repo` only while `MERGE_HEAD` exists, and stop claiming the broad commit deny when that carve-out omits it (#87).
+- Let `start_task` create one branch from a fetched base before the agent starts, and reuse that branch on resume and continuation (#94).
+- Let dispatch, resume, and continuation refresh remote-tracking refs, including at `read_only`, without changing the agent's freedom (#96).
 - Report each `allowed_commands` grant as exact or prefix, warn when a bare program name matches only a command with no arguments, and explain launcher and option-only wildcard refusals (#88, #95).
 - Tell callers how to fix each GitHub HTTPS authentication observation, including additive `git_environment.remedy` (#89).
 - Name invalid compact task fields and filters, and list the accepted values (#93).

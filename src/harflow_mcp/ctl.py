@@ -330,6 +330,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     run_p.add_argument("--allowed-command", action="append", default=None,
                        help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
+    run_p.add_argument("--branch", default=None, help="Literal branch Harflow creates from --base before the agent starts")
+    run_p.add_argument("--base", default=None, help="Remote-tracking base <remote>/<branch>, for example origin/develop")
+    run_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE", help="Literal remote Harflow fetches before the agent starts; repeatable")
+    run_p.add_argument("--fetch-default", action="store_true", help="Fetch the default remote before the agent starts")
+    run_p.add_argument("--fetch-required", action="store_true", help="Refuse dispatch when the fetch fails")
     run_p.add_argument("--resource", action="append", default=None, metavar="NAME",
                        help="exclusive named resource the task needs before it starts (repeatable, at most 16); "
                             "the task waits in the background while another run holds it. Not for --workflow runs")
@@ -359,6 +364,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     preview_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     preview_p.add_argument("--allowed-command", action="append", default=None,
                            help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
+    preview_p.add_argument("--branch", default=None)
+    preview_p.add_argument("--base", default=None)
+    preview_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE")
+    preview_p.add_argument("--fetch-default", action="store_true")
+    preview_p.add_argument("--fetch-required", action="store_true")
     preview_p.add_argument("--group", default=None, help="Shared scratch group for scoped report output")
     preview_p.add_argument("--qualification-only", action="store_true", help="discover required cached qualification without provider self-tests")
     preview_p.add_argument("--json", action="store_true")
@@ -377,6 +387,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     resume_p.add_argument("--allowed-command", action="append", default=None,
                           help="Replace the saved command grants for this run (repeatable); omitted inherits them")
+    resume_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE")
+    resume_p.add_argument("--fetch-default", action="store_true")
+    resume_p.add_argument("--fetch-required", action="store_true")
     resume_p.add_argument("--json", action="store_true")
 
     continue_p = sub.add_parser("continue", help="start a fresh session from a positively settled standalone task; follow-ups queued with `send` are consumed by it")
@@ -390,6 +403,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     continue_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     continue_p.add_argument("--allowed-command", action="append", default=None,
                             help="Replace the saved command grants for the successor (repeatable); omitted inherits them")
+    continue_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE")
+    continue_p.add_argument("--fetch-default", action="store_true")
+    continue_p.add_argument("--fetch-required", action="store_true")
     continue_p.add_argument("--json", action="store_true")
 
     allowlist_p = sub.add_parser("mcp-allowlist", help="inspect or explicitly edit harness-global MCP approval rules")
@@ -1199,6 +1215,29 @@ def _network(raw: str | None) -> bool | None:
     return None if raw is None else raw == "true"
 
 
+def _git_dispatch(args: argparse.Namespace, *, branch: bool = False) -> dict[str, Any]:
+    """Optional fetch and, on a fresh start, branch preparation kwargs."""
+    from mcp import MCPError
+    from mcp.types import INVALID_PARAMS
+    names = getattr(args, "fetch", None)
+    default = bool(getattr(args, "fetch_default", False))
+    if names and default:
+        raise MCPError(INVALID_PARAMS, "pass either --fetch or --fetch-default, not both")
+    out: dict[str, Any] = {}
+    if default:
+        out["fetch"] = True
+    elif names:
+        out["fetch"] = list(names)
+    if getattr(args, "fetch_required", False):
+        out["fetch_required"] = True
+    if branch:
+        if getattr(args, "branch", None) is not None:
+            out["branch"] = args.branch
+        if getattr(args, "base", None) is not None:
+            out["base"] = args.base
+    return out
+
+
 def _run_action(args: argparse.Namespace):
     async def action(registry: Any) -> Any:
         # The MCP tool's own checks, so `run` accepts exactly what `start_task` accepts.
@@ -1239,6 +1278,7 @@ def _run_action(args: argparse.Namespace):
             interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
             **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}),
+            **_git_dispatch(args, branch=True),
             **({'resources': args.resource} if getattr(args, 'resource', None) is not None else {}),
             **({'worktree': {key: value for key, value in (('base_ref', args.worktree_base), ('branch', args.worktree_branch), ('detach', args.worktree_detach or None)) if value is not None}} if getattr(args, 'worktree', False) else {}),
             **({'resource_wait_seconds': args.resource_wait_seconds} if getattr(args, 'resource_wait_seconds', None) is not None else {}),
@@ -1277,6 +1317,7 @@ def _resume_action(args: argparse.Namespace):
         return await registry.resume_record(
             record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True,
             **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}),
+            **_git_dispatch(args),
         )
 
     return action
@@ -1293,7 +1334,7 @@ def _continue_action(args: argparse.Namespace):
             source = await asyncio.to_thread(store.read, registry.log_dir, args.task_id, include_prompt=False)
             if source is not None:
                 server._check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), args.allowed_command)
-        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}))
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}), **_git_dispatch(args))
     return action
 
 
@@ -1647,6 +1688,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 **({"group": args.group} if args.group is not None else {}),
                 **({"caller_write_approvals": True} if args.caller_write_approvals else {}),
                 **({"allowed_commands": getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({"git_https_rewrite": args.git_https_rewrite} if getattr(args, "git_https_rewrite", None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}),
+                **_git_dispatch(args, branch=True),
             ))
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
@@ -1754,6 +1796,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 return _fail(args, "invalid_params", "Extra writable paths are unavailable for workflow launches")
             if getattr(args, 'allowed_command', None) is not None:
                 return _fail(args, "invalid_params", "allowed_commands is unavailable for workflow launches; grant commands on saved workflow agent candidates instead")
+            if getattr(args, "branch", None) or getattr(args, "base", None) or getattr(args, "fetch", None) or getattr(args, "fetch_default", False) or getattr(args, "fetch_required", False):
+                return _fail(args, "invalid_params", "branch, base and fetch belong on saved workflow agent nodes, not on the workflow launch")
             if args.auto_continue:
                 return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:

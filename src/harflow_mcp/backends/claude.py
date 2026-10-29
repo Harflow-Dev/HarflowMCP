@@ -109,7 +109,11 @@ from .base import (
 BINARY = "claude"
 
 # One comma-separated value on purpose: the option is variadic.
-DISALLOWED_TOOLS = "Bash(git commit:*),Bash(git push:*)"
+# `PUSH_DENY` alone is the write_in_repo list when a `git commit --no-edit` grant is present:
+# a deny beats an allow, so the commit deny has to be omitted rather than overridden.
+COMMIT_DENY = "Bash(git commit:*)"
+PUSH_DENY = "Bash(git push:*)"
+DISALLOWED_TOOLS = f"{COMMIT_DENY},{PUSH_DENY}"
 
 # The freedoms at which the deny patterns above are applied. Deliberately excludes `publish` and
 # `unrestricted`: deny beats allow, so keeping the denies at `publish` would defeat its own
@@ -528,6 +532,10 @@ class ClaudeBackend(ExtraPathsUnsupported):
         argv = list(invocation.argv)
         # Only the option region: after `--` the prompt is caller text that may equal a flag name.
         options = argv[:argv.index("--")] if "--" in argv else argv
+        from .. import merge_gate
+        denied_at = options.index("--disallowedTools") + 1 if "--disallowedTools" in options else None
+        if denied_at is not None:
+            argv[denied_at] = merge_gate.disallowed_tools(patterns, DISALLOWED_TOOLS, PUSH_DENY)
         entries = ",".join(f"Bash({pattern})" for pattern in patterns)
         if "--allowedTools" in options:
             index = options.index("--allowedTools") + 1
@@ -550,7 +558,9 @@ class ClaudeBackend(ExtraPathsUnsupported):
         from . import claude_commands as grammar
         if enforcement.freedom not in grammar.FREEDOMS:
             raise UnsupportedCapability(f"allowed_commands is supported only at {' and '.join(grammar.FREEDOMS)}")
+        from .. import merge_gate
         matches = grammar.command_matches(patterns)
+        conclusion = merge_gate.report(patterns)
         exact = sum(item["match"] == "exact" for item in matches)
         prefix = len(matches) - exact
         if exact and prefix:
@@ -559,9 +569,20 @@ class ClaudeBackend(ExtraPathsUnsupported):
             kind = f"{prefix} prefix"
         else:
             kind = f"{exact} exact"
+        caveats = enforcement.caveats + _COMMAND_GRANT_CAVEATS
+        denied = enforcement.direct_commit_commands_denied
+        mechanism = enforcement.mechanism
+        if conclusion is not None:
+            if conclusion["commit_deny_omitted"]:
+                caveats = tuple(item for item in caveats if "deny patterns still refuse a direct git commit" not in item)
+                denied = False
+                mechanism = mechanism.replace(DISALLOWED_TOOLS, PUSH_DENY)
+            caveats = caveats + (merge_gate.caveat(),)
         return replace(enforcement, extra_allowed_commands=tuple(patterns), extra_allowed_command_matches=matches,
-                       mechanism=f"{enforcement.mechanism} + {len(patterns)} dispatch-time Bash allow pattern(s) ({kind}) in the same --allowedTools value",
-                       caveats=enforcement.caveats + _COMMAND_GRANT_CAVEATS)
+                       direct_commit_commands_denied=denied,
+                       merge_conclusion=conclusion,
+                       mechanism=f"{mechanism} + {len(patterns)} dispatch-time Bash allow pattern(s) ({kind}) in the same --allowedTools value",
+                       caveats=caveats)
 
     def approval_enforcement(self, enforcement, version, enabled, write):
         from . import claude_qualification as q
@@ -969,8 +990,10 @@ class ClaudeBackend(ExtraPathsUnsupported):
 
         # Exact per-freedom validation rejects broader or conflicting allow rules.
         if freedom in DENY_FREEDOMS:
+            from .. import merge_gate
             denied = self._exactly_one(seen, "--disallowedTools", argv)
-            if denied != DISALLOWED_TOOLS:
+            expected_deny = merge_gate.disallowed_tools(commands, DISALLOWED_TOOLS, PUSH_DENY)
+            if denied != expected_deny:
                 raise UnsafeInvocationError(
                     f"--disallowedTools was {denied!r}, expected the deny list: {argv!r}"
                 )
@@ -1181,6 +1204,10 @@ class ClaudeBackend(ExtraPathsUnsupported):
             # boolean that says "blocked" would be a promise this cannot keep.
             commit_push_blocked=False,
             direct_commit_commands_denied=denies,
+            # Deny patterns refuse a direct commit at read_only and write_in_repo. publish's
+            # allow-list and unrestricted's dropped denies both permit one. A merge-conclusion
+            # grant does not change this ordinary policy; it is reported on merge_conclusion.
+            local_commit="denied" if denies else "allowed",
             # publish and unrestricted are the two freedoms that authorize a publish attempt —
             # see the field's own docstring for what that does and does not promise. A network
             # request changes nothing here: this backend has no barrier of its own either way.

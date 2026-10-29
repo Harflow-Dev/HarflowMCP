@@ -83,7 +83,7 @@ or move verification to a suitable node.
 
 | Harness | `read_only` | `write_in_repo` | `publish` | `unrestricted` |
 | --- | --- | --- | --- | --- |
-| Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns (plus any `allowed_commands`, which cannot override them) | `acceptEdits`; Git commit/push and bounded PR/repository command allow rules, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
+| Claude Code | `plan`; direct Git commit/push deny patterns. `local_commit`: denied | `acceptEdits`; same deny patterns. `local_commit`: denied. An exact merge-conclusion grant omits only the commit deny; see below | `acceptEdits`; Git commit/push and bounded PR/repository command allow rules, with bridge deny patterns removed. `local_commit`: allowed | `bypassPermissions`; bridge allow/deny patterns omitted. `local_commit`: allowed |
 | Codex | `read-only` OS sandbox | `workspace-write`; network off by default | `workspace-write`; network on by default | `danger-full-access` |
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
 | Vibe | `ask` approval profile (not a write-tool exclusion) | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
@@ -116,6 +116,11 @@ These levels authorize an assignment; they do not make the harnesses equally con
   these two freedoms apart. Caller approvals, `allowed_commands`, a turn cap, and reasoning effort
   are refused. Live follow-up on stdin is off. The editor login does not authenticate `agent`;
   see the first-time setup above.
+
+`enforcement.local_commit` is `denied`, `allowed`, or `not_enforced`. Claude Code reports `denied`
+at `read_only` and `write_in_repo`, and `allowed` at `publish` and `unrestricted`. Codex, OpenCode,
+Vibe, Antigravity, and Cursor report `not_enforced` at every freedom: they have no per-command
+commit deny Harflow can claim. A merge-conclusion grant does not change this ordinary policy.
 
 Write-capable workers receive `HARFLOW_SCRATCH` (alias `HARFLOW_TASK_SCRATCH`), and every worker receives
 `HARFLOW_CHAIN_SCRATCH` and, in a group, `HARFLOW_GROUP_SCRATCH` (shared folders; see
@@ -173,7 +178,8 @@ harflow-ctl run --repo . --prompt "Run the unit tests and fix failures" \
 
 Patterns become `Bash(<pattern>)` entries in the one comma-separated `--allowedTools` value, after the access level's
 own entries. At `write_in_repo` the unchanged `--disallowedTools` stays next to them and still wins (measured), so the
-deny patterns still refuse a direct `git commit` or `git push` command string. A granted program, or code it runs
+deny patterns still refuse a direct `git commit` or `git push` command string, except the merge-conclusion
+carve-out below. A granted program, or code it runs
 (a Makefile target, a test script), can still invoke git; grants do not prevent commits.
 
 **Limits.** At most 16 patterns, 256 bytes each and 2048 in total; no control characters, outer whitespace or
@@ -230,6 +236,20 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
   Other Git grant patterns remain refused. `publish` still independently allows commit and push; these grants
   do not make it a Git sandbox. Repository configuration, hooks, remote helpers and credentials remain effective.
 
+**Merge conclusion.** At `write_in_repo` and `publish`, the exact grants `git commit --no-edit` and
+`git merge --continue` are accepted, optionally after one contained `-C`. No message, `-a`, pathspec,
+wildcard, or other option is accepted. `rebase --continue` and `cherry-pick --continue` are refused.
+Because a Claude deny beats an allow, a `git commit --no-edit` grant omits `Bash(git commit:*)` from
+`--disallowedTools` and keeps `Bash(git push:*)`. `direct_commit_commands_denied` is then false: the
+broad commit deny is gone, and saying otherwise would overclaim. Other commit forms are not
+allow-listed, so a headless run still refuses them as needing approval. `local_commit` stays `denied`.
+`enforcement.merge_conclusion` records the grant, `requires: MERGE_HEAD`, `ordinary_commits: refused`,
+and `gate: path_wrapper`. Harflow prepends a `git` wrapper to that task's `PATH`. The wrapper refuses
+those two command forms unless `MERGE_HEAD` exists and execs the real git otherwise. It is not an OS
+boundary: an absolute git path, or a granted program that invokes git, is outside it. Codex, OpenCode,
+and Vibe refuse every `allowed_commands` grant, including this one. `git merge --continue` does not
+omit the commit deny.
+
 **Clean checkout preflight.** Initial dispatch with a `pull`, `switch` or `checkout` grant refuses
 tracked, staged or untracked changes in each targeted checkout, with instructions to inspect and
 preserve them before retrying. It never stashes, resets or switches automatically. Fetch-only grants
@@ -243,7 +263,38 @@ A grant is an approval in Claude's permission layer, not OS enforcement. An exac
 repository (Makefiles, test configuration, scripts); a wildcard lets it take any further arguments; a chained command
 needs every part allowed; and user or project settings can add more allowed commands. Path containment is evaluated
 at dispatch time and cannot prevent a later symlink change. The boundaries that do hold are the direct caller who
-writes the grant and the nested rule below; the access level's deny patterns refuse only direct command strings.
+writes the grant and the nested rule below; the access level's deny patterns refuse only direct command strings,
+except the merge-conclusion carve-out, which omits the broad commit deny and is reported as such.
+
+### Dispatch Git (`branch`, `base`, `fetch`)
+
+Harflow can prepare the checkout before the agent starts. This is Harflow's git, not an
+`allowed_commands` grant, so it runs on every backend.
+
+`branch` and `base` are set together. `base` is `<remote>/<branch>` (the first component is the
+remote; `origin/feature/x` fetches remote `origin` and branch `feature/x`). Remotes whose names
+contain `/` are not supported. Names are literal: no options, refspecs, or revision expressions.
+Harflow runs `git fetch <remote> <branch>` and `git switch -c <branch> <base>` in `repo_path`, with
+hooks and filters disabled, inside a 30 second budget per command. This is refused at `read_only`,
+with a worktree, and when the checkout is dirty, the branch already exists, the base cannot be
+fetched, or a merge or rebase is in progress. Harflow never stashes, resets, or forces. The task
+record and `enforcement.dispatch_git` report the prepared branch and base commit, and the outcome's
+`base_commit` is that commit. Resume and continuation reuse the existing branch and do not recreate
+it. A later fresh start that asks for the same branch is refused, so a workflow node retry that
+starts a fresh session must not ask to recreate a branch the previous attempt already created.
+Mid-run branch changes stay on the exact agent-side grants.
+
+`fetch: true` refreshes the default remote (`checkout.defaultRemote`, otherwise the only remote,
+otherwise `origin` when it is present). A list refreshes those literal remote names. `fetch_required`
+without `fetch` is an error. The command is `git fetch --prune <remote> refs/heads/*:refs/remotes/<remote>/*`
+with no leading `+`, no `--force`, no `--tags`, and `remote.<name>.tagOpt` cleared so config cannot
+widen past Git's default auto-follow. Hooks and filters are disabled. The working tree, index, and
+local branches are not touched, and tags are not fetched beyond Git's defaults. Fetch is allowed at
+every freedom, including `read_only`, because Harflow writes `.git` and the agent's freedom is
+unchanged. A failed optional fetch is recorded and the task still starts, with a notice that refs may
+be stale. `fetch_required` refuses dispatch instead. `preview_task_permissions` shows the step
+without running git. Branch preparation and an optional fetch share this step; the base fetch is
+required and is not repeated on resume.
 
 **Nested dispatch.** A task dispatched from inside another Harflow task may grant only exact patterns the detected
 caller holds, unless the caller is `unrestricted`. Omitting grants does not inherit them, and an undecidable caller

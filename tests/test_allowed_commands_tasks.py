@@ -53,6 +53,50 @@ async def run(env, **kwargs):
 
 # --- start ----------------------------------------------------------------------------------------
 
+async def test_merge_conclusion_omits_only_the_commit_deny_and_installs_the_gate(env):
+    task = await run(env, allowed_commands=["git commit --no-edit"])
+    (argv,) = env.launches()
+    assert env.flag(argv, "--disallowedTools") == ["Bash(git push:*)"]
+    assert task.enforcement["local_commit"] == "denied"
+    assert task.enforcement["direct_commit_commands_denied"] is False
+    assert task.enforcement["merge_conclusion"]["requires"] == "MERGE_HEAD"
+    wrapper = env.log_dir / f"{task.task_id}.merge-gate" / "git"
+    assert wrapper.is_file() and os.access(wrapper, os.X_OK)
+
+
+async def test_start_prepares_a_branch_and_resume_reuses_it(env):
+    import subprocess
+    repo = env.repo
+    (repo / "a").write_text("a\n")
+    subprocess.run(["git", "add", "a"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "a"], cwd=repo, check=True)
+    bare = env.tmp / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/develop"], cwd=repo, check=True)
+    task = await run(env, branch="feature/x", base="origin/develop")
+    assert task.dispatch_git["created"] is True
+    assert task.base_commit == task.dispatch_git["base_commit"]
+    assert task.enforcement["dispatch_git"]["branch"] == "feature/x"
+    assert task.enforcement["local_commit"] == "denied"
+    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+    assert head.stdout.strip() == "feature/x"
+    resumed = await env.registry.resume(task, "again")
+    await asyncio.wait_for(resumed.done.wait(), timeout=30)
+    assert resumed.dispatch_git["reused"] is True and resumed.dispatch_git["created"] is False
+    record = store.read(env.log_dir, task.task_id)
+    assert store.snapshot(env.log_dir, record)["dispatch_git"]["branch"] == "feature/x"
+
+
+async def test_preview_reports_dispatch_git_without_running_it(env):
+    preview = await env.registry.preview_permissions(
+        env.repo, backend=get("claude"), freedom="write_in_repo", branch="feature/x", base="origin/develop",
+    )
+    assert preview["dispatch_git"]["status"] == "preview"
+    assert preview["enforcement"]["dispatch_git"]["branch"] == "feature/x"
+    assert preview["enforcement"]["local_commit"] == "denied"
+
+
 async def test_scripted_permissions_use_the_fixture_seed_without_host_probes(env, monkeypatch):
     from harflow_mcp.backends import qualification
     def unexpected_probe(*_args):

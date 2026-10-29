@@ -419,6 +419,16 @@ def test_enforcement_never_overclaims(backend, freedom: str) -> None:
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 @pytest.mark.parametrize("freedom", FREEDOMS)
+def test_local_commit_reports_only_what_the_harness_denies(backend, freedom: str) -> None:
+    reported = backend.enforcement(freedom).local_commit
+    if backend.name == "claude":
+        assert reported == ("denied" if freedom in {"read_only", "write_in_repo"} else "allowed")
+    else:
+        assert reported == "not_enforced"
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
 def test_confined_writes_say_where_they_may_still_land(backend, freedom: str) -> None:
     """"Confined" must not be read as "repo only" — codex also permits temporary directories."""
     enforcement = backend.enforcement(freedom)

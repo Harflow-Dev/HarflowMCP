@@ -1794,6 +1794,12 @@ An agent caller may save or start only grants its own task holds, unless it is `
 carry grants: a `prefer_subagent` node with grants runs Headless and the preview says why. The top-level
 `start_workflow` and `harflow-ctl run --workflow` still refuse `allowed_commands`: grants belong to saved candidates.
 
+An agent node may also set `branch` and `base` together, and `fetch` or `fetch_required`. Harflow
+prepares that checkout before the node starts. A resumed node refreshes refs when `fetch` is set and
+reuses a branch it already created; a fresh retry that asks for the same branch is refused. The
+workflow launch itself refuses `branch`, `base`, and `fetch`. See
+[dispatch Git](harness-permissions.md#dispatch-git-branch-base-fetch).
+
 ### Caller approval interaction
 
 Each agent candidate, including every fallback, can save `caller_approvals: true`; omitted values

@@ -78,7 +78,7 @@ GRAMMAR = {
     "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
     "launchers": f"the launched command is validated recursively, at most {MAX_LAUNCHER_DEPTH} deep",
     "gh": "publish only, for a fixed list of subcommand pairs",
-    "git": "write_in_repo and publish; exact fetch, ff-only pull and non-force branch preparation, optionally with one contained -C path",
+    "git": "write_in_repo and publish; exact fetch, ff-only pull, non-force branch preparation, and merge conclusion (git commit --no-edit or git merge --continue), optionally with one contained -C path",
 }
 
 
@@ -311,8 +311,15 @@ def _git(tokens: list[str], wildcard: bool, freedom: str, root: str | None) -> N
             len(args) in (3, 4) and args[1] == "-c" and all(name(v) for v in args[2:]))
     elif args[:2] == ["checkout", "-b"]:
         accepted = len(args) in (3, 4) and all(name(v) for v in args[2:])
+    elif args == ["commit", "--no-edit"] or args == ["merge", "--continue"]:
+        # No message, -a, pathspec or other option. Usable at runtime only while MERGE_HEAD exists.
+        accepted = True
     if not accepted:
-        raise _Refusal("git is refused except exact fetch <remote> [branch], pull --ff-only <remote> <branch>, switch <branch>, switch -c <branch> [start], or checkout -b <branch> [start], optionally after one -C <contained path>")
+        raise _Refusal(
+            "git is refused except exact fetch <remote> [branch], pull --ff-only <remote> <branch>, "
+            "switch <branch>, switch -c <branch> [start], checkout -b <branch> [start], "
+            "commit --no-edit, or merge --continue, optionally after one -C <contained path>"
+        )
 
 
 def _interpreter(program: str, rest: list[str]) -> None:

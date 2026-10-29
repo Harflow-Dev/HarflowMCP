@@ -144,7 +144,11 @@ change needs a re-measurement recorded there. The code rules embedded in those f
 - On claude, `publish` drops the git denies and adds `--allowedTools`, because the freedom's own
   allow entries would be defeated by its own denies (deny beats allow). `write_in_repo` with
   `allowed_commands` intentionally passes both: the unchanged denies stay and still win (measured), so
-  no pattern can re-enable a direct `git commit` or `git push` command string there (a granted program may still invoke git itself).
+  no pattern can re-enable a direct `git commit` or `git push` command string there, except the exact
+  merge-conclusion carve-out (`git commit --no-edit` or `git merge --continue`). That grant omits
+  `Bash(git commit:*)` because deny beats allow, keeps the push deny, and is gated by Harflow's PATH
+  wrapper on `MERGE_HEAD`. `direct_commit_commands_denied` is then false and `local_commit` stays
+  denied. A granted program may still invoke git itself.
 - `assert_safe` validates the whole `Invocation` and refuses non-canonical tokens. Each backend's
   `assert_safe` defines the exact accepted shapes.
 - A prompt never rides where a CLI can parse it as an option.

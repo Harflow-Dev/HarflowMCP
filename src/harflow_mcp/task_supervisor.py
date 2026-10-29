@@ -300,9 +300,11 @@ async def run(descriptor: int, task_id: str, generation: str):
                         # an await here would be cancelled again before the release landed.
                         task_resources.release_quietly(registry.log_dir, grant['reservation_id'])
                     _release_followups(registry.log_dir, task_id, request, 'released')
+                    from .dispatch_git import DispatchGitError
+                    request = isinstance(exc, DispatchGitError)
                     mark(registry.log_dir, task_id, generation, state='not_started', error=str(exc),
-                         **({'not_started_reason': 'cancelled' if cancelled else 'owner_error'}
-                            if grant is not None or worktree_request is not None or cancelled else {}))
+                         **({'not_started_reason': 'cancelled' if cancelled else 'request' if request else 'owner_error'}
+                            if grant is not None or worktree_request is not None or cancelled or request else {}))
                     task_resources.clear_cancel(registry.log_dir, task_id)
                     if cancelled:
                         return  # an honoured cancel is an outcome, not an owner failure

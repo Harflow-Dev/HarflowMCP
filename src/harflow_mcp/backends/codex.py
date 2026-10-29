@@ -1125,6 +1125,8 @@ class CodexBackend(ExtraPathsUnsupported):
             # Codex has no per-command deny list at all, so neither claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            # No per-command commit deny. read_only still confines writes; that is not a commit policy.
+            local_commit="not_enforced",
             # publish and unrestricted are the freedoms that authorize a publish attempt — see
             # the field's own docstring for what that does and does not promise. write_in_repo
             # with network=True keeps this False: a remote push is mechanically possible there,

@@ -112,7 +112,11 @@ history or zero usage. See [statistics contracts](docs/contracts.md#finished-ret
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at
 `write_in_repo` as well as `publish`. Initial transitions refuse dirty checkouts without stashing
-or resetting; commit/push authority remains separate. See the
+or resetting; commit/push authority remains separate. An exact `git commit --no-edit` or
+`git merge --continue` grant is the one carve-out: it is usable only while a merge is in progress.
+`enforcement.local_commit` says whether a direct local commit is denied, allowed, or not enforced.
+Harflow can also fetch, and can create one branch from a fetched base, before the agent starts.
+See the
 [grant grammar and per-run workflow migration](docs/harness-permissions.md#dispatch-time-command-grants-allowed_commands).
 Other backends explicitly refuse command-grant requests rather than silently broadening access.
 

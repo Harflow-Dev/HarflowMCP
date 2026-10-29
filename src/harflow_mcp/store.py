@@ -151,6 +151,8 @@ class TaskRecord:
     terminal_summary: str | None = None
     """Bounded terminal display summary for notifications without replaying raw logs."""
     start_dirty: bool | None = None
+    dispatch_git: dict[str, Any] | None = None
+    """Git preparation Harflow ran before the agent, when branch, base or fetch was requested."""
     """Whether `git status --porcelain` was non-empty at spawn — None if the probe failed, timed
     out, or predates this field."""
     spawned_by: str | None = None
@@ -1203,6 +1205,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "owned_by_live_server": owned if status == "running" else None,
         "base_commit": record.base_commit,
         "start_dirty": record.start_dirty,
+        **({"dispatch_git": record.dispatch_git} if record.dispatch_git else {}),
         "outcome": project_outcome(record.outcome),
         "events_log": str(events.events_path(log_dir, record.task_id)),
         "resume_command": None if has_extra_path_authority(record) or has_group_report_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),

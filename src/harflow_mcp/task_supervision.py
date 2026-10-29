@@ -384,7 +384,7 @@ async def launch(registry, invocation, kwargs):
         if value['state'] == 'not_started':
             # A launch that asked for resources and was refused (nothing free right now, or a borrow
             # that was no longer covered) is a request error, not an owner fault.
-            error = (ValueError if value.get('resources') is not None or value.get('worktree') is not None else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))
+            error = (ValueError if value.get('resources') is not None or value.get('worktree') is not None or value.get('not_started_reason') == 'request' else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))
             error.harflow_not_started = True
             raise error
         if value['state'] in {'waiting_for_resources', 'granted'}:

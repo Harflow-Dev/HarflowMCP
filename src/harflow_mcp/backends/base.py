@@ -354,6 +354,18 @@ class Enforcement:
     """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
     extra_allowed_command_matches: tuple[dict[str, str], ...] = ()
     """Each grant as `{pattern, match}` with match `exact` or `prefix`; omitted with `extra_allowed_commands`."""
+    local_commit: str = "not_enforced"
+    """Ordinary local-commit policy: `denied`, `allowed`, or `not_enforced`.
+
+    `denied` means this freedom's permission layer refuses a direct `git commit`. `allowed` means
+    the freedom authorizes one. `not_enforced` means Harflow has no commit-specific control, which
+    is not a claim that a commit will fail or succeed. A merge-conclusion grant is reported
+    separately and does not change this ordinary policy.
+    """
+    merge_conclusion: dict[str, Any] | None = None
+    """Present when an exact merge-in-progress commit grant is on this run."""
+    dispatch_git: dict[str, Any] | None = None
+    """Branch, base and fetch preparation Harflow ran, or the preview of what it will run."""
 
     @property
     def publish_attempts_allowed(self) -> bool:
@@ -377,6 +389,9 @@ class Enforcement:
             **({"group_report_output": self.group_report_output} if self.group_report_output is not None else {}),
             "commit_push_blocked": self.commit_push_blocked,
             "direct_commit_commands_denied": self.direct_commit_commands_denied,
+            "local_commit": self.local_commit,
+            **({"merge_conclusion": self.merge_conclusion} if self.merge_conclusion is not None else {}),
+            **({"dispatch_git": self.dispatch_git} if self.dispatch_git is not None else {}),
             "publish_attempts_allowed": self.publish_attempts_allowed,
             # Deprecated alias retained for one compatibility version.
             "publish_attempts_allowed_by_polybridge": self.publish_attempts_allowed,
@@ -1160,6 +1175,11 @@ def nested_enforcement_violation(
         child_value = _field(child, field_name)
         if parent_value and not child_value:
             return _violation(field_name, parent_value, child_value)
+
+    # Absent on records written before the field. `denied` is the only strict claim; a child
+    # that is `allowed` or `not_enforced` can make a local commit this parent cannot.
+    if parent.get("local_commit") == "denied" and _field(child, "local_commit") != "denied":
+        return _violation("local_commit", parent.get("local_commit"), _field(child, "local_commit"))
 
     # publish_attempts_allowed_by_polybridge runs the other way: True means "permitted to try
     # publishing", so a parent that was *not* authorized (False) must not have a child that is.

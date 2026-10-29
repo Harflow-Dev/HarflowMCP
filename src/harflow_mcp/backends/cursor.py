@@ -319,6 +319,8 @@ class CursorBackend(ExtraPathsUnsupported):
             writable_roots=(),
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            # write_in_repo, publish and unrestricted share one argv, so no commit policy is claimed.
+            local_commit="not_enforced",
             publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
             network_access="not_controlled",
             caveats=tuple(caveats),

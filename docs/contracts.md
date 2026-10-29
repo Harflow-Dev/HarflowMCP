@@ -826,6 +826,24 @@ group and disclose `group_report_directory` without allocating it, checking the 
 requirements as launch. Saved workflow candidates requesting the feature use the root run's stable
 `workflow:<root run id>` group, subject to the existing nested caller authority checks.
 
+Optional `enforcement.local_commit` is `denied`, `allowed`, or `not_enforced`. It reports whether a
+direct local `git commit` is denied by the harness policy, allowed, or not something Harflow can
+claim. Claude Code is `denied` at `read_only` and `write_in_repo` and `allowed` at `publish` and
+`unrestricted`. Every other backend is `not_enforced` at every freedom. A merge-conclusion grant
+does not change it. Old records omit the field; a missing parent field is not compared.
+
+Optional `enforcement.merge_conclusion` is present only when the task was granted exact
+`git commit --no-edit` or `git merge --continue`. It records `requires: MERGE_HEAD`,
+`ordinary_commits: refused`, whether the broad commit deny was omitted, and `gate: path_wrapper`.
+When the commit deny is omitted, `direct_commit_commands_denied` is false.
+
+Optional `enforcement.dispatch_git` and top-level task `dispatch_git` record branch preparation and
+fetch Harflow ran before the agent. They name the branch, base, base commit, each fetch, when it
+ran, and any notice. A preview uses `status: preview` and does not run git. Old records omit both.
+
+These three fields are additive. The canonical `contracts/v1` fixtures and `manifest.sha256` are
+unchanged, so existing consumer gates stay valid. Readers must tolerate their absence.
+
 The group is shared authority, not per-file ownership. Concurrent tasks should use task-identifiable
 report filenames and atomic updates; peers can overwrite a file with the same name. Scope identity
 and qualified configuration are checked before launch, without an atomic pin against independent

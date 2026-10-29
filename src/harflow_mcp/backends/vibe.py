@@ -669,6 +669,7 @@ class VibeBackend(ExtraPathsUnsupported):
             writable_roots=(),
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            local_commit="not_enforced",
             # publish and unrestricted are the two freedoms that authorize a publish attempt —
             # see the field's own docstring; the agent profile in use (auto-approve, identical
             # for both here) is what leaves no barrier of harflow_mcp's own against one. A

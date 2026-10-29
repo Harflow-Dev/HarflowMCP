@@ -171,8 +171,11 @@ mcp = MCPServer(
         "unauthenticated `gh` can all still stop it, and the agent may not even try — and it is "
         "authorization only: with network=True a lower freedom can mechanically reach a remote "
         "without having been authorized to publish. Check "
-        "`enforcement.publish_attempts_allowed` and `enforcement.network_access` on "
-        "the returned task rather than assuming from the freedom name alone. An optional `network` "
+        "`enforcement.publish_attempts_allowed`, `enforcement.local_commit` and "
+        "`enforcement.network_access` on "
+        "the returned task rather than assuming from the freedom name alone. "
+        "`local_commit` is denied, allowed, or not_enforced. On Claude Code, write_in_repo denies "
+        "a direct git commit and publish is the level that allows committing. An optional `network` "
         "parameter on start_task and resume_task asks for network independently of the freedom: "
         "True asks harflow_mcp to impose no network barrier of its own, False asks it to impose "
         "one, and None keeps each freedom's historical behaviour. It governs harflow_mcp's own "
@@ -508,6 +511,7 @@ async def start_task(
     notify: str | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
     allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
+    branch: str | None = None, base: str | None = None, fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False,
     resources: list[StrictStr] | None = None,
     resource_wait_seconds: StrictInt | None = None,
     worktree: dict[str, StrictStr | StrictBool | None] | None = None,
@@ -527,9 +531,11 @@ async def start_task(
             sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
             remote publishing, including commit/push/PR creation/reviews, but that is not a promise the attempt succeeds — credentials,
             remote permissions, branch protection and hooks are all
-            outside harflow_mcp's control. How each level is enforced depends on the backend; the
-            returned `enforcement` says what actually applies, via
-            `publish_attempts_allowed` and `network_access` among other fields.
+            outside harflow_mcp's control. On Claude Code, write_in_repo denies a direct `git commit`
+            and `git push`; `publish` is the level that allows committing. `enforcement.local_commit`
+            reports that policy as denied, allowed, or not_enforced. How each level is enforced
+            depends on the backend; the returned `enforcement` says what actually applies, via
+            `local_commit`, `publish_attempts_allowed` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
             silently ignored, on a backend with no model-selection flag at all — vibe is the one
             such case; see list_backends' capabilities.supports_model_selection.
@@ -633,11 +639,26 @@ async def start_task(
             The grammar is a guard against mistakes, not a security boundary: grants are Claude permission-layer
             approvals, not OS enforcement. An exact pattern matches one command line and a prefix matches that
             command with further arguments. A granted program can run repository code, chained commands need every
-            part allowed, and the access level's git commit and push denies still win. Omitted or null grants
+            part allowed, and the access level's git commit and push denies still win, except the exact
+            merge-conclusion grant (`git commit --no-edit` or `git merge --continue`) which omits the
+            broad commit deny and is gated on MERGE_HEAD. Ordinary commits stay refused.
+            Omitted or null grants
             nothing. A nested dispatch may grant only exact patterns its caller holds (unless the caller is
             unrestricted) and never inherits them. resume_task and continue_task inherit the saved list when
             omitted and replace it when given. Status reports each grant's match as
             enforcement.extra_allowed_command_matches. See docs/harness-permissions.md.
+        branch: Optional literal branch name, set together with base. Harflow fetches that base and
+            runs `git switch -c` before the agent starts, at any freedom except read_only. Refused
+            when the checkout is dirty, the branch exists, the base cannot be fetched, or a merge or
+            rebase is in progress. Never stashes, resets or forces. Resume and continuation reuse the
+            prepared branch and do not accept branch or base.
+        base: Remote-tracking base `<remote>/<branch>`, for example origin/develop. The first
+            component is the remote. Set together with branch.
+        fetch: true refreshes the default remote; a list of literal remote names refreshes those.
+            Harflow runs `git fetch --prune` before the agent, at every freedom and backend, including
+            read_only. A failure is recorded and the task still starts unless fetch_required is true.
+        fetch_required: When true, a fetch failure refuses dispatch and the agent does not start.
+            Requires fetch.
         resources: Optional list of 1-16 resource names (lowercase letters, digits and `. _ : -`, at most
             64 characters, starting with a letter or digit; for example `ios-simulator` or `repo:main`)
             this task needs exclusively. Capacity is one per name: the task does not start until it
@@ -712,6 +733,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "Set git_https_rewrite on saved workflow agent candidates")
         if allowed_commands is not None:
             raise MCPError(INVALID_PARAMS, "allowed_commands is unavailable for workflow launches; grant commands on saved workflow agent candidates instead")
+        if branch is not None or base is not None or fetch is not None or fetch_required:
+            raise MCPError(INVALID_PARAMS, "branch, base and fetch belong on saved workflow agent nodes, not on the workflow launch")
         if auto_continue:
             raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
@@ -798,6 +821,7 @@ async def start_task(
             auto_continue=auto_continue,
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
             **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
+            **({'branch': branch} if branch is not None else {}), **({'base': base} if base is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
             **({'resources': resources} if resources is not None else {}),
             **({'resource_wait_seconds': resource_wait_seconds} if resource_wait_seconds is not None else {}),
             **({'worktree': worktree} if worktree is not None else {}),
@@ -920,6 +944,7 @@ async def preview_task_permissions(
     extra_writable_paths: list[StrictStr] | None = None,
     caller_write_approvals: StrictBool = False,
     allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
+    branch: str | None = None, base: str | None = None, fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False,
     group: str | None = None,
     qualification_only: StrictBool = False,
 ) -> dict[str, Any]:
@@ -947,6 +972,8 @@ async def preview_task_permissions(
 
     allowed_commands is validated exactly as in start_task (grammar, installed Claude Code version,
     nested-subset cap) and the returned enforcement lists it as extra_allowed_commands.
+    branch, base and fetch are validated the same way as start_task and shown as dispatch_git
+    without running Git.
     """
     _check_group(group)
     chosen = _backend(backend or DEFAULT_BACKEND)
@@ -964,6 +991,7 @@ async def preview_task_permissions(
             caller_approvals=caller_approvals,
             **({"caller_write_approvals": True} if caller_write_approvals else {}),
             **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}), **({"git_https_rewrite": git_https_rewrite} if git_https_rewrite is not None else {}), **({"group_report_output": group_report_output} if group_report_output is not None else {}),
+            **({"branch": branch} if branch is not None else {}), **({"base": base} if base is not None else {}), **({"fetch": fetch} if fetch is not None else {}), **({"fetch_required": True} if fetch_required else {}),
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1561,7 +1589,7 @@ async def wait_for_tasks(
 
 @mcp.tool()
 @_task_document_errors
-async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None) -> dict[str, Any]:
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None, fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
     This differs from resume_task: it reconstructs the original assignment, latest summary and
@@ -1586,6 +1614,8 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     allowed_commands: omitted or null inherits the source task's saved command grants (an automatic
     continuation always does); a list replaces them after the same validation and nested-subset check
     as start_task. See start_task for the grammar and limits.
+    fetch refreshes remote-tracking refs before the fresh session, the same way as start_task.
+    Continuations reuse a branch prepared at the original dispatch and do not accept branch or base.
     """
     _check_background_idle(background_idle_seconds)
     _guard_launch_layout()
@@ -1597,7 +1627,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
         if source is not None:
             _check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), allowed_commands)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}))
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1612,6 +1642,7 @@ async def resume_task(
     background_idle_seconds: StrictFloat | StrictInt | None = None,
     network: StrictBool | None = None,
     allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
+    fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -1629,6 +1660,10 @@ async def resume_task(
             historical default for a record written before the field existed — True asks for no
             network barrier of harflow_mcp's own, False asks for one, honoured or refused exactly
             as on start_task for the parent's freedom.
+        fetch: Optional refresh of remote-tracking refs before the resumed agent starts. true uses
+            the default remote; a list names remotes. A prepared branch is reused and is not recreated.
+            branch and base are not accepted on resume.
+        fetch_required: When true, a fetch failure refuses the resume.
         group_report_output: None inherits the saved group-scoped output opt-in; false disables it.
         allowed_commands: None (the default) inherits the parent's saved command grants; a list replaces
             them for this run after the same validation and nested-subset check as start_task, which
@@ -1694,7 +1729,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(parent.backend), parent.freedom, Path(parent.repo_path), allowed_commands)
             task = await _reg().resume(
                 parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
             )
         else:
             record = _reg().recover(task_id)
@@ -1712,7 +1747,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), allowed_commands)
             task = await _reg().resume_record(
                 record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None

@@ -592,6 +592,7 @@ class OpencodeBackend(ExtraPathsUnsupported):
             # No per-command deny list exists, so neither commit claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            local_commit="not_enforced",
             # publish and unrestricted are the freedoms that authorize a publish attempt — see
             # the field's own docstring. A network request changes nothing here: this backend
             # has no barrier of its own either way, at any freedom.

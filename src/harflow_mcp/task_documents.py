@@ -168,7 +168,9 @@ def qualify_enforcement(value: Any, *, require_core: bool = False, path: str = "
         raise ValueError(f"Malformed {path}")
     if require_core and not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= value.keys():
         raise ValueError("Incomplete enforcement contract")
-    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str], "extra_allowed_command_matches": list[dict[str, str]], "group_report_output": bool}, path)
+    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "local_commit": str, "merge_conclusion": dict[str, Any], "dispatch_git": dict[str, Any], "publish_attempts_allowed": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str], "extra_allowed_command_matches": list[dict[str, str]], "group_report_output": bool}, path)
+    if "local_commit" in value and value["local_commit"] not in {"denied", "allowed", "not_enforced"}:
+        raise ValueError(f"Malformed {path}.local_commit")
     for item in value.get("extra_allowed_command_matches") or []:
         if set(item) != {"pattern", "match"} or item["match"] not in {"exact", "prefix"} or not item["pattern"]:
             raise ValueError(f"Malformed {path}.extra_allowed_command_matches")

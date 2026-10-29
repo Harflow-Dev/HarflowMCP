@@ -593,6 +593,44 @@ def test_publish_ordering_is_enforced(repo):
         CLAUDE.assert_safe(replace(invocation, argv=tamper(invocation.argv, "--allowedTools", PUBLISH_ENTRIES)), "publish")
 
 
+@pytest.mark.parametrize("pattern", [
+    "git commit --no-edit",
+    "git merge --continue",
+    "git -C src commit --no-edit",
+    "git -C src merge --continue",
+])
+def test_merge_conclusion_grants_are_exact(repo, pattern):
+    invocation = build(repo, "write_in_repo", (pattern,))
+    denied = flag(invocation.argv, "--disallowedTools")
+    if "commit --no-edit" in pattern:
+        assert denied == ["Bash(git push:*)"]
+    else:
+        assert denied == [DISALLOWED_TOOLS]
+    granted = CLAUDE.allowed_commands_enforcement(CLAUDE.enforcement("write_in_repo"), (pattern,))
+    assert granted.local_commit == "denied"
+    assert granted.merge_conclusion["granted"] is True
+    assert granted.merge_conclusion["requires"] == "MERGE_HEAD"
+    assert granted.merge_conclusion["ordinary_commits"] == "refused"
+    assert granted.merge_conclusion["gate"] == "path_wrapper"
+    assert granted.merge_conclusion["commit_deny_omitted"] is ("commit --no-edit" in pattern)
+    assert granted.direct_commit_commands_denied is ("commit --no-edit" not in pattern)
+
+
+@pytest.mark.parametrize("pattern", [
+    "git commit -m message",
+    "git commit -a --no-edit",
+    "git commit --no-edit README",
+    "git commit --no-edit:*",
+    "git merge --continue:*",
+    "git rebase --continue",
+    "git cherry-pick --continue",
+    "bash -c git commit --no-edit",
+])
+def test_merge_conclusion_refuses_wider_commit_forms(repo, pattern):
+    with pytest.raises(CommandGrantError):
+        CLAUDE.validate_allowed_commands((pattern,), "write_in_repo", repo)
+
+
 def test_git_is_never_grantable_even_by_forging_the_invocation(repo):
     """The access level's deny still wins on the CLI (measured); here the guard is that no path builds the pattern at all."""
     base = CLAUDE.build_start_argv("x", repo=repo, freedom="write_in_repo", session_id=SESSION, model=None, max_turns=None, reasoning_effort=None)

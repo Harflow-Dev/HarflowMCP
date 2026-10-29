@@ -805,6 +805,8 @@ class Task:
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran. None if the repo had no
     commit yet, or the probe failed or timed out."""
     git_baseline: dict[str, Any] | None = None
+    dispatch_git: dict[str, Any] | None = None
+    """Fetch and branch preparation Harflow ran before the agent started. None when the caller asked for none."""
     outcome: dict[str, Any] | None = None
     outcome_evidence: dict[str, Any] = field(default_factory=dict)
     start_dirty: bool | None = None
@@ -985,6 +987,7 @@ class Task:
             "enforcement": self.enforcement,
             "base_commit": self.base_commit,
             "start_dirty": self.start_dirty,
+            **({"dispatch_git": self.dispatch_git} if self.dispatch_git else {}),
             "outcome": project_outcome(self.outcome),
             "continuation_of_task_id": self.continuation_of_task_id,
             "chain_root_task_id": self.chain_root_task_id,
@@ -1246,7 +1249,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None, group: str | None = None, qualification_only: bool = False) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None, group: str | None = None, qualification_only: bool = False, branch: str | None = None, base: str | None = None, fetch: bool | list[str] | None = None, fetch_required: bool = False) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
         approval_runtime.validate(backend, caller_approvals, freedom, None, write=caller_write_approvals)
@@ -1254,6 +1257,8 @@ class TaskRegistry:
         from . import git_environment
         from .command_grants import check_branch_preparation
         await asyncio.to_thread(check_branch_preparation, commands, repo_path)
+        from .dispatch_git import preview as git_preview
+        git_step = git_preview(freedom=freedom, branch=branch, base=base, fetch=fetch, fetch_required=fetch_required)
         git_https_rewrite = git_environment.resolve(git_https_rewrite)
         if qualification_only:
             from . import group_report_output as report_output
@@ -1287,6 +1292,8 @@ class TaskRegistry:
             await _bounded_extra_path_check(backend.preview_group_report_output, invocation, report_path, freedom, network)
         enforcement = self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path)
         enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals), commands)
+        if git_step is not None:
+            enforcement = replace(enforcement, dispatch_git=git_step)
         enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, await asyncio.to_thread(git_environment.auth_status)))
         if report_path is not None:
             enforcement = replace(backend.group_report_output_enforcement(enforcement, report_path), group_report_output=True)
@@ -1299,7 +1306,7 @@ class TaskRegistry:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
             if getattr(backend, "with_shared_directories", None) is not None:
                 enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_CHAIN_SCRATCH_ROOT, FUTURE_GROUP_SCRATCH_ROOT))
-        preview = {"group": resolved_group, "group_report_output": group_report_output, "group_report_directory": str(report_path) if report_path is not None else None, "backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
+        preview = {"group": resolved_group, "group_report_output": group_report_output, "group_report_directory": str(report_path) if report_path is not None else None, "backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), **({"dispatch_git": git_step} if git_step else {}), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
         grant_notices = backend.allowed_command_notices(commands)
         if grant_notices:
             preview["notices"] = list(grant_notices)
@@ -1334,6 +1341,7 @@ class TaskRegistry:
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
+        branch: str | None = None, base: str | None = None, fetch: bool | list[str] | None = None, fetch_required: bool = False,
         resources: list[str] | None = None,
         resource_wait_seconds: int | None = None,
         resource_inherit: dict[str, Any] | None = None,
@@ -1374,6 +1382,17 @@ class TaskRegistry:
             source = await _bounded_extra_path_check(read_task_record, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
             if continuation_of_task_id is not None and source is None:
                 raise ValueError("Continuation source unavailable")
+            reuse_branch = False
+            if continuation_of_task_id is not None:
+                from .dispatch_git import prepared_branch, validate_request
+                saved_branch, saved_base = prepared_branch((source.enforcement or {}).get("dispatch_git") if source is not None and source.enforcement else None)
+                if branch or base:
+                    validate_request(freedom=freedom, branch=branch, base=base, fetch=fetch, fetch_required=fetch_required, continuation=True)
+                elif saved_branch:
+                    branch, base, reuse_branch = saved_branch, saved_base, True
+            if worktree is not None and (branch or base) and not reuse_branch:
+                from .dispatch_git import validate_request
+                validate_request(freedom=freedom, branch=branch, base=base, fetch=fetch, fetch_required=fetch_required, worktree=True)
             if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort or source.caller_approvals != caller_approvals or source.caller_write_approvals != caller_write_approvals or source.interaction_owner != interaction_owner):
                 raise ValueError("Continuation settings must match saved source authority")
             grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend, source)
@@ -1436,6 +1455,16 @@ class TaskRegistry:
                     raise ValueError("Group report output continuation cannot change the saved group")
                 await _bounded_extra_path_check(backend.qualify_group_report_output)
                 planned_enforcement = replace(backend.group_report_output_enforcement(planned_enforcement, report_path), group_report_output=True)
+            dispatch_report = None
+            if branch or base or fetch is not None or fetch_required or reuse_branch:
+                from .dispatch_git import prepare
+                git_repo = Path(worktree_plan["source_repo_path"]) if worktree_plan is not None else repo_path
+                dispatch_report = await asyncio.to_thread(
+                    prepare, git_repo, freedom=freedom, branch=branch, base=base,
+                    fetch=fetch, fetch_required=fetch_required, reuse_branch=reuse_branch,
+                )
+                if dispatch_report:
+                    planned_enforcement = replace(planned_enforcement, dispatch_git=dispatch_report)
 
         return await self._spawn(
             invocation,
@@ -1484,6 +1513,7 @@ class TaskRegistry:
                 "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals,
                 "guidance": invocation.system_guidance is not None}} if worktree_plan is not None else {}),
             **({"worktree_info": worktree_inherit} if worktree_inherit else {}),
+            **({"dispatch_git": dispatch_report} if dispatch_report else {}),
         )
 
     def _plan_worktree(self, spec: dict[str, Any], repo_path: Path, freedom: str, caller: Any, task_id: str) -> dict[str, Any]:
@@ -1576,7 +1606,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None) -> Task:
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None, fetch: bool | list[str] | None = None, fetch_required: bool = False) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
@@ -1584,7 +1614,7 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output, fetch=fetch, fetch_required=fetch_required)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1604,6 +1634,7 @@ class TaskRegistry:
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
         allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
+        fetch: bool | list[str] | None = None, fetch_required: bool = False,
     ) -> Task:
         """Continue the session; strict inheritance may require no later writers.
 
@@ -1619,7 +1650,8 @@ class TaskRegistry:
                 network=network, task_id=task_id, display_prompt=display_prompt,
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
-                consume_followups=consume_followups, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output)
+                consume_followups=consume_followups, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output,
+                fetch=fetch, fetch_required=fetch_required)
         from .task_supervision import read_task_record
         read_task_record(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
@@ -1656,6 +1688,8 @@ class TaskRegistry:
         commands = self._command_grants(backend, allowed_commands, parent.allowed_commands, parent.freedom, Path(parent.repo_path), native=native_subagent, builder=workflow_builder)
         from . import git_environment
         git_https_rewrite = git_environment.inherited(git_https_rewrite, parent)
+        from .dispatch_git import prepared_branch
+        saved_branch, saved_base = prepared_branch((parent.enforcement or {}).get("dispatch_git"))
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path), commands),  # type: ignore[arg-type]
@@ -1742,6 +1776,11 @@ class TaskRegistry:
                     resource_request=resource_request,
                     worktree_info=getattr(parent, "worktree", None),
                     scratch_chain_id=shared_scratch.effective_chain(parent),
+                    fetch=fetch,
+                    fetch_required=fetch_required,
+                    branch=saved_branch,
+                    base=saved_base,
+                    reuse_branch=saved_branch is not None,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -1785,6 +1824,11 @@ class TaskRegistry:
         resource_request: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
         scratch_chain_id: str | None = None,
+        fetch: bool | list[str] | None = None,
+        fetch_required: bool = False,
+        branch: str | None = None,
+        base: str | None = None,
+        reuse_branch: bool = False,
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1844,6 +1888,13 @@ class TaskRegistry:
                         raise
                 invocation = self._with_system_guidance(backend, invocation, freedom=freedom, network=effective_network, resume=True,
                                                         enabled=not (workflow_builder or native_subagent))
+            dispatch_report = None
+            if fetch is not None or fetch_required or reuse_branch:
+                from .dispatch_git import prepare
+                dispatch_report = await asyncio.to_thread(
+                    prepare, repo_path, freedom=freedom, branch=branch, base=base,
+                    fetch=fetch, fetch_required=fetch_required, reuse_branch=reuse_branch,
+                )
             spawn_called = True
             task = await self._spawn(
                 invocation,
@@ -1880,6 +1931,7 @@ class TaskRegistry:
                 **({"followup_source_task_id": parent_task_id} if attempt is not None else {}),
                 **({"worktree_info": worktree_info} if worktree_info else {}),
                 **({"scratch_chain_id": scratch_chain_id} if scratch_chain_id is not None else {}),
+                **({"dispatch_git": dispatch_report} if dispatch_report else {}),
             )
         except BaseException as exc:
             if attempt is not None:
@@ -1962,6 +2014,7 @@ class TaskRegistry:
         git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
         resource_grant: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
+        dispatch_git: dict[str, Any] | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -2060,6 +2113,8 @@ class TaskRegistry:
                 enforcement = self._extra_enforcement(backend, enforcement, extra_path_grants, repo_path)
             enforcement = approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals)
             enforcement = self._with_commands(backend, enforcement, allowed_commands)
+            if dispatch_git:
+                enforcement = replace(enforcement, dispatch_git=dispatch_git)
             from . import git_environment
             git_https_rewrite = git_environment.resolve(git_https_rewrite)
             git_auth_status = await asyncio.to_thread(git_environment.auth_status)
@@ -2101,6 +2156,8 @@ class TaskRegistry:
             bridge_notices: list[str] = [publish_notice] if publish_notice else []
             bridge_notices.append(git_environment.notice(git_https_rewrite, git_auth_status))
             bridge_notices.extend(backend.allowed_command_notices(tuple(allowed_commands)))
+            if dispatch_git:
+                bridge_notices.extend(notice for notice in dispatch_git.get("notices") or [] if notice)
             if caller_approvals:
                 bridge_notices.append(approval_runtime.notice(backend, caller_write_approvals))
             if network is True and enforcement.network_access == "not_controlled":
@@ -2129,6 +2186,13 @@ class TaskRegistry:
                 base_commit = git_baseline["head"]
                 observed_status = git_baseline["working_tree_status"]
                 start_dirty = bool(observed_status) if observed_status is not None else None
+            prepared_head = (dispatch_git or {}).get("base_commit")
+            if prepared_head:
+                # The outcome's base is the commit the prepared branch was created at.
+                base_commit = prepared_head
+                git_baseline["head"] = prepared_head
+                if dispatch_git.get("branch"):
+                    git_baseline["branch"] = dispatch_git["branch"]
 
             # Allocate after initial probes. Final authority reads may await below; the enclosing
             # cleanup boundary removes scratch on timeout, refusal or cancellation.
@@ -2184,6 +2248,10 @@ class TaskRegistry:
                 }
 
                 spawn_env = git_environment.configure(spawn_env, git_https_rewrite)
+                if allowed_commands:
+                    from .merge_gate import apply_path, install, needs_gate
+                    if needs_gate(allowed_commands):
+                        apply_path(spawn_env, install(self._log_dir, task_id))
 
             except BaseException:
                 shared_hold.release()
@@ -2292,6 +2360,7 @@ class TaskRegistry:
             base_commit=base_commit,
             start_dirty=start_dirty,
             git_baseline=git_baseline,
+            dispatch_git=dict(dispatch_git) if dispatch_git else None,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
             depth=depth,
@@ -3350,6 +3419,7 @@ class TaskRegistry:
                 base_commit=task.base_commit,
                 start_dirty=task.start_dirty,
                 git_baseline=task.git_baseline,
+                dispatch_git=dict(task.dispatch_git) if task.dispatch_git else None,
                 outcome=task.outcome,
                 terminal_summary=(task.acc.summary.encode('utf-8')[:4096].decode('utf-8', errors='ignore')
                                   if task.finished_at and isinstance(task.acc.summary, str) else None),
@@ -4428,6 +4498,7 @@ class TaskRegistry:
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
         allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
+        fetch: bool | list[str] | None = None, fetch_required: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
         from .state_layout import require_dispatch_layout
@@ -4473,6 +4544,9 @@ class TaskRegistry:
         commands = self._command_grants(backend, allowed_commands, record.allowed_commands, record.freedom, repo_path, native=native_subagent, builder=workflow_builder)
         from . import git_environment
         git_https_rewrite = git_environment.inherited(git_https_rewrite, record)
+        from .dispatch_git import prepared_branch
+        saved_dispatch = record.dispatch_git or (record.enforcement or {}).get("dispatch_git")
+        saved_branch, saved_base = prepared_branch(saved_dispatch)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(record.freedom, effective_network), grants, repo_path), commands),  # type: ignore[arg-type]
@@ -4554,6 +4628,11 @@ class TaskRegistry:
                     resource_request=resource_request,
                     worktree_info=record.worktree,
                     scratch_chain_id=shared_scratch.effective_chain(record),
+                    fetch=fetch,
+                    fetch_required=fetch_required,
+                    branch=saved_branch,
+                    base=saved_base,
+                    reuse_branch=saved_branch is not None,
                 )
         except control.LockTimeout:
             raise SessionBusyError(

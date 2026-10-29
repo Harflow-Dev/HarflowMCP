@@ -33,6 +33,10 @@ rather than reasoning about it, and record the new measurements here. Do not "ti
   be self-defeating, since deny beats allow. `--allowedTools` is variadic exactly like
   `--disallowedTools`, so its patterns are likewise one comma-separated value. `write_in_repo` with
   `allowed_commands` deliberately passes both (see "Claude allowed_commands" below): the deny wins.
+  The merge-conclusion carve-out follows that measured fact rather than a new live Claude run:
+  `git commit --no-edit` cannot be granted beside `Bash(git commit:*)`, so that deny entry is omitted
+  only while the exact grant is present, and `Bash(git push:*)` stays. Other commit forms stay
+  ungranted. The `MERGE_HEAD` check is Harflow's PATH wrapper, not a Claude CLI measurement.
 - **`-p` is a boolean flag and the prompt is a separate positional**, so a prompt token equal to a
   real option name is parsed by claude as that option. The prompt therefore rides after a `--`
   separator, as on codex and opencode. Measured both ways: without `--`, a prompt of
