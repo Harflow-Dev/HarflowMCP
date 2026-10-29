@@ -798,10 +798,18 @@ presentation of this optional metadata is deferred; it needs a separate design a
 implementation before claiming the app renders a restart note.
 
 Task enforcement may additionally contain `git_environment`, with `github_https_rewrite` (boolean),
-`https_auth_observation` (sanitized string), and `reachability_verified` (false). This optional
+`https_auth_observation` (sanitized string), and `reachability_verified` (false). While the rewrite
+is on, `gh_missing`, `gh_not_authenticated` and `gh_authenticated_helper_not_observed` also carry
+additive `remedy` (string): the HTTPS setup instruction, including a server restart. Other
+observations and a disabled rewrite omit `remedy`. This optional
 observation is not authority and does not change network enforcement. Old records omit it; resumed
 and continued tasks inherit a saved effective rewrite when present. `list_backends` also exposes
 this optional observation using the server default. See [Git transport](git-transport.md).
+
+Dispatch-time command grants may additionally contain `extra_allowed_command_matches`, a list of
+`{pattern, match}` objects next to `extra_allowed_commands`. `match` is `exact` or `prefix`. The
+field is omitted when the task has no grants. Existing `extra_allowed_commands` strings are unchanged.
+See [harness permissions](harness-permissions.md#dispatch-time-command-grants-allowed_commands).
 
 ### Scoped group report output
 
@@ -914,7 +922,14 @@ a safe mid-turn interrupt primitive. A now refusal is an accepted queued respons
 `interrupt_unsupported`, `workflow_checkpoint_required` and `continuation_refused`. Successful
 continuation adds `successor_task_id` or `delivery_started`; it does not claim the model has read it.
 
-Responses contain `message_id`, `seq`, `status`, `delivery`, and task/run IDs. Workflow status
+Responses contain `message_id`, `seq`, `status`, `delivery`, and task/run IDs. A queued send to a
+standalone task whose `resolve_status` is already terminal (`completed`, `failed`, `timed_out` or
+`cancelled`) adds `target_settled: true`, `target_status` and a note that the message waits for
+`resume_task` / `continue_task` or `delivery="now"`. A running target, including a recovered task
+that is still alive, omits those fields. The same fields are added for a workflow or node message
+when the owning run is cancelled, or completed and not a builder, because no further dispatch will
+consume it. Failed runs and completed builders omit them. `delivery="now"` is unchanged.
+Workflow status
 `messages` entries contain `id`, monotonically increasing `seq`, `target` (`kind`, run ID and,
 for node targets, task/node/role), `delivery`, `status`, timestamps, and optional text, reason and
 `delivery_task_id`. Statuses are `queued`, `delivering`, `delivered`, `undeliverable`, `cancelled`.

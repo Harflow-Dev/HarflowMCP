@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Report each `allowed_commands` grant as exact or prefix, warn when a bare program name matches only a command with no arguments, and explain launcher and option-only wildcard refusals (#88, #95).
+- Tell callers how to fix each GitHub HTTPS authentication observation, including additive `git_environment.remedy` (#89).
+- Name invalid compact task fields and filters, and list the accepted values (#93).
+- Say when a queued message targets a task or workflow that has already finished and will not be consumed until a later resume or dispatch (#86).
+
 ## 0.0.5
 
 - Restore Cursor Monitor assistant text normalization and complete its backend protocol with conservative defaults for unqualified stderr and continuation signals.

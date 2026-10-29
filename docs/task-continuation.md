@@ -52,14 +52,19 @@ Harflow rejection and is recovered the same way. This is for standalone tasks; w
 A task that cannot take a message while it runs (a backend without live input, or claude started
 with `max_turns`) can still be told something for later. `send_message(task_id, text)` on such a
 standalone task, running or settled, appends the text to a durable per-task ledger and answers
-`{"status": "queued", "delivery": "next_continuation", "message_id", "seq"}`. It never says
-"delivered": nothing is started and nothing is written to an agent. Live-input tasks keep their
+`{"status": "queued", "delivery": "queue", "message_id", "seq"}` plus a note. It never says
+"delivered": nothing is started and nothing is written to an agent. When `resolve_status` says the
+target has already finished, the reply also carries `target_settled: true`, `target_status` and a
+note that the message waits for the next `resume_task` / `continue_task`, or for `delivery="now"`.
+A running target, including one recovered from disk that is still alive, omits those fields. The
+public reply's `delivery` is `queue` or `now`; the ledger row still records `next_continuation`.
+Live-input tasks keep their
 inbox path unchanged and answer `delivery: "live_input"`; a live task whose input has closed is
 still told to `resume_task`, not redirected here. The ledger is separate from the live-input inbox
 and never touches its lock or close protocol. `harflow-ctl send` takes the same route.
 Persisted live-input rows require the private [inbox row contract](contracts.md#live-input-inbox-rows);
-older flat development rows are skipped without conversion. Public queued responses and caller
-message payloads remain unchanged.
+older flat development rows are skipped without conversion. Caller message text remains unchanged.
+A settled target adds the fields above; a running target does not.
 
 **Consumption.** The next continuation a caller starts explicitly from the task consumes every
 queued message, in `seq` order, exactly once: `resume_task`, `continue_task`, `harflow-ctl

@@ -444,10 +444,34 @@ async def test_preview_applies_the_nested_subset(env):
 
 # --- preview --------------------------------------------------------------------------------------
 
+async def test_bare_program_notice_on_start_continuation_and_preview(env):
+    task = await run(env, allowed_commands=["swiftlint"])
+    assert any("no arguments" in notice and "`swiftlint:*`" in notice for notice in task.bridge_notices)
+    assert task.enforcement["extra_allowed_command_matches"] == [{"pattern": "swiftlint", "match": "exact"}]
+    preview = await env.registry.preview_permissions(env.repo, backend=get("claude"), allowed_commands=["swiftlint"])
+    assert any("`swiftlint:*`" in notice for notice in preview["notices"])
+    quiet = await env.registry.preview_permissions(
+        env.repo, backend=get("claude"), allowed_commands=["swiftlint lint:*", "xcrun simctl:*"])
+    assert "notices" not in quiet
+    assert quiet["enforcement"]["extra_allowed_command_matches"] == [
+        {"pattern": "swiftlint lint:*", "match": "prefix"},
+        {"pattern": "xcrun simctl:*", "match": "prefix"},
+    ]
+    continued = await env.registry.continue_task(task.task_id, "next", allowed_commands=["swiftlint lint:*", "xcrun simctl:*"])
+    await asyncio.wait_for(continued.done.wait(), timeout=30)
+    assert not any("no arguments" in notice for notice in continued.bridge_notices)
+    resumed = await env.registry.resume(continued, "again", allowed_commands=["swiftlint"])
+    await asyncio.wait_for(resumed.done.wait(), timeout=30)
+    assert any("no arguments" in notice for notice in resumed.bridge_notices)
+
+
 async def test_preview_discloses_grants_without_launching(env):
     preview = await env.registry.preview_permissions(env.repo, backend=get("claude"), allowed_commands=GRANTS)
     assert preview["allowed_commands"] == GRANTS and preview["enforcement"]["extra_allowed_commands"] == GRANTS
-    assert any("prefix approvals" in caveat for caveat in preview["enforcement"]["caveats"])
+    assert any("exact pattern" in caveat and "prefix pattern" in caveat for caveat in preview["enforcement"]["caveats"])
+    assert preview["enforcement"]["extra_allowed_command_matches"] == [
+        {"pattern": pattern, "match": "prefix"} for pattern in GRANTS]
+    assert "notices" not in preview
     assert preview["enforcement"]["direct_commit_commands_denied"] is True
     assert env.launches() == []
     plain = await env.registry.preview_permissions(env.repo, backend=get("claude"))

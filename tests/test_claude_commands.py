@@ -138,6 +138,37 @@ def test_grammar_accepts_the_issue_examples_rewritten(repo):
         claude_commands.validate(pattern, "write_in_repo", repo)
 
 
+@pytest.mark.parametrize("pattern", ["npx tsc *", "npx tsc:*", "npx -- tsc:*"])
+def test_launcher_wildcard_names_the_launched_command(pattern, repo):
+    with pytest.raises(CommandGrantError, match="launched command 'tsc'") as raised:
+        claude_commands.validate(pattern, "write_in_repo", repo)
+    text = str(raised.value)
+    assert "takes no subcommand" in text
+    assert "npx tsc --noEmit -p ." in text
+
+
+def test_option_only_wildcard_asks_for_a_goal(repo):
+    with pytest.raises(CommandGrantError, match=r"mvn -o test:\*") as raised:
+        claude_commands.validate("mvn -o:*", "write_in_repo", repo)
+    text = str(raised.value)
+    assert "goal or subcommand must follow the options" in text
+    assert "needs a literal non-option token" in text
+    claude_commands.validate("mvn -o test:*", "write_in_repo", repo)
+    claude_commands.validate("mvn test:*", "write_in_repo", repo)
+
+
+def test_bare_program_is_exact_and_prefix_grants_are_not(repo):
+    claude_commands.validate("swiftlint", "write_in_repo", repo)
+    notice = claude_commands.bare_program_notice(["swiftlint"])
+    assert notice is not None and "no arguments" in notice and "`swiftlint:*`" in notice
+    assert claude_commands.bare_program_notice(["swiftlint lint:*", "xcrun simctl:*"]) is None
+    assert claude_commands.command_matches(["swiftlint", "swiftlint lint:*", "xcodebuild -workspace App.xcworkspace test"]) == (
+        {"pattern": "swiftlint", "match": "exact"},
+        {"pattern": "swiftlint lint:*", "match": "prefix"},
+        {"pattern": "xcodebuild -workspace App.xcworkspace test", "match": "exact"},
+    )
+
+
 def test_gh_is_publish_only_with_a_fixed_pair_list(repo):
     for pattern in ("gh workflow run:*", "gh workflow run build.yml", "gh pr create", "gh pr view 12", "gh run watch:*", "gh pr checks:*"):
         claude_commands.validate(pattern, "publish", repo)
@@ -582,10 +613,19 @@ def test_enforcement_never_overclaims_with_grants(freedom):
     assert granted.direct_commit_commands_denied is (freedom == "write_in_repo")
     assert set(plain.caveats) < set(granted.caveats)
     text = " ".join(granted.caveats)
-    for needle in ("prefix approvals", "not OS enforcement", "run code from the repository", "chained command needs every part allowed", "can still invoke git", "user and project settings"):
+    for needle in ("exact pattern", "prefix pattern", "not OS enforcement", "run code from the repository", "chained command needs every part allowed", "can still invoke git", "user and project settings"):
         assert needle in text
+    assert "prefix approvals" not in text
     assert "cannot lead" not in text and "cannot re-enable" not in text
     assert "make test:*" not in plain.mechanism and "1 dispatch-time Bash allow pattern" in granted.mechanism
+    assert granted.as_dict()["extra_allowed_command_matches"] == [{"pattern": "make test:*", "match": "prefix"}]
+    assert "1 prefix" in granted.mechanism
+    mixed = CLAUDE.allowed_commands_enforcement(plain, ("swiftlint", "make test:*"))
+    assert mixed.as_dict()["extra_allowed_command_matches"] == [
+        {"pattern": "swiftlint", "match": "exact"}, {"pattern": "make test:*", "match": "prefix"}]
+    assert "1 exact and 1 prefix" in mixed.mechanism
+    assert CLAUDE.allowed_command_notices(("swiftlint",))[0] == claude_commands.bare_program_notice(["swiftlint"])
+    assert CLAUDE.allowed_command_notices(("make test:*",)) == ()
 
 
 def test_enforcement_omits_the_field_when_empty_and_lists_it_otherwise():

@@ -71,6 +71,8 @@ GRAMMAR = {
     "freedoms": list(FREEDOMS),
     "characters": "[A-Za-z0-9 _./:=@%+-] and a single *",
     "wildcard": "`*` only as a separate final token (`cmd sub *`) or as the `:*` suffix (`cmd sub:*`); a wildcard needs a literal non-option token after the program",
+    "match": "no wildcard is exact, including a bare program name (accepted, and reported with a notice because it matches only that command with no arguments); `:*` or a final `*` is a prefix",
+    "option_order": "options before a goal or subcommand are literal and order-sensitive (`mvn -o test:*` does not match `mvn -q -o test` or `mvn -o -q test`); a wildcard needs that goal after the options (`mvn -o test:*`, not `mvn -o:*`). A launched command with no subcommand, such as `npx tsc:*`, needs an exact command (`npx tsc --noEmit -p .`). Programs whose arguments start with options, such as xcodebuild, also need one exact full command line",
     "program": "a lowercase bare name; shells, wrappers, evaluators, system tools, docker, podman, kubectl and nix are refused",
     "paths": "tokens containing / must be plain relative paths or absolute paths that resolve inside the repository, optionally as --option=path",
     "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
@@ -95,6 +97,53 @@ def validate(pattern: str, freedom: str, repo: Path | str | None) -> None:
 def validate_all(patterns, freedom: str, repo: Path | str | None) -> None:
     for pattern in patterns:
         validate(pattern, freedom, repo)
+
+
+def match_mode(pattern: str) -> str:
+    """`prefix` when the pattern ends in `:*` or a separate final `*`; otherwise `exact`."""
+    last = pattern.rsplit(" ", 1)[-1]
+    return "prefix" if last == "*" or last.endswith(":*") else "exact"
+
+
+def command_matches(patterns) -> tuple[dict[str, str], ...]:
+    return tuple({"pattern": pattern, "match": match_mode(pattern)} for pattern in patterns)
+
+
+def bare_program_notice(patterns) -> str | None:
+    """A bare program name is a valid exact grant; say so, because it matches no realistic invocation."""
+    bare = tuple(pattern for pattern in patterns if match_mode(pattern) == "exact" and " " not in pattern)
+    if not bare:
+        return None
+    shown = ", ".join(f"`{pattern}`" for pattern in bare)
+    suggested = ", ".join(f"`{pattern}:*`" for pattern in bare)
+    verb = "matches" if len(bare) == 1 else "match"
+    return (
+        f"allowed_commands {shown} {verb} only the bare command with no arguments. "
+        f"To allow arguments, use a prefix such as {suggested} when a literal subcommand or target follows the program "
+        f"(for example `{bare[0]} lint:*`). Programs whose arguments begin with options, such as "
+        "`xcodebuild -workspace App.xcworkspace -scheme App test`, cannot take a wildcard; grant one exact full command line for each invocation."
+    )
+
+
+def _unanchored_wildcard(program: str, literal: list[str], launcher: str | None) -> str:
+    if launcher:
+        example = f"{launcher} {program} --noEmit -p ."
+        return (
+            f"launched command {program!r} takes no subcommand to anchor a wildcard; "
+            f"grant the exact command, for example `{example}`"
+        )
+    options = [token for token in literal[1:] if token.startswith("-")]
+    if options:
+        example = " ".join((program, *options, "test:*"))
+        return (
+            "a wildcard pattern needs a literal non-option token after the program: "
+            f"a goal or subcommand must follow the options, for example `{example}`. "
+            "Matching is a prefix, so the options have to appear in this order; option values are not parsed"
+        )
+    return (
+        "a wildcard pattern needs a literal non-option token after the program "
+        "(a subcommand or target, such as `make test:*`); option values are not parsed"
+    )
 
 
 def _validate(pattern: str, freedom: str, root: str | None) -> None:
@@ -167,7 +216,7 @@ def _launcher(literal: list[str], root: str | None) -> int:
     raise _Refusal(f"{program!r} subcommand {sub!r} is not accepted; accepted: {', '.join(allowed)}")
 
 
-def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenient: bool = False) -> None:
+def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenient: bool = False, launcher: str | None = None) -> None:
     literal, wildcard = _wildcard(tokens)
     program = literal[0]
     if not _PROGRAM.fullmatch(program):
@@ -193,7 +242,7 @@ def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenie
             rest = rest[split + 1:]
             if not rest:
                 raise _Refusal("a launcher needs a launched command after `--`")
-        _tokens(rest, freedom, root, depth + 1, lenient=program == "yarn" and literal[prefix - 1] not in _OWNERS["yarn"][0])
+        _tokens(rest, freedom, root, depth + 1, lenient=program == "yarn" and literal[prefix - 1] not in _OWNERS["yarn"][0], launcher=program)
         return
     if "--" in tokens:
         raise _Refusal("`--` is accepted only as a launcher separator")
@@ -211,7 +260,7 @@ def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenie
     if program == "cmake" and any(token in ("-E", "-P") or token.startswith(("-E", "-P")) for token in literal[1:]):
         raise _Refusal("cmake -E and -P run commands and scripts")
     if wildcard and not lenient and not any(not token.startswith("-") for token in literal[1:]):
-        raise _Refusal("a wildcard pattern needs a literal non-option token after the program (a subcommand or target, such as `make test:*`); option values are not parsed")
+        raise _Refusal(_unanchored_wildcard(program, literal, launcher))
     exact_only = program in _PATH_SENSITIVE or program.startswith("mkfs")
     if exact_only and wildcard:
         raise _Refusal(f"{program!r} writes to the filesystem and accepts only exact patterns")

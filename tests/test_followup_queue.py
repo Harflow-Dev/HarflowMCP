@@ -149,7 +149,8 @@ async def test_a_task_without_live_input_queues_instead_of_refusing(log_dir: Pat
     put_record(log_dir)
     result = await server.send_message(SRC, "  keep  my   spacing \r\n")
     assert result["status"] == "queued" and result["delivery"] == "queue"
-    assert result["seq"] == 1 and "nothing was started" in result["note"]
+    assert result["seq"] == 1 and result["target_settled"] is True and result["target_status"] == "completed"
+    assert "resume_task / continue_task" in result["note"] and result["message_id"]
     assert "delivered" not in result["status"]
     item = state_doc(log_dir)["items"][0]
     assert item["text"] == "  keep  my   spacing \r\n" and item["status"] == "queued"
@@ -157,6 +158,41 @@ async def test_a_task_without_live_input_queues_instead_of_refusing(log_dir: Pat
     # A separate store: the live-input inbox is never touched.
     assert not inbox.inbox_path(log_dir, SRC).exists()
     assert not inbox.closed_path(log_dir, SRC).exists()
+
+
+def test_a_running_target_keeps_todays_queued_reply(log_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harflow_mcp import messaging
+    put_record(log_dir, status="running", exit_code=None, finished_at=None)
+    monkeypatch.setattr(store, "resolve_status", lambda *args, **kwargs: ("running", "", None, []))
+    result = messaging.queue(log_dir, SRC, "hello")
+    assert result["status"] == "queued" and "target_settled" not in result and "target_status" not in result
+    assert "nothing was started" in result["note"]
+
+
+def test_an_alive_recovered_task_is_not_reported_finished(log_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harflow_mcp import messaging
+    put_record(log_dir)
+    monkeypatch.setattr(store, "resolve_status", lambda *args, **kwargs: ("running", "", None, []))
+    result = messaging.queue(log_dir, SRC, "hello")
+    assert "target_settled" not in result and "nothing was started" in result["note"]
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "timed_out"])
+def test_settled_targets_name_the_status_and_how_to_deliver(log_dir: Path, monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    from harflow_mcp import messaging
+    put_record(log_dir)
+    monkeypatch.setattr(store, "resolve_status", lambda *args, **kwargs: (status, "", None, []))
+    result = messaging.queue(log_dir, SRC, "hello")
+    assert result["message_id"] and result["target_settled"] is True and result["target_status"] == status
+    assert f"Task already finished ({status})" in result["note"]
+    assert 'delivery="now"' in result["note"]
+
+
+def test_delivery_now_does_not_add_settled_fields(log_dir: Path) -> None:
+    from harflow_mcp import messaging
+    put_record(log_dir)
+    result = messaging.queue(log_dir, SRC, "hello", delivery="now")
+    assert "target_settled" not in result and "nothing was started" in result["note"]
 
 
 async def test_a_live_input_task_queues_without_folding_current_turn(log_dir: Path, identities) -> None:

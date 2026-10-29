@@ -136,7 +136,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     compact_p.add_argument('--json', action='store_true')
     compact_p.add_argument('--limit', type=int, default=50)
     compact_p.add_argument('--cursor')
-    compact_p.add_argument('--fields', help='comma-separated compact fields')
+    compact_p.add_argument('--fields', help='comma-separated compact task fields; errors name unknown entries and list the accepted names')
     for key in ('group', 'title-contains', 'repo', 'status', 'backend', 'since'):
         compact_p.add_argument('--' + key)
 

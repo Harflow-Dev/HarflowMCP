@@ -40,7 +40,10 @@ visibility, or use status reads for known tasks. Compact filters are ANDed:
 - `--since`: inclusive start timestamp, ISO8601 with timezone, for example
   `2026-10-14T00:00:00Z`. This differs from the legacy `list --since 7d`.
 - `--fields task_id,title,status`: requested compact fields. Identity and status
-  uncertainty fields are always retained. Unknown fields and filters are errors.
+  uncertainty fields are always retained. Unknown fields and filters are errors that name
+  the bad entries, suggest a close match (`repo` means `repo_path`), and list the accepted
+  names. An empty field list, a non-string entry and a list longer than the accepted set
+  each have their own message. `harflow-ctl task-list-compact --fields` uses the same checks.
 
 Limits are 1–100, default 50. The group filter accepts nonblank strings of at
 most 128 characters, matching task creation (including Unicode). Other filter

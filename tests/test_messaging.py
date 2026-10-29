@@ -39,6 +39,38 @@ def reserve(storage, rid, tid="next", node_id="work", role="node"):
     return claimed
 
 
+def test_running_workflow_message_has_no_settled_fields(storage, tmp_path):
+    rid = create(storage, tmp_path)["workflow_run_id"]
+    result = m.send(storage, rid, "while it runs")
+    assert result["status"] == "queued" and "target_settled" not in result
+
+
+def test_terminal_workflow_message_reports_no_further_dispatch(storage, tmp_path):
+    rid = create(storage, tmp_path)["workflow_run_id"]
+    storage.update_run(rid, lambda run: run.update(status="completed"), "test")
+    result = m.send(storage, rid, "later")
+    assert result["status"] == "undeliverable" and result["target_settled"] is True
+    assert result["target_status"] == "completed" and "no further dispatch" in result["note"]
+    storage.update_run(rid, lambda run: run.update(status="cancelled"), "test")
+    assert m.send(storage, rid, "after cancel")["target_status"] == "cancelled"
+    storage.update_run(rid, lambda run: run.update(status="failed"), "test")
+    assert "target_settled" not in m.send(storage, rid, "recover me")
+    storage.update_run(rid, lambda run: run.update(status="completed", kind="builder"), "test")
+    assert "target_settled" not in m.send(storage, rid, "another builder turn")
+    now = m.send(storage, rid, "deliver now", delivery="now")
+    assert "target_settled" not in now and "refusal" in now
+
+
+def test_workflow_owned_task_message_follows_the_run(storage, tmp_path):
+    rid = create(storage, tmp_path)["workflow_run_id"]
+    add_attempt(storage, rid, status="completed")
+    waiting = m.send(storage, rid, "next node attempt", task_id="original")
+    assert "target_settled" not in waiting
+    storage.update_run(rid, lambda run: run.update(status="completed"), "test")
+    finished = m.send(storage, rid, "too late", task_id="original")
+    assert finished["target_settled"] is True and finished["target_status"] == "completed"
+
+
 def test_queue_verbatim_cancel_and_safe_now_refusal(storage, tmp_path):
     run = create(storage, tmp_path)
     rid = run["workflow_run_id"]

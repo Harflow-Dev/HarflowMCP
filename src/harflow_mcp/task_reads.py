@@ -1,6 +1,7 @@
 """Explicit bounded task projections. Full task state remains on the detail APIs."""
 from __future__ import annotations
 
+import difflib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -17,11 +18,31 @@ LIST_FIELDS = frozenset({'task_id', 'backend', 'status', 'title', 'group', 'repo
     'needs_reconciliation', 'process_identity_state', 'needs_direct_lookup', 'note'})
 REQUIRED_FIELDS = frozenset({'task_id', 'status', 'needs_reconciliation',
     'needs_direct_lookup', 'persisted_status', 'observed_exit', 'process_identity_state'})
+ACCEPTED_FILTERS = ('group', 'title_contains', 'repo', 'status', 'backend', 'since', 'predecessor_task_id')
+
+
+def _suggest(name: str, accepted: set[str]) -> str | None:
+    if name == 'repo' and 'repo_path' in accepted:
+        return 'repo_path'
+    match = difflib.get_close_matches(name, sorted(accepted), n=1, cutoff=0.6)
+    return match[0] if match else None
+
+
+def _unknown_names(kind: str, unknown: list[str], accepted: str, *, vocabulary: set[str], accepted_label: str = 'accepted') -> str:
+    parts = []
+    for name in dict.fromkeys(unknown):
+        hint = _suggest(name, vocabulary) if isinstance(name, str) else None
+        parts.append(f'{name!r}' + (f' (did you mean {hint!r}?)' if hint else ''))
+    return f'unknown {kind}: ' + ', '.join(parts) + f'; {accepted_label}: {accepted}'
 
 
 def validate_filters(filters: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(filters, dict) or set(filters) - {'group', 'title_contains', 'repo', 'status', 'backend', 'since', 'predecessor_task_id'}:
-        raise ValueError('Unknown task listing filter')
+    accepted = ', '.join(ACCEPTED_FILTERS)
+    if not isinstance(filters, dict):
+        raise ValueError(f'task listing filters must be an object; accepted filters: {accepted}')
+    unknown = [key for key in filters if key not in ACCEPTED_FILTERS]
+    if unknown:
+        raise ValueError(_unknown_names('task listing filters', unknown, accepted, vocabulary=set(ACCEPTED_FILTERS), accepted_label='accepted filters'))
     result = {}
     for key, value in filters.items():
         if value is None:
@@ -53,8 +74,27 @@ def validate_filters(filters: dict[str, Any]) -> dict[str, Any]:
 def validate_fields(fields: list[str] | None) -> set[str]:
     if fields is None:
         return set(LIST_FIELDS)
-    if not isinstance(fields, list) or not fields or len(fields) > len(LIST_FIELDS) or any(not isinstance(f, str) or f not in LIST_FIELDS for f in fields):
-        raise ValueError('fields must be a nonempty list of supported compact task fields')
+    accepted = ', '.join(sorted(LIST_FIELDS))
+    required = ', '.join(sorted(REQUIRED_FIELDS))
+    if not isinstance(fields, list):
+        raise ValueError(f'fields must be a list of compact task field names, not {type(fields).__name__}; accepted: {accepted}')
+    if not fields:
+        raise ValueError(
+            'fields must be a nonempty list of compact task field names; '
+            f'accepted: {accepted}. Identity and status fields are always included: {required}')
+    if len(fields) > len(LIST_FIELDS):
+        raise ValueError(
+            f'fields lists {len(fields)} names, which is more than the {len(LIST_FIELDS)} accepted compact task fields; '
+            f'accepted: {accepted}')
+    bad = [index for index, item in enumerate(fields) if not isinstance(item, str)]
+    if bad:
+        shown = ', '.join(f'index {index} is {type(fields[index]).__name__}' for index in bad)
+        raise ValueError(f'fields entries must be strings; {shown}')
+    unknown = [item for item in fields if item not in LIST_FIELDS]
+    if unknown:
+        raise ValueError(
+            _unknown_names('compact task fields', unknown, accepted, vocabulary=set(LIST_FIELDS))
+            + f'. Identity and status fields are always included: {required}')
     return set(fields) | REQUIRED_FIELDS
 
 

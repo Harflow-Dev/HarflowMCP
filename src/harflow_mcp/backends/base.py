@@ -352,6 +352,8 @@ class Enforcement:
     group_report_output: bool | None = None
     extra_allowed_commands: tuple[str, ...] = ()
     """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
+    extra_allowed_command_matches: tuple[dict[str, str], ...] = ()
+    """Each grant as `{pattern, match}` with match `exact` or `prefix`; omitted with `extra_allowed_commands`."""
 
     @property
     def publish_attempts_allowed(self) -> bool:
@@ -362,7 +364,9 @@ class Enforcement:
         return {
             **({"git_environment": self.git_environment} if self.git_environment is not None else {}),
             **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
-            **({"extra_allowed_commands": list(self.extra_allowed_commands)} if self.extra_allowed_commands else {}),
+            **({"extra_allowed_commands": list(self.extra_allowed_commands),
+                "extra_allowed_command_matches": [dict(item) for item in self.extra_allowed_command_matches]}
+               if self.extra_allowed_commands else {}),
             "extra_writable_paths": list(self.extra_writable_paths),
             "extra_path_certification": self.extra_path_certification,
             "freedom": self.freedom,
@@ -590,6 +594,9 @@ class ExtraPathsUnsupported:
             raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         return invocation
 
+    def allowed_command_notices(self, patterns) -> tuple[str, ...]:
+        return ()
+
     def allowed_commands_enforcement(self, enforcement, patterns):
         if patterns:
             raise UnsupportedCapability(self.allowed_commands_support()["reason"])
@@ -768,6 +775,7 @@ class Backend(Protocol):
     def validate_allowed_commands(self, patterns: tuple[str, ...], freedom: str, repo: Path | None) -> None: ...
     def qualify_allowed_commands(self) -> str: ...
     def configure_allowed_commands(self, invocation: Invocation, patterns: tuple[str, ...], freedom: str, repo: Path | None, version: str | None = None) -> Invocation: ...
+    def allowed_command_notices(self, patterns: tuple[str, ...]) -> tuple[str, ...]: ...
     def allowed_commands_enforcement(self, enforcement: Enforcement, patterns: tuple[str, ...]) -> Enforcement: ...
     def approval_enforcement(self, enforcement: Enforcement, version: str | None, enabled: bool, write: bool) -> Enforcement: ...
     def decode_approval_request(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...

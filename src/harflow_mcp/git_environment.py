@@ -95,11 +95,40 @@ def auth_status() -> str:
         return "unknown"
 
 
+_REMEDIES = {
+    "gh_missing": "Install GitHub CLI, run `gh auth login` and `gh auth setup-git`, then restart the Harflow server.",
+    "gh_not_authenticated": "Run `gh auth login` and `gh auth setup-git`, then restart the Harflow server.",
+    "gh_authenticated_helper_not_observed": "Run `gh auth setup-git`, then restart the Harflow server. The observation is cached for the server's lifetime.",
+}
+_SSH_NOTE = (
+    "SSH URLs for github.com are fetched over HTTPS, so SSH agent setup does not affect them; "
+    "git_https_rewrite=false restores SSH."
+)
+
+
+def remedy(enabled: bool, status: str) -> str | None:
+    """What to do about this observation while the rewrite is on. None means no HTTPS remedy."""
+    if not enabled:
+        return None
+    return _REMEDIES.get(status)
+
+
 def disclosure(enabled: bool, status: str) -> dict[str, object]:
-    return {"github_https_rewrite": enabled, "https_auth_observation": status,
-            "reachability_verified": False}
+    payload: dict[str, object] = {"github_https_rewrite": enabled, "https_auth_observation": status,
+                                  "reachability_verified": False}
+    text = remedy(enabled, status)
+    if text is not None:
+        payload["remedy"] = text
+    return payload
 
 
 def notice(enabled: bool, status: str) -> str:
     transport = "GitHub SSH URLs configured to rewrite to HTTPS" if enabled else "GitHub HTTPS rewrite disabled"
-    return f"Git: {transport}; HTTPS authentication observation: {status}. Network, sandbox and repository access are not verified."
+    parts = [f"Git: {transport}; HTTPS authentication observation: {status}."]
+    if enabled:
+        parts.append(_SSH_NOTE)
+    text = remedy(enabled, status)
+    if text is not None:
+        parts.append(text)
+    parts.append("Network, sandbox and repository access are not verified.")
+    return " ".join(parts)

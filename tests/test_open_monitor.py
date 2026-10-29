@@ -19,7 +19,8 @@ from harflow_mcp.tasks import TaskRegistry
 
 GIT_ONLY_NOTICES = [
     "Git: GitHub SSH URLs configured to rewrite to HTTPS; HTTPS authentication observation: unknown. "
-    "Network, sandbox and repository access are not verified."
+    "SSH URLs for github.com are fetched over HTTPS, so SSH agent setup does not affect them; "
+    "git_https_rewrite=false restores SSH. Network, sandbox and repository access are not verified."
 ]
 
 

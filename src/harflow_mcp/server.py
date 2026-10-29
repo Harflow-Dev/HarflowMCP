@@ -617,17 +617,27 @@ async def start_task(
             capabilities.allowed_commands); every other backend and access level refuses the request. Each
             pattern is a lowercase program followed by literal tokens, with at most one `*` as the final
             token or the `:*` suffix (`pytest` style: `python3 -m pytest:*`), and a wildcard needs a literal
-            subcommand or target (`make test:*`). Shells, wrappers, interpreter evaluation and gh below
+            subcommand or target (`make test:*`). A pattern with no wildcard is exact and matches one command
+            line; `:*` or a final `*` is a prefix. A bare program name such as `swiftlint` is exact: it matches
+            only that command with no arguments, and the dispatch notice suggests `swiftlint:*` or
+            `swiftlint lint:*`. Options before a goal are literal and order-sensitive, so `mvn -o test:*`
+            does not match `mvn -q -o test`; `mvn -o:*` is refused because a goal must follow the options.
+            A launcher whose command has no subcommand, such as `npx tsc:*`, is refused; grant the exact
+            command, for example `npx tsc --noEmit -p .`. Programs whose arguments start with options, such
+            as `xcodebuild -workspace App.xcworkspace -scheme App test`, cannot take a wildcard: grant each
+            full command line exactly. Shells, wrappers, interpreter evaluation and gh below
             `publish` are refused. Exact Git fetch, ff-only pull and non-force switch/create grants are
             supported at write_in_repo and publish; wildcard/config/reset/force Git grants are refused.
             Initial transition grants require clean checkouts; later dirty races remain Git controlled.
             Commit/push authority is separate (`publish`); paths must stay inside the repository.
-            The grammar is a guard against mistakes, not a security boundary: grants are prefix approvals in
-            Claude's permission layer, a granted program can run repository code, chained commands need every
+            The grammar is a guard against mistakes, not a security boundary: grants are Claude permission-layer
+            approvals, not OS enforcement. An exact pattern matches one command line and a prefix matches that
+            command with further arguments. A granted program can run repository code, chained commands need every
             part allowed, and the access level's git commit and push denies still win. Omitted or null grants
             nothing. A nested dispatch may grant only exact patterns its caller holds (unless the caller is
             unrestricted) and never inherits them. resume_task and continue_task inherit the saved list when
-            omitted and replace it when given. See docs/harness-permissions.md.
+            omitted and replace it when given. Status reports each grant's match as
+            enforcement.extra_allowed_command_matches. See docs/harness-permissions.md.
         resources: Optional list of 1-16 resource names (lowercase letters, digits and `. _ : -`, at most
             64 characters, starting with a letter or digit; for example `ios-simulator` or `repo:main`)
             this task needs exclusively. Capacity is one per name: the task does not start until it
@@ -1738,7 +1748,18 @@ async def list_tasks(
     Includes tasks from earlier harflow_mcp server processes, marked `recovered: true`.
     Supplying group/title_contains/repo/since/limit/fields/cursor selects a bounded newest-first
     indexed page (default limit 50, maximum 100), rather than the legacy oldest-first list.
-    since is an inclusive ISO8601 timestamp with timezone. Filters run before pagination;
+    since is an inclusive ISO8601 timestamp with timezone. fields selects compact names. Accepted
+    fields, in sorted order: background_idle_seconds, backend, dispatch_origin, duration_seconds,
+    finished_at, group, input_channel, last_captured_output_at, needs_direct_lookup,
+    needs_reconciliation, note, observation_mode, observation_note, observed_exit, output_capture,
+    owner, parent_task_id, persisted_status, process_identity_state, recovered, repo_path,
+    responding_server, root_task_id, session_id, started_at, status, task_id, title. The repository
+    field is repo_path, not repo. Identity and status fields are always included: task_id, status,
+    needs_reconciliation, needs_direct_lookup, persisted_status, observed_exit, process_identity_state.
+    An unknown name, an empty list, a non-string entry and a list longer than the accepted set each
+    produce their own error, and the error names the bad entries and lists the accepted ones.
+    Accepted filters: group, title_contains, repo, status, backend, since, predecessor_task_id.
+    Filters run before pagination;
     cursor binds filters. Status is the indexed observation: inspect needs_reconciliation and
     observed_exit before interpreting it. See docs/compact-task-reads.md for supported fields,
     bounded-header matching and direct detail lookup. Listing never replays task logs.
@@ -2074,8 +2095,13 @@ async def send_message(task_id: str, text: str, delivery: str = "queue", interac
 
     `delivery` is `queue` (default; never folds into the current turn) or `now`. Now starts a
     safely settled standalone continuation; an unsafe interruption returns a stable `refusal`
-    alongside the queued message id, preserving the message for later. Workflow/node messages
-    follow their owning workflow and never widen node authority. Use `interaction_owner=monitor`
+    alongside the queued message id, preserving the message for later. When `delivery` is `queue`
+    and resolve_status says the target has already finished, the reply keeps the queued message id
+    and adds `target_settled: true`, `target_status`, and a note that the message waits for
+    resume_task / continue_task (or delivery="now"). A running target, including a recovered task
+    that is still alive, returns the same reply as before, with no settled fields. Workflow/node
+    messages follow their owning workflow and never widen node authority; a completed non-builder
+    or cancelled run says no further dispatch will consume the message. Use `interaction_owner=monitor`
     only from a verified human Monitor caller. Status exposes messages and queued_followups.
     """
     await _guard_mutation()
@@ -2125,8 +2151,10 @@ async def cancel_queued_message(task_id: str, message_id: str, interaction_owner
 async def send_workflow_message(run_id: str, text: str, task_id: str | None = None, delivery: str = "queue", interaction_owner: str = "caller") -> dict[str, Any]:
     """Queue a workflow or node message for its next issued dispatch. Exact prose and order are
     preserved. `now` refuses unsupported interruption or required checkpoints while keeping the
-    queued message and returning its id plus a stable refusal code. No permission, goal, decision
-    or attempt budget is changed. Owner checks match other workflow interactions.
+    queued message and returning its id plus a stable refusal code. A queued message to a completed
+    non-builder or cancelled run adds `target_settled`, `target_status` and a note that no further
+    dispatch will consume it; a running run, a failed run and a completed builder omit those fields.
+    No permission, goal, decision or attempt budget is changed. Owner checks match other workflow interactions.
     """
     await _guard_mutation()
     try:

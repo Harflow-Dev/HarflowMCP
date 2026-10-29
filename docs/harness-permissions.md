@@ -191,6 +191,20 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
 - A wildcard needs a literal non-option token after the program, such as a subcommand or target (`make test:*`,
   `yarn --cwd /repo tsc:*`). Option values are not parsed, so `arch -arm64:*` is refused by this rule and `nice -n 5:*`
   by the program list. An exact pattern needs no subcommand, except `make`, which always needs a target.
+- A pattern with no wildcard is **exact**: it matches one full command line. `:*` or a final `*` is a **prefix**.
+  A bare program name such as `swiftlint` is exact, so it matches only `swiftlint` with no arguments. Harflow accepts
+  it and returns a notice suggesting a prefix such as `swiftlint:*` or `swiftlint lint:*`. Prefixes such as
+  `swiftlint lint:*` and `xcrun simctl:*` produce no such notice. `enforcement.extra_allowed_command_matches` reports
+  each grant as `{pattern, match}` with `match` of `exact` or `prefix`, next to `extra_allowed_commands`.
+- Options before a goal or subcommand are literal, and order matters because matching is by prefix. `mvn -o test:*`
+  matches `mvn -o test` and `mvn -o test -DskipITs`, and does not match `mvn -q -o test` or `mvn -o -q test`. Grant
+  each option order you need. `mvn -o:*` is refused: a goal or subcommand must follow the options, as in
+  `mvn -o test:*`. Gradle is the same shape (`gradle -q test:*`). A launcher whose command has no subcommand to
+  anchor a wildcard is refused by name: `npx tsc:*` and `npx tsc *` say that `tsc` takes no subcommand and show an
+  accepted exact command such as `npx tsc --noEmit -p .`.
+- Programs whose arguments begin with options cannot take a wildcard at all. Grant each full command line exactly,
+  for example `xcodebuild -workspace App.xcworkspace -scheme App test`. Recommended prefixes, when a literal
+  subcommand or target exists, look like `make test:*` and `xcrun simctl:*`.
 - Paths: a token containing `/` must be a plain relative path without `..` or an absolute path, and must resolve inside
   the repository after `realpath`; `--option=path` is accepted the same way. `-f/etc/x`, `key=/x` and `../x` are
   refused.
@@ -225,7 +239,7 @@ edits across a switch. Resume does not recheck a task's own edits. At `write_in_
 grants retain the direct commit/push deny rules; publication remains separately authorized.
 
 **What it is not.** The grammar is a guard against caller mistakes and obvious escalation, not a security boundary.
-A grant is a prefix approval in Claude's permission layer, not OS enforcement; a granted program can run code from the
+A grant is an approval in Claude's permission layer, not OS enforcement. An exact pattern matches one command line and a prefix pattern matches that command with further arguments. A granted program can run code from the
 repository (Makefiles, test configuration, scripts); a wildcard lets it take any further arguments; a chained command
 needs every part allowed; and user or project settings can add more allowed commands. Path containment is evaluated
 at dispatch time and cannot prevent a later symlink change. The boundaries that do hold are the direct caller who
@@ -264,7 +278,7 @@ The engine does not rewrite saved user workflows or retry a blocked node with a 
 their saved permissions; changing a workflow is a separately authorized save and a new execution. No
 tracked workflow template is required for this candidate-owned grant.
 
-**Disclosure.** `enforcement.extra_allowed_commands` lists the patterns, with caveats; the booleans are unchanged
+**Disclosure.** `enforcement.extra_allowed_commands` lists the patterns and `enforcement.extra_allowed_command_matches` reports each one's `exact` or `prefix` match, with caveats; the booleans are unchanged
 (`direct_commit_commands_denied` stays true at `write_in_repo`). Task snapshots and `harflow-ctl status` also carry
 `allowed_commands`, and `preview_task_permissions` / `harflow-ctl permission-preview` show the same without launching.
 

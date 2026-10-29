@@ -53,6 +53,29 @@ def test_invalid_requests(tmp_path, kw):
         task_reads.list_tasks(tmp_path, **kw)
 
 
+def test_field_and_filter_errors_name_the_entries():
+    accepted = ", ".join(sorted(task_reads.LIST_FIELDS))
+    required = ", ".join(sorted(task_reads.REQUIRED_FIELDS))
+    with pytest.raises(ValueError, match="did you mean 'repo_path'") as unknown:
+        task_reads.validate_fields(["repo", "nope"])
+    text = str(unknown.value)
+    assert "'repo'" in text and "'nope'" in text and accepted in text
+    assert f"Identity and status fields are always included: {required}" in text
+    with pytest.raises(ValueError, match="nonempty list"):
+        task_reads.validate_fields([])
+    with pytest.raises(ValueError, match="index 0 is int"):
+        task_reads.validate_fields([1])
+    with pytest.raises(ValueError, match="more than the"):
+        task_reads.validate_fields(["task_id"] * (len(task_reads.LIST_FIELDS) + 1))
+    with pytest.raises(ValueError, match="not str"):
+        task_reads.validate_fields("repo_path")
+    with pytest.raises(ValueError, match="accepted filters") as filters:
+        task_reads.validate_filters({"repository": "x", "nope": "y"})
+    assert "group, title_contains, repo, status, backend, since, predecessor_task_id" in str(filters.value)
+    with pytest.raises(ValueError, match="must be an object"):
+        task_reads.validate_filters(["group"])
+
+
 def test_filtered_paging_and_scope(tmp_path, monkeypatch):
     for i in range(12):
         store.write(tmp_path, record(f'task-{i:02}', title='Fix Widget', group='target' if i % 2 else 'other'))

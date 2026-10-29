@@ -60,6 +60,30 @@ def test_effective_inheritance_and_server_override(monkeypatch):
     assert not git.inherited(None, source)
 
 
+@pytest.mark.parametrize("status,needle", [
+    ("gh_missing", "Install GitHub CLI"),
+    ("gh_not_authenticated", "`gh auth login` and `gh auth setup-git`"),
+    ("gh_authenticated_helper_not_observed", "Run `gh auth setup-git`, then restart the Harflow server"),
+])
+def test_https_remedy_is_shown_only_while_the_rewrite_is_on(status, needle):
+    disclosed = git.disclosure(True, status)
+    assert needle in disclosed["remedy"] and "restart" in disclosed["remedy"]
+    assert needle in git.notice(True, status)
+    assert "SSH URLs for github.com are fetched over HTTPS" in git.notice(True, status)
+    assert "remedy" not in git.disclosure(False, status)
+    assert "gh auth" not in git.notice(False, status)
+    assert "SSH URLs for github.com" not in git.notice(False, status)
+
+
+@pytest.mark.parametrize("status", ["unknown", "gh_authenticated_helper_declaration_observed"])
+def test_observations_without_a_fix_keep_no_remedy(status):
+    assert "remedy" not in git.disclosure(True, status)
+    assert "remedy" not in git.disclosure(False, status)
+    assert "gh auth setup-git" not in git.notice(True, status)
+    assert "SSH URLs for github.com are fetched over HTTPS" in git.notice(True, status)
+    assert "SSH URLs for github.com" not in git.notice(False, status)
+
+
 def test_auth_probe_discards_output_and_is_cached(monkeypatch):
     calls = []
     def run(argv, **kwargs):

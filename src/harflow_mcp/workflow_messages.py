@@ -70,6 +70,15 @@ def send(storage, run_id: str, text: str, *, task_id: str | None = None,
     run = storage.update_run(run_id, queue, "message_queued", {"message_id": message["id"]})
     published = next(m for m in run["messages"] if m["id"] == message["id"])
     result = {"workflow_run_id": run_id, "message_id": message["id"], "seq": message["seq"], "status": published["status"], "delivery": delivery}
+    # Completed non-builder runs and cancelled runs never issue another dispatch. Failed runs
+    # and completed builders can still consume a queued message, so they stay unmarked.
+    if delivery != "now" and (run.get("status") == "cancelled" or (run.get("status") == "completed" and run.get("kind") != "builder")):
+        result["target_settled"] = True
+        result["target_status"] = run.get("status")
+        result["note"] = (
+            f"Workflow already finished ({run.get('status')}); no further dispatch will consume this message. "
+            "Completed non-builder workflows and cancelled workflows do not issue another node."
+        )
     if published.get("reason"):
         result["reason"] = published["reason"]
     if task_id:

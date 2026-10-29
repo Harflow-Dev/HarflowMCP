@@ -218,7 +218,7 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "gh api to read requests. Use gh pr view --json or gh repo view --json for supported reads"
 )
 _COMMAND_GRANT_CAVEATS = (
-    "allowed_commands grants are prefix approvals in Claude's permission layer, not OS enforcement; the grammar is a guard against caller mistakes, not a security boundary",
+    "allowed_commands grants are Claude permission-layer approvals, not OS enforcement: an exact pattern matches one command line and a prefix pattern (a final * or :*) matches that command with further arguments. The grammar is a guard against caller mistakes, not a security boundary",
     "a granted program can run code from the repository (Makefiles, test configuration, scripts), so a grant does not confine what that program does, and a wildcard lets it take any further arguments",
     "a chained command needs every part allowed",
     "the access level's deny patterns still refuse a direct git commit or git push command string even when a pattern covers it, but a granted program, or code it runs, can still invoke git",
@@ -539,14 +539,28 @@ class ClaudeBackend(ExtraPathsUnsupported):
             raise UnsafeInvocationError(f"no permission list to extend for freedom {freedom!r}: {argv!r}")
         return replace(invocation, argv=argv, allowed_commands=tuple(patterns), allowed_commands_version=version)
 
+    def allowed_command_notices(self, patterns) -> tuple[str, ...]:
+        from . import claude_commands as grammar
+        notice = grammar.bare_program_notice(patterns)
+        return (notice,) if notice else ()
+
     def allowed_commands_enforcement(self, enforcement, patterns):
         if not patterns:
             return enforcement
         from . import claude_commands as grammar
         if enforcement.freedom not in grammar.FREEDOMS:
             raise UnsupportedCapability(f"allowed_commands is supported only at {' and '.join(grammar.FREEDOMS)}")
-        return replace(enforcement, extra_allowed_commands=tuple(patterns),
-                       mechanism=f"{enforcement.mechanism} + {len(patterns)} dispatch-time Bash allow pattern(s) in the same --allowedTools value",
+        matches = grammar.command_matches(patterns)
+        exact = sum(item["match"] == "exact" for item in matches)
+        prefix = len(matches) - exact
+        if exact and prefix:
+            kind = f"{exact} exact and {prefix} prefix"
+        elif prefix:
+            kind = f"{prefix} prefix"
+        else:
+            kind = f"{exact} exact"
+        return replace(enforcement, extra_allowed_commands=tuple(patterns), extra_allowed_command_matches=matches,
+                       mechanism=f"{enforcement.mechanism} + {len(patterns)} dispatch-time Bash allow pattern(s) ({kind}) in the same --allowedTools value",
                        caveats=enforcement.caveats + _COMMAND_GRANT_CAVEATS)
 
     def approval_enforcement(self, enforcement, version, enabled, write):

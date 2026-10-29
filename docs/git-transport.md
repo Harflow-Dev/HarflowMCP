@@ -33,7 +33,17 @@ repository's configuration. It does not certify effective helper availability or
 `list_backends` reports `git_environment`; each task's `enforcement.git_environment` and notices
 report the effective rewrite and `https_auth_observation`. Possible observations are `gh_missing`,
 `gh_not_authenticated`, `gh_authenticated_helper_not_observed`,
-`gh_authenticated_helper_declaration_observed`, and `unknown`. `reachability_verified` is always false.
+`gh_authenticated_helper_declaration_observed`, and `unknown`. While the rewrite is on, observations
+that have a fix also carry additive `remedy` (and the same instruction in the task notice):
+
+- `gh_missing`: install GitHub CLI, run `gh auth login` and `gh auth setup-git`, then restart the Harflow server.
+- `gh_not_authenticated`: run `gh auth login` and `gh auth setup-git`, then restart the server.
+- `gh_authenticated_helper_not_observed`: run `gh auth setup-git`, then restart the server. The observation is cached for the server's lifetime.
+- `unknown` and `gh_authenticated_helper_declaration_observed`: no remedy.
+
+The notice also says that, while the rewrite is on, SSH URLs for github.com are fetched over HTTPS, so SSH agent
+setup does not affect them, and that `git_https_rewrite=false` restores SSH. With the rewrite off, no HTTPS remedy
+is shown. `reachability_verified` is always false.
 Authentication status and a helper declaration do not establish sandbox access to a keychain or
 helper binary, network access, repository permissions, or successful cloning. Public repositories
 may clone without authentication. Harflow preserves the inherited `SSH_AUTH_SOCK`; it does not

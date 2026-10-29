@@ -28,8 +28,17 @@ def queue(log_dir: Path, task_id: str, text: str, *, by=None, delivery="queue", 
         raise inbox.SendRefused("Session is taken over or its takeover is uncertain", code="taken_over")
     result = followups.send(log_dir, task_id, text, by=by, allow_live=True, delivery=delivery)
     result["delivery"] = delivery
-    if delivery == "now" and store.resolve_status(log_dir, record, detail=False)[0] == "running":
+    fresh = store.read(log_dir, task_id)
+    resolved = store.resolve_status(log_dir, fresh, detail=False)[0] if fresh is not None else None
+    if delivery == "now" and resolved == "running":
         result["refusal"] = workflow_messages.refusal("interrupt_unsupported", "The message stays queued: this backend has no qualified safe interruption operation. Wait for settlement, then continue.")
+    elif delivery != "now" and resolved in store.TERMINAL_RECORD_STATUSES:
+        result["target_settled"] = True
+        result["target_status"] = resolved
+        result["note"] = (
+            f"Task already finished ({resolved}); this message waits for the next resume_task / continue_task. "
+            'Use delivery="now" or continue_task(consume_followups=True) to deliver it now.'
+        )
     return result
 
 
