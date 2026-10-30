@@ -591,3 +591,26 @@ def test_detail_turns_an_exception_into_undecidable(tmp_path: Path) -> None:
     )
 
     assert detection.caller is None and "table exploded" in (detection.undecidable or "")
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="os.fork is unavailable")
+def test_a_forked_child_does_not_inherit_the_process_table_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    monkeypatch.setattr(lineage, "_load_process_table", lambda: {os.getpid(): 1})
+    monkeypatch.setattr(lineage, "_table_cache", None)
+    monkeypatch.setattr(lineage, "_table_cached_at", None)
+    assert lineage.process_table() is not None
+    parent_lock = lineage._table_lock
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            lock = lineage._table_lock
+            if lineage._table_cache is None and lineage._table_cached_at is None and lock is not parent_lock and lock.acquire(False):
+                lock.release()
+                status = 0
+        finally:
+            os._exit(status)
+    _, wait_status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(wait_status) and os.WEXITSTATUS(wait_status) == 0
+    assert lineage._table_cache is not None  # the parent keeps its own snapshot

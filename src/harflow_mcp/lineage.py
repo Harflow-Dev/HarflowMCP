@@ -154,6 +154,17 @@ def process_table() -> dict[int, int] | None:
         return table
 
 
+def _forget_process_table_in_child() -> None:
+    """A forked child is a new process that the parent's snapshot cannot list: never inherit it."""
+    global _table_cache, _table_cached_at, _table_lock
+    _table_cache = None
+    _table_cached_at = None
+    _table_lock = threading.Lock()
+
+
+os.register_at_fork(after_in_child=_forget_process_table_in_child)
+
+
 # A stable reference to the real loader, captured before any caller can shadow the module-level
 # name `process_table` with a local parameter of the same name (as `detect_caller` does, per the
 # API contract) — so the default in that function still reaches the real cache.

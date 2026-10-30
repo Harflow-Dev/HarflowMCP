@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from mcp import MCPError
+from mcp.types import INVALID_PARAMS
 
 from harflow_mcp import catalog, ctl, id_resolution, server, state_ownership, store, workflow_inspection
 from harflow_mcp.state_layout import resolve_layout
@@ -962,6 +963,183 @@ async def test_workflow_mutations_refuse_a_managed_caller_before_resolving(root:
         with pytest.raises(MCPError, match="managed callers cannot control workflows") as caught:
             await server._workflow_call("pause", run_id=prefix)
         assert caught.value.error.data is None
+
+
+REFUSAL = "Workflow-managed agents report results to their supervisor"
+
+
+def _managed_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `server` see a verified workflow-managed caller whose managed refusal is the real one."""
+    from harflow_mcp import workflow_hooks
+    from harflow_mcp.backends.base import NestedDispatchRefused
+    caller = type("Caller", (), {"record": type("Record", (), {"task_id": "agent-task"})()})()
+
+    async def verified():
+        return caller
+
+    def refuse(log_dir, task_id):
+        raise NestedDispatchRefused(REFUSAL + "; direct dispatch is refused", rule="workflow_managed")
+
+    async def mutation_caller():
+        return caller
+
+    monkeypatch.setattr(server, "_verified_workflow_caller", verified)
+    monkeypatch.setattr(server._reg(), "_mutation_caller", mutation_caller)
+    monkeypatch.setattr(workflow_hooks, "refuse_managed", refuse)
+
+
+def _direct_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def verified():
+        return None
+
+    monkeypatch.setattr(server, "_verified_workflow_caller", verified)
+    monkeypatch.setattr(server._reg(), "_mutation_caller", verified)
+
+
+MCP_TASK_MUTATIONS = {
+    "resume_task": lambda value: server.resume_task(value, followup_prompt="go on"),
+    "cancel_task": lambda value: server.cancel_task(value),
+    "continue_task": lambda value: server.continue_task(value),
+}
+
+
+@pytest.mark.parametrize("tool", sorted(MCP_TASK_MUTATIONS))
+@pytest.mark.parametrize("prefix", ["shared-prefix", "shared-prefix-", "no-such-prefix-at-all", "short"])
+async def test_task_mutations_refuse_a_managed_caller_before_resolving(log_dir: Path, monkeypatch: pytest.MonkeyPatch, tool: str, prefix: str) -> None:
+    write_tasks(log_dir, "shared-prefix-1", "shared-prefix-2")
+    _managed_caller(monkeypatch)
+    with pytest.raises(MCPError) as caught:
+        await MCP_TASK_MUTATIONS[tool](prefix)
+    assert REFUSAL in str(caught.value)
+    assert caught.value.error.data is None  # no candidates, no unknown_*/ambiguous_* code
+
+
+@pytest.mark.parametrize("tool", sorted(MCP_TASK_MUTATIONS))
+async def test_task_mutations_still_resolve_fully_for_a_direct_caller(log_dir: Path, monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    write_tasks(log_dir, "shared-prefix-1", "shared-prefix-2")
+    _direct_caller(monkeypatch)
+    with pytest.raises(MCPError) as caught:
+        await MCP_TASK_MUTATIONS[tool]("shared-prefix")
+    data = error_data(caught.value)
+    assert data["code"] == "ambiguous_task_id"
+    assert {candidate["task_id"] for candidate in data["candidates"]} == {"shared-prefix-1", "shared-prefix-2"}
+    with pytest.raises(MCPError) as caught:
+        await MCP_TASK_MUTATIONS[tool]("no-such-prefix-at-all")
+    assert error_data(caught.value)["code"] == "unknown_task"
+
+
+UNDECIDABLE = "Caller authority cannot be established: detection is undecidable"
+
+
+@pytest.mark.parametrize("tool", sorted(MCP_TASK_MUTATIONS))
+async def test_task_mutations_keep_the_undecidable_refusal_before_resolving(log_dir: Path, monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    from harflow_mcp.backends.base import NestedDispatchRefused
+    write_tasks(log_dir, "shared-prefix-1", "shared-prefix-2")
+
+    async def undecidable():
+        raise NestedDispatchRefused(UNDECIDABLE, rule="caller_undecidable")
+
+    monkeypatch.setattr(server._reg(), "_mutation_caller", undecidable)
+    for prefix in ("shared-prefix", "no-such-prefix-at-all"):
+        with pytest.raises(MCPError) as caught:
+            await MCP_TASK_MUTATIONS[tool](prefix)
+        assert str(caught.value) == UNDECIDABLE
+        assert caught.value.error.code == INVALID_PARAMS and caught.value.error.data is None
+
+
+@pytest.mark.parametrize("tool", ["send_message", "cancel_queued_message"])
+async def test_message_tools_already_refuse_a_managed_caller_before_resolving(log_dir: Path, monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    from harflow_mcp import inbox, workflow_hooks
+    write_tasks(log_dir, "shared-prefix-1", "shared-prefix-2")
+    _managed_caller(monkeypatch)
+
+    def refuse(directory, task_id):
+        raise inbox.SendRefused("Workflow-managed agents cannot send direct task messages", code="workflow_managed")
+
+    monkeypatch.setattr(workflow_hooks, "refuse_message_caller", refuse)
+    for prefix in ("shared-prefix", "no-such-prefix-at-all"):
+        with pytest.raises(MCPError) as caught:
+            if tool == "send_message":
+                await server.send_message(prefix, "hello")
+            else:
+                await server.cancel_queued_message(prefix, "message-1")
+        assert error_data(caught.value) == {"code": "workflow_managed"}
+
+
+def _ctl_managed_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harflow_mcp import lineage, workflow_hooks
+    from harflow_mcp.backends.base import NestedDispatchRefused
+    caller = type("Caller", (), {"record": type("Record", (), {"task_id": "agent-task"})()})()
+
+    def refuse(log_dir, task_id):
+        raise NestedDispatchRefused(REFUSAL + "; direct dispatch is refused", rule="workflow_managed")
+
+    monkeypatch.setattr(lineage, "detect_caller", lambda *args, **kwargs: caller)
+    monkeypatch.setattr(workflow_hooks, "refuse_managed", refuse)
+
+
+CTL_TASK_MUTATIONS = {"cancel": "invalid_params", "resume": "nested_dispatch_refused", "continue": "nested_dispatch_refused"}
+
+
+@pytest.mark.parametrize("command", sorted(CTL_TASK_MUTATIONS))
+@pytest.mark.parametrize("prefix", ["shared-prefix", "no-such-prefix-at-all", "short"])
+def test_ctl_task_mutations_refuse_a_managed_caller_before_resolving(home: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch, command: str, prefix: str) -> None:
+    write_tasks(ctl_log_dir(), "shared-prefix-1", "shared-prefix-2")
+    _ctl_managed_caller(monkeypatch)
+    assert ctl.main([command, prefix, "--json"]) == 1
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == CTL_TASK_MUTATIONS[command]
+    assert REFUSAL in error["message"]
+    assert "data" not in error
+
+
+def _ctl_detection(monkeypatch: pytest.MonkeyPatch, *, detail) -> None:
+    from harflow_mcp import lineage
+    monkeypatch.setattr(lineage, "detect_caller", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lineage, "detect_caller_detail", detail)
+
+
+@pytest.mark.parametrize("command", sorted(CTL_TASK_MUTATIONS))
+@pytest.mark.parametrize("failure", ["undecidable", "raises"])
+def test_ctl_task_mutations_keep_the_undecidable_refusal_before_resolving(home: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch, command: str, failure: str) -> None:
+    from harflow_mcp import lineage
+    write_tasks(ctl_log_dir(), "shared-prefix-1", "shared-prefix-2")
+
+    def raising(*args, **kwargs):
+        raise RuntimeError("ps exploded")
+
+    _ctl_detection(monkeypatch, detail=(lambda *args, **kwargs: lineage.Detection(None, "detection is undecidable")) if failure == "undecidable" else raising)
+    assert ctl.main([command, "shared-prefix", "--json"]) == 1
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == CTL_TASK_MUTATIONS[command]
+    assert error["message"].startswith("Caller authority cannot be established: ")
+    assert ("detection is undecidable" if failure == "undecidable" else "caller detection failed: ps exploded") in error["message"]
+    assert "data" not in error
+
+
+@pytest.mark.parametrize("command", sorted(CTL_TASK_MUTATIONS))
+def test_ctl_task_mutations_report_ownership_errors_as_a_refusal(home: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    from harflow_mcp import workflow_hooks
+    from harflow_mcp.workflows import WorkflowError
+    write_tasks(ctl_log_dir(), "shared-prefix-1", "shared-prefix-2")
+    _ctl_managed_caller(monkeypatch)
+
+    def broken(log_dir, task_id):
+        raise WorkflowError("receipt does not match its workflow")
+
+    monkeypatch.setattr(workflow_hooks, "refuse_managed", broken)
+    assert ctl.main([command, "shared-prefix", "--json"]) == 1
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == CTL_TASK_MUTATIONS[command] and "receipt does not match" in error["message"]
+    assert "data" not in error
+
+
+@pytest.mark.parametrize("command", sorted(CTL_TASK_MUTATIONS))
+def test_ctl_task_mutations_still_resolve_fully_for_a_direct_caller(home: Path, capsys: pytest.CaptureFixture, command: str) -> None:
+    write_tasks(ctl_log_dir(), "shared-prefix-1", "shared-prefix-2")
+    assert ctl.main([command, "shared-prefix", "--json"]) == 1
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "ambiguous_task_id" and len(error["data"]["candidates"]) == 2
 
 
 # Surfaces with their own missing-id contract keep it.

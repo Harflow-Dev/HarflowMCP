@@ -973,8 +973,43 @@ def _fail(args: argparse.Namespace, code: str, message: str, data: Any = None) -
     return 1
 
 
+def _refuse_managed_caller(args: argparse.Namespace, code: str) -> int | None:
+    """Authority first: refuse a workflow-managed caller before any task id is looked up.
+
+    Mirrors `TaskRegistry._mutation_caller` (detection, `require_mutation`, then an undecidable
+    detection) followed by `refuse_managed`, and reports every refusal under `code` with the
+    downstream message, so a refused caller sees the same error as before and learns nothing about
+    which ids exist.
+    """
+    from . import lineage
+    from .caller_policy import require_mutation
+    from .workflow_hooks import refuse_managed
+    log_dir = default_log_dir()
+    try:
+        caller = lineage.detect_caller(log_dir)
+        detection = lineage.Detection(caller) if caller is not None else lineage.detect_caller_detail(log_dir)
+    except StateOwnershipError:
+        raise
+    except Exception as exc:
+        detection = lineage.Detection(None, f"caller detection failed: {exc}")
+    if detection.caller is None and detection.undecidable is None and os.environ.get(lineage.ENV_TASK_ID):
+        detection = lineage.Detection(None, "HARFLOW_TASK_ID is set but its authority cannot be verified")
+    try:
+        require_mutation(log_dir, caller=detection.caller)
+        if detection.undecidable is not None:
+            raise backends.NestedDispatchRefused("Caller authority cannot be established: " + detection.undecidable, rule="caller_undecidable")
+        if detection.caller is not None:
+            refuse_managed(log_dir, detection.caller.record.task_id)
+    except ValueError as exc:  # includes NestedDispatchRefused and workflow ownership errors
+        return _fail(args, code, str(exc))
+    return None
+
+
 def _cmd_cancel(args: argparse.Namespace) -> int:
     log_dir = default_log_dir()
+    refused = _refuse_managed_caller(args, "invalid_params")
+    if refused is not None:
+        return refused
     try:
         resolution, _ = _resolve_task_arg(log_dir, args.task_id)
     except _StatusReadRefused as exc:
@@ -1930,7 +1965,10 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, "invalid_params", "--goal is available only with --workflow")
         return _cmd_detached(args, _run_action(args))
     if args.command in {"resume", "continue"}:
-        # Resolved in the parent so the forked owner only ever sees the full id.
+        # Authority first, then resolved in the parent so the forked owner only ever sees the full id.
+        refused = _refuse_managed_caller(args, "nested_dispatch_refused")
+        if refused is not None:
+            return refused
         try:
             resolution, _ = _resolve_task_arg(default_log_dir(), args.task_id)
         except _StatusReadRefused as exc:

@@ -1645,6 +1645,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
+    await _refuse_managed_task_caller()
     resolution = await _guard_task_read(task_id)
     task_id = resolution.id
     if allowed_commands is not None:
@@ -1729,6 +1730,7 @@ async def resume_task(
             f"network must be a boolean (true/false) or omitted, got {network!r}",
         )
 
+    await _refuse_managed_task_caller()
     resolution = await _resolve_task_id(task_id)
     task_id = resolution.id
     parent = _reg().get(task_id)
@@ -1974,6 +1976,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     """
     from .caller_policy import require_mutation
     await _guard_mutation()
+    await _refuse_managed_task_caller()
     resolution = await _resolve_task_id(task_id)
     task_id = resolution.id
     if _reg().get(task_id) is None and _reg().recover(task_id) is None:
@@ -2291,6 +2294,22 @@ async def _verified_workflow_caller():
     if os.environ.get(lineage.ENV_TASK_ID):
         raise MCPError(INVALID_PARAMS, "Workflow caller task identity cannot be verified")
     return None
+
+
+async def _refuse_managed_task_caller() -> None:
+    """Authority first: refuse a workflow-managed caller before any task id is looked up.
+
+    Without this a managed caller would learn from `unknown_task` or `ambiguous_task_id` which
+    root-catalog ids exist instead of receiving the refusal the mutation raises downstream. Caller
+    detection and its refusals are the registry's own (`_mutation_caller`), so messages are unchanged.
+    """
+    try:
+        caller = await _reg()._mutation_caller()
+        if caller is not None:
+            from .workflow_hooks import refuse_managed
+            refuse_managed(_reg().log_dir, caller.record.task_id)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 async def _bounded_managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:

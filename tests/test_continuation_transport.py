@@ -32,8 +32,11 @@ async def test_continue_tool_passes_exact_text_and_notes(monkeypatch):
         observed.append((task_id, extra_prompt, notes_path))
         return SimpleNamespace(brief=lambda: {"task_id": "new"}, enforcement={})
 
+    async def direct_caller():
+        return None
+
     monkeypatch.setattr(server, "_guard_task_read", guard)
-    monkeypatch.setattr(server, "_reg", lambda: SimpleNamespace(continue_task=continue_task))
+    monkeypatch.setattr(server, "_reg", lambda: SimpleNamespace(continue_task=continue_task, _mutation_caller=direct_caller))
     result = await server.continue_task("old", "  next\nstep  ", "/tmp/notes")
     assert result["task_id"] == "new"
     assert observed == [("guard", "old"), ("old", "  next\nstep  ", "/tmp/notes")]
