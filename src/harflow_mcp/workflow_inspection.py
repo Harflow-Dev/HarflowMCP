@@ -575,7 +575,7 @@ def guard_saved_workflow_authority(caller: Any, value: Any) -> None:
 
 def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | None]]) -> None:
     from . import backends
-    from .backends.base import FREEDOMS, check_nested_enforcement
+    from .backends.base import FREEDOMS, check_nested_enforcement, requested_cap_for_comparison
     for config, freedom, network in configs:
         if FREEDOMS.index(freedom) > FREEDOMS.index(record.freedom):
             raise ValueError("Saved workflow access cannot exceed the caller's freedom")
@@ -594,4 +594,4 @@ def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | 
             except backends.UnsupportedCapability:
                 continue
             # A runnable weaker candidate remains forbidden even if another is safe.
-            check_nested_enforcement(record.enforcement or {}, enforcement, parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)
+            check_nested_enforcement(requested_cap_for_comparison(backends.get(record.backend), record.enforcement or {}, record.freedom, record.network), requested_cap_for_comparison(backend_, enforcement, freedom, network), parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)

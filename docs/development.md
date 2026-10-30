@@ -46,3 +46,14 @@ Tool docstrings in [server.py](../src/harflow_mcp/server.py) define the MCP surf
 [Architecture](architecture.md) holds the maintainer-facing detail behind the rules in `AGENTS.md`: the backend and client seams, recovery and live input, takeover and ctl, enforcement claims, and caller reporting. [Backend CLI facts](backend-cli-facts.md) records the measured behavior of each agent and client CLI; read it before changing argv, flags, stdin wiring, stream parsing, classification or registration, and record new measurements there.
 
 Backend invocations may contribute only their explicitly validated child environment. Vibe's headless invocation retains `VIBE_CLI=python` for older launchers; Vibe 3.0.1 ignores it and always launches Rust. Current qualification is Vibe 3.0.1, not a compatibility claim for every older release. Interactive takeover inherits the user's environment. `read_only` uses `ask`, an approval policy without a read-only write-tool exclusion; inherited user/project policies or a custom profile may pre-approve writes. Loopback fake-provider CLI qualification covers start, resume, large stdin, approval denial and inherited-policy write approval, turn cap and provider usage-limit failure without paid calls (see `tests/test_vibe_cli.py`).
+
+## Ordinary Codex exec qualification
+
+Current macOS codex-cli 0.164.0 qualification uses isolated HOME/CODEX_HOME, synthetic repositories
+outside implicit temporary write roots, and a loopback fake Responses API, without credentials or
+paid model calls. It demonstrates trust persistence, inherited user/trusted-project rule bypasses,
+project layering and MCP startup; direct `codex sandbox` measurements alone do not qualify ordinary
+exec authority. Reports are conservative while launch/configuration policy remains unchanged and
+the trust-policy choice remains pending. Qualified bounded modes keep their existing version and
+configuration gates; no additional mode is enabled by this correction. See
+[measured facts](backend-cli-facts.md#ordinary-codex-exec-authority).

@@ -27,38 +27,15 @@ CLI facts established by capturing a real run, not assumption:
   So `build_resume_argv` places the whole option region *before* `resume`, and `resume` itself
   becomes the last token ahead of the `--` separator — the shape `assert_safe` now checks for.
 
-**`publish` (measured network table).** `-s workspace-write` alone leaves network to *the user's own
-config* — measured: with `[sandbox_workspace_write] network_access = true` set there, a plain
-`workspace-write` run reached the network (HTTP 200). So harflow_mcp passes
-`-c sandbox_workspace_write.network_access=false` wherever it reports `blocked`, making that claim
-true of the run rather than of the machine. Network opens only with the config pair
-`-c sandbox_workspace_write.network_access=true` added on top: paired runs measured curl against a
-real host returning exit 6 (could not resolve host) at `read-only` and at `workspace-write` without
-the pair, and HTTP 200 at `workspace-write` with the pair, and at `danger-full-access`. So `publish`
-maps to `workspace-write` plus that pair. This is honestly **general** network access, not
-git/gh-specific — anything the sandbox lets run can now reach the network, not only a git push or
-`gh pr create`. `WRITABLE_ROOTS` at `publish` is identical to `write_in_repo` — the switch changes
-network reachability only, not the writable set.
+**Requested sandbox/network pins are not effective authority receipts.** Ordinary exec on
+codex-cli 0.164.0/macOS loaded user and trusted project allow rules that executed commands
+outside read-only/workspace-write sandboxes, including with network=false and approvals never.
+Inherited MCP startup also runs outside the worker sandbox. Historical direct `codex sandbox`
+measurements establish the sandbox mechanism only, not ordinary exec's complete authority.
+The existing argv is retained: publish defaults to a workspace-write network-enable pin,
+write_in_repo to a disable pin, and read_only/unrestricted emit no network pair. Explicit
+network requests retain their established acceptance rules. See docs/backend-cli-facts.md.
 
-**The `network` parameter (measured 2026-09-22, codex-cli 0.154.0, with the free `codex sandbox`
-harness — a real sandbox run with no model call, so the whole matrix cost seconds).** The
-measurements above reproduce exactly under that harness, which is what licenses it as a proxy
-for `codex exec` on this axis. `sandbox_workspace_write.network_access` is the only working
-switch: `read-only` is immune to it in both directions (set true, curl still could not resolve
-the host), `workspace-write` takes either direction, `danger-full-access` has no sandbox left
-to configure. The domain-allowlist machinery (`experimental_network.domains`, legacy
-`allowed_domains`/`denied_domains`) is inert via `-c` — a curl to a "denied" host returned 200 —
-so no domain-scoped tier is buildable today; re-measure before believing otherwise on a later
-codex. Hence the resolution table: `network=None` keeps each freedom's historical setting
-(read_only and unrestricted emit no pair at all), True emits the `=true` pair, False the
-`=false` pair, and the two unhonourable cells — enable at read_only, block at unrestricted —
-refuse loudly. Two identities follow and are pinned by tests: `write_in_repo`+True is
-byte-identical to `publish`'s default, and `publish`+False to `write_in_repo`'s default. The
-first means a remote is reachable although publishing was not authorized — recorded intent,
-not an enforced barrier, since codex has no per-command deny list at any level — and it enables
-arbitrary outbound traffic, exfiltration included. The second blocks **network-backed** push
-only: measured, `git push <local bare repo> HEAD:refs/heads/main` still landed with
-`network_access=false`, so no wording about that cell may claim publishing is stopped outright.
 """
 
 from __future__ import annotations
@@ -125,11 +102,8 @@ NEVER_ASK = ("-c", 'approval_policy="never"')
 # "wrong key, silently ignored".
 NETWORK_KEY = "sandbox_workspace_write.network_access"
 NETWORK_ENABLE_PAIR = f"{NETWORK_KEY}=true"
-# Passed explicitly wherever we claim network is blocked, rather than relying on codex's default.
-# Measured: with `[sandbox_workspace_write] network_access = true` in the user's own config,
-# `-s workspace-write` with no `-c` pair reached the network (HTTP 200) — so "blocked" was a claim
-# about this machine's config, not about the sandbox. The explicit `=false` overrides that ambient
-# setting (measured: back to curl exit 6), which makes the claim true by construction.
+# Requested sandbox disable pin. Inherited allow rules may execute outside the sandbox,
+# so this is not proof of an effective network barrier.
 NETWORK_DISABLE_PAIR = f"{NETWORK_KEY}=false"
 
 # The historical network setting per freedom, pre-dating the `network` parameter: `network=None`
@@ -172,43 +146,22 @@ WRITABLE_ROOTS: dict[str, tuple[str, ...]] = {
 }
 
 _NETWORK_CAVEAT = (
-    "this level additionally enables GENERAL network access "
-    f"({NETWORK_ENABLE_PAIR}), not git/gh-specific: anything running inside the sandbox can reach "
-    "the network, not only a git push or gh pr create. Measured per sandbox: read-only and plain "
-    "workspace-write both block it (curl exit 6, could not resolve host); workspace-write plus this "
-    "pair enables it (HTTP 200), same as danger-full-access"
+    "The requested network enable pin permits general sandbox network access, not a Git-only exception or proof of reachability."
 )
-
-# Only at write_in_repo + network=True: the argv is byte-identical to publish's default, so the
-# run is mechanically a publish even though publishing was never authorized. Stated as a caveat
-# because the enforcement booleans stay honest — publish_attempts_allowed_by_polybridge is an
-# authorization claim, and nothing was authorized here.
 _NETWORK_TRUE_AT_WRITE_IN_REPO_CAVEAT = (
-    "network=True at this freedom enables arbitrary outbound traffic — exfiltration included — "
-    "not merely docs lookup or a git push: the argv is byte-identical to publish's default, so a "
-    "remote is reachable although publishing was not authorized. The difference from publish is "
-    "recorded intent, not an enforced barrier — codex has no per-command deny list at any level"
+    "network=True uses publish's default argv, but publishing was not authorized; Codex has no per-command commit deny list."
 )
-
-# _NETWORK_CAVEAT follows the *resolved* network setting (see enforcement), not the freedom
-# name, so it lives outside this table: publish's default still carries it, write_in_repo with
-# network=True acquires it, and both freedoms shed it whenever network is actually blocked.
+_ORDINARY_EXEC_CAVEATS = (
+    "Ordinary codex exec inherits user and trusted project configuration and allow rules. Allow rules can run commands outside the requested sandbox, bypassing filesystem and network pins even with approval_policy=never.",
+    "Ordinary workspace-write exec can persist project trust before loading project configuration. Harflow does not isolate or suppress these inputs; trust/configuration policy remains unchanged.",
+    "Configured writable_roots are partial observations of the user config file only, not complete effective authority. Project, managed, profile and other configuration inputs may differ; absent, unreadable or malformed settings do not establish absence of additional authority.",
+    "Inherited MCP servers can start outside the worker sandbox; sandbox pins do not confine their startup or tools.",
+)
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
-    "read_only": ("the sandbox rejects writes outright",),
-    "write_in_repo": (
-        "writes are confined by the OS, but to the workspace *plus* temporary directories — not to "
-        "the repository alone",
-        "no per-command deny list, so the agent can freely commit inside the sandbox",
-    ),
-    "publish": (
-        "writes are confined by the OS, but to the workspace *plus* temporary directories — not to "
-        "the repository alone",
-        "no per-command deny list, so the agent can freely commit inside the sandbox",
-    ),
-    "unrestricted": (
-        "danger-full-access disables the sandbox: nothing is restricted, which is the one mode where "
-        "codex is no safer than an unsandboxed agent",
-    ),
+    "read_only": ("Harflow requests a read-only sandbox; effective write confinement is not established.",),
+    "write_in_repo": ("Harflow requests workspace-write, including temporary directories; effective write confinement is not established.",),
+    "publish": ("Harflow requests workspace-write, including temporary directories; effective write confinement is not established.",),
+    "unrestricted": ("danger-full-access requests no sandbox restrictions.",),
 }
 
 # Options this backend itself ever writes — nothing more. `assert_safe` walks the option region
@@ -364,7 +317,7 @@ class CodexBackend(ExtraPathsUnsupported):
                 "unrestricted cannot block (danger-full-access disables the sandbox entirely, "
                 "so no barrier remains to raise). Either direction is a claim about "
                 "harflow_mcp's own -c override only, never about reachability — the "
-                "surrounding network can still defeat it",
+                "surrounding network can still defeat it. Inherited allow rules can bypass disable pins, so effective barrier reporting remains conservative",
             ),
         ),
         supports_live_input=False,
@@ -417,12 +370,12 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def group_report_output_enforcement(self, enforcement, path):
         from .codex_group_reports import enforcement as report_enforcement
-        return report_enforcement(enforcement, path)
+        return report_enforcement(replace(enforcement, caveats=tuple(c for c in enforcement.caveats if c not in _ORDINARY_EXEC_CAVEATS)), path)
 
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": RENAMED_EXTRA_PATHS_QUALIFIED, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
-                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers; Monitor auto-open disabled", "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; selected and ambient external configuration namespaces protected; existing other-backend configuration unsupported; inherited repository configuration authority unchanged; writable output is not trusted for future repository or executable use; startup inputs are checked but not atomically pinned against independent concurrent writers", "certification": EXTRA_PATHS_CERTIFICATION}
+                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers; Monitor auto-open disabled", "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; selected and ambient external configuration namespaces protected; existing other-backend configuration unsupported; inherited repository configuration authority unchanged; writable output is not trusted for future repository or executable use; startup inputs are checked but not atomically pinned against independent concurrent writers; inherited allow-rule authority is not excluded and effective confinement is unestablished", "certification": EXTRA_PATHS_CERTIFICATION}
 
     def _extra_path_runtime(self):
         if not RENAMED_EXTRA_PATHS_QUALIFIED:
@@ -622,12 +575,12 @@ class CodexBackend(ExtraPathsUnsupported):
         from ..extra_paths import serialize_paths
         if enforcement.freedom not in ("write_in_repo", "publish"):
             raise UnsupportedCapability("extra writable paths require bounded workspace-write")
-        caveats = tuple(c for c in enforcement.caveats if "temporary directories" not in c)
+        caveats = tuple(c for c in enforcement.caveats if "temporary directories" not in c and c not in _ORDINARY_EXEC_CAVEATS)
         return replace(enforcement, writable_roots=("the working directory", *(g.path for g in grants)),
                        extra_writable_paths=tuple(serialize_paths(grants)),
                        extra_path_certification=EXTRA_PATHS_CERTIFICATION,
-                       mechanism=enforcement.mechanism + "; bounded extra writable paths; ambient and implicit temporary roots excluded",
-                       caveats=caveats + ("Existing files are pathname grants; identity changes prevent later reuse. Ordinary CLI children inherit the bounded sandbox.",
+                       mechanism=enforcement.mechanism + "; bounded extra writable path pins; ambient and implicit temporary roots excluded from requested profile",
+                       caveats=caveats + ("This bounded configuration excludes project config and known execution settings, but does not exclude all inherited allow rules. Effective filesystem and network confinement is not established.", "Existing files are pathname grants; identity changes prevent later reuse. The requested pins apply to ordinary CLI children; inherited allow rules can bypass them. Effective confinement is not established.",
                                           "Keep qualified startup inputs stable: checks reject observed changes but do not atomically pin configuration or executables against independent concurrent writers. Granted output is not certified for future execution."))
 
     def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
@@ -1073,6 +1026,9 @@ class CodexBackend(ExtraPathsUnsupported):
         try:
             config = tomllib.loads(config_path.read_text(encoding="utf-8"))
             settings = config.get("sandbox_workspace_write", {})
+            # Retain the historical legacy-profile observation for requested-scope comparisons.
+            # This is partial user-file data, not an effective configuration resolver: newer CLI
+            # versions may reject this selector or use a different profile format entirely.
             profile = config.get("profile")
             profiles = config.get("profiles", {})
             if isinstance(profile, str) and isinstance(profiles, dict):
@@ -1091,41 +1047,27 @@ class CodexBackend(ExtraPathsUnsupported):
         unrestricted = freedom == "unrestricted"
         resolved = self._resolve_network(freedom, network)
         mechanism = f"codex sandbox: {mode}"
-        # Name the override that actually carries the network claim. Without it the mechanism reads
-        # as though the sandbox alone decided, which is what `blocked` used to rest on and what was
-        # measured false: plain `workspace-write` defers to the user's own config.
         if mode == "workspace-write":
             mechanism += f" + -c {NETWORK_ENABLE_PAIR if resolved else NETWORK_DISABLE_PAIR}"
-        # Measured per sandbox — see the module docstring and _NETWORK_CAVEAT for the evidence.
-        # The *resolved* setting decides, not the freedom name: publish with network=False is
-        # genuinely blocked, and write_in_repo with network=True is genuinely enabled.
-        network_access = (
-            "unrestricted" if unrestricted else ("enabled" if resolved else "blocked")
-        )
-        caveats = list(_MODE_CAVEATS[freedom])
+        mechanism += "; requested pins, effective inherited authority unestablished"
+        network_access = "unrestricted" if unrestricted else ("enabled" if resolved else "not_controlled")
+        caveats = list(_MODE_CAVEATS[freedom]) + list(_ORDINARY_EXEC_CAVEATS)
         if mode == "workspace-write" and resolved:
-            # _NETWORK_CAVEAT follows the resolved setting rather than the freedom name: it
-            # described publish's default before the parameter existed (and still does), it now
-            # also covers write_in_repo with network=True, and it is absent wherever network is
-            # actually blocked — a caveat attached to a True-sounding claim it contradicted
-            # would be exactly the overclaim this dataclass forbids.
             caveats.append(_NETWORK_CAVEAT)
             if freedom == "write_in_repo":
                 caveats.append(_NETWORK_TRUE_AT_WRITE_IN_REPO_CAVEAT)
-        configured_roots, config_path = self._configured_writable_roots() if mode == "workspace-write" else ((), "")
-        if configured_roots:
-            caveats.append(f"Additional writable_roots inherited from {config_path}; these are configured paths observed at launch, including the selected profile, not an OS sandbox receipt. Relative paths remain as configured and configuration can change before the CLI reads it.")
+        configured_roots, _ = self._configured_writable_roots() if mode == "workspace-write" else ((), "")
         return Enforcement(
             freedom=freedom,
             mechanism=mechanism,
-            # Imposed by the OS, not by the agent's own judgement — except when switched off.
-            os_enforced=not unrestricted,
-            writes_confined=not unrestricted,
+            # Inherited rules and MCP authority prevent a blanket effective sandbox claim.
+            os_enforced=False,
+            writes_confined=False,
             writable_roots=tuple(dict.fromkeys((*WRITABLE_ROOTS[freedom], *configured_roots))),
             # Codex has no per-command deny list at all, so neither claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
-            # No per-command commit deny. read_only still confines writes; that is not a commit policy.
+            # No per-command commit deny; requested read-only access is not a commit policy.
             local_commit="not_enforced",
             # publish and unrestricted are the freedoms that authorize a publish attempt — see
             # the field's own docstring for what that does and does not promise. write_in_repo
@@ -1135,6 +1077,15 @@ class CodexBackend(ExtraPathsUnsupported):
             network_access=network_access,
             caveats=tuple(caveats),
         )
+
+    def requested_cap_for_comparison(self, value, freedom, network):
+        # Private admission cap only: requested sandbox pins are NOT effective enforcement proof.
+        # Preserve every recorded root/grant/approval/intent; never consult current config here.
+        result = dict(value)
+        unrestricted = freedom == "unrestricted"
+        result.update(os_enforced=not unrestricted, writes_confined=not unrestricted,
+                      network_access="unrestricted" if unrestricted else ("enabled" if self._resolve_network(freedom, network) else "blocked"))
+        return result
 
     def accounting_evidence(self, acc, context):
         from ..accounting import normalize
@@ -1497,7 +1448,7 @@ class CodexBackend(ExtraPathsUnsupported):
             return enforcement
         from . import codex_app_server as app_server
         return replace(enforcement, caller_approval_tools=("commandExecution", "fileChange") if write else ("commandExecution",), mechanism=enforcement.mechanism + app_server.mechanism_suffix(),
-                       caveats=enforcement.caveats + app_server.enforcement_caveats(write=write))
+                       caveats=tuple(c for c in enforcement.caveats if c not in _ORDINARY_EXEC_CAVEATS) + app_server.enforcement_caveats(write=write))
 
     def approval_transport(self):
         return "codex_app_server"

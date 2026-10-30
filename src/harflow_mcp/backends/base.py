@@ -236,7 +236,7 @@ class Capabilities(NamedTuple):
     supports_turn_cap: bool
     reports_cost_usd: bool
     os_sandbox: bool
-    """Whether restrictions are enforced by the operating system rather than by the agent itself."""
+    """Whether an OS sandbox mechanism is available; per-run Enforcement describes established guarantees."""
 
     per_command_deny: bool
     """Whether individual commands (e.g. `git commit`) can be denied."""
@@ -339,8 +339,8 @@ class Enforcement:
 
     network_access: str = "not_controlled"
     """One of "blocked" | "enabled" | "unrestricted" | "not_controlled". "not_controlled" means
-    harflow_mcp imposes nothing of its own here and the surrounding environment decides — which is
-    NOT the same as "blocked"."""
+    Harflow cannot establish an effective network barrier. It may have requested a sandbox pin
+    that inherited authority bypasses; this is not a claim that network is blocked or reachable."""
 
     caveats: tuple[str, ...] = ()
     extra_writable_paths: tuple[dict[str, Any], ...] = ()
@@ -1101,6 +1101,50 @@ def _violation(rule: str, parent_value: Any, child_value: Any) -> tuple[str, str
         f"nested dispatch refused: the child task would be weaker than its parent on {rule} "
         f"(parent={parent_value!r}, child={child_value!r}); this cap is best-effort",
     )
+
+
+def requested_cap_for_comparison(backend: Backend, enforcement: Enforcement | Mapping[str, Any],
+                                 freedom: Freedom, network: bool | None) -> dict[str, Any]:
+    """Copy a complete recorded scope for private requested-authority admission comparisons.
+
+    This is NOT proof of effective enforcement. Never display or persist these requested caps,
+    and never reconstruct historical roots from current backend configuration.
+    """
+    def refuse() -> None:
+        raise NestedDispatchRefused("nested dispatch refused: requested authority is unrecorded or invalid and cannot be compared; this cap is best-effort",
+                                    rule="parent_enforcement_unrecorded")
+    if backend is None or type(freedom) is not str or freedom not in FREEDOMS or (network is not None and type(network) is not bool):
+        refuse()
+    value = enforcement.as_dict() if isinstance(enforcement, Enforcement) else dict(enforcement) if isinstance(enforcement, Mapping) else {}
+    canonical, legacy = "publish_attempts_allowed", POLICY_FIELDS[4]
+    if canonical in value:
+        if type(value[canonical]) is not bool:
+            refuse()
+        if legacy in value and value[canonical] != value[legacy]:
+            refuse()
+        value[legacy] = value[canonical]
+    if any(field not in value for field in POLICY_FIELDS):
+        refuse()
+    if any(type(value[field]) is not bool for field in (*_MONOTONIC_TRUE_RESTRICTS, legacy)):
+        refuse()
+    if value.get("freedom") != freedom or (type(value["network_access"]) is not str or value["network_access"] not in NETWORK_STRICTNESS):
+        refuse()
+    roots = value["writable_roots"]
+    if not isinstance(roots, (list, tuple)) or any(type(root) is not str for root in roots):
+        refuse()
+    for field in ("extra_allowed_commands", "caller_approval_tools"):
+        if field in value and (not isinstance(value[field], (list, tuple)) or any(type(item) is not str for item in value[field])):
+            refuse()
+    from ..extra_paths import restore_paths
+    try:
+        restore_paths(value.get("extra_writable_paths", []))
+    except (ValueError, TypeError, AttributeError):
+        refuse()
+    hook = getattr(backend, "requested_cap_for_comparison", None)
+    try:
+        return dict(hook(value, freedom, network)) if hook is not None else value
+    except UnsupportedCapability:
+        refuse()
 
 
 def nested_enforcement_violation(

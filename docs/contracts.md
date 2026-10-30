@@ -1208,3 +1208,22 @@ uncertainty. Stable qualification checks are `format`, `version`, `root_mismatch
 `source_changed`. Positively observed replacement retains code `task_unavailable` and bounded
 read retry behavior. Partial claims only deny unsafe operations. Complete-association actions
 refuse opaque sources, while unrelated fresh launch discovery remains available.
+
+## Codex enforcement reporting semantics
+
+Ordinary Codex exec reports conservative effective guarantees: `os_enforced` and `writes_confined`
+are false; resolved network-disable requests report `network_access: "not_controlled"`, while
+network-enable requests remain `enabled` and full access remains `unrestricted`. `not_controlled`
+means an effective barrier cannot be established, including when inherited authority can bypass a
+requested pin. `writable_roots` is a partial configured/requested observation, not complete authority.
+Historical TaskRecords retain their original claims and are not rewritten as new receipts.
+
+Private nested-dispatch and workflow-save comparisons use validated requested sandbox/network caps
+on both sides, retaining recorded roots, grants, approvals and publication intent. These caps are
+not effective enforcement proof and are neither displayed nor persisted. Missing/malformed records
+or unavailable backends fail closed. Shared-scratch admission uses the same requested parent scope;
+scratch access display uses conservative effective reporting.
+
+This corrects existing field semantics without changing public shapes or `contracts/v1` fixtures.
+HarflowMac consumers must interpret false/unknown guarantees accurately; no sibling source or fixture
+change is included. See [harness permissions](harness-permissions.md#ordinary-codex-exec-authority).

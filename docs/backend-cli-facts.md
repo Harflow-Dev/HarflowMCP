@@ -1252,3 +1252,39 @@ without a URL or response body. Unknown 402 details retain a generic provider-er
 diagnostic instead. Structured Vibe error tests are synthetic compatibility cases, not a
 claim that Vibe 3 emitted a structured terminal error in this probe. This measurement
 qualifies the CLI event path with a scripted provider, not every real provider's 402 meaning.
+
+## Ordinary Codex exec authority
+
+Re-measured on macOS, codex-cli 0.164.0. Isolated HOME/CODEX_HOME, synthetic repositories outside
+implicit temporary writable roots, and a loopback fake Responses API avoided credentials and paid
+model calls. Initial probes inside temporary write roots were not confinement evidence; the
+outside-root probes below establish the observations.
+
+- Workspace-write on a fresh repository persisted project trust and loaded project roots/environment.
+  Explicit persisted untrusted status suppressed project loading without mutation in the measured run.
+  An argv trust override still persisted trusted status and loaded project configuration.
+- User allow rules without trusted project rules, and trusted project allow rules, separately permitted
+  outside-root writes and loopback curl with read-only or workspace-write/network=false and approvals
+  never. Root pins did not constrain commands permitted to run outside the sandbox by rules.
+- `ignore-user-config` suppressed project configuration in the tested setup but still persisted trust.
+  `ignore-rules` blocked the tested curl while retaining configured roots/environment. Neither is a
+  complete configuration/trust authority boundary.
+- Nested project root lists replaced parent lists and environment overrides applied. Parent trust
+  loaded project layers and persisted root trust. Main-checkout trust applied to a linked worktree;
+  explicit linked-worktree untrusted status suppressed loading without mutation in the tested run.
+- Legacy `profile="selected"` was rejected even with a v2 profile file present. Explicit `-p selected`
+  loaded `selected.config.toml`; Harflow ordinary exec emits no `-p`. Parsing legacy user-file profiles
+  is therefore not a complete effective-configuration resolver. The historical legacy-profile
+  merge remains a partial user-file root observation so unchanged requested-scope comparisons
+  retain compatibility with earlier records; it does not certify the profile is loaded.
+- A dummy inherited MCP server created an outside-root startup marker, then failed its handshake.
+  The trusted-project case started it; explicit persisted untrusted status suppressed the project
+  server. No model tool calls were made. This establishes startup outside the worker sandbox,
+  not successful MCP tool protocol behavior or a qualified tool authority boundary.
+
+Harflow keeps ordinary exec argv and configuration/trust policy unchanged pending the final policy
+choice. Effective reporting uses false OS/write guarantees and `not_controlled` for resolved disable
+requests. Enable remains `enabled`, full access `unrestricted`. Historical direct sandbox measurements
+elsewhere in this document describe the mechanism, not ordinary exec's full inherited authority.
+Extra-path qualification does not exclude all rules; group-report excludes known user/project rule
+inputs but does not qualify every managed rule source. No qualification gate is broadened.

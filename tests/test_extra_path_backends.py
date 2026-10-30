@@ -122,6 +122,19 @@ def test_tampering_and_scratch(qualified, tmp_path):
         qualified.assert_safe(replace(invocation, extra_writable_paths=()), 'write_in_repo')
 
 
+def test_extra_path_report_keeps_effective_claims_conservative(qualified, tmp_path):
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    report = qualified.extra_path_enforcement(
+        qualified.enforcement('write_in_repo', False), grants, tmp_path
+    )
+    assert report.os_enforced is False
+    assert report.writes_confined is False
+    assert report.network_access == 'not_controlled'
+    assert any('inherited allow rules' in caveat for caveat in report.caveats)
+
+
 @pytest.mark.parametrize('name', ['claude', 'opencode', 'vibe', 'antigravity'])
 def test_direct_unsupported_validator_rejects_metadata(name):
     with pytest.raises(UnsupportedCapability):

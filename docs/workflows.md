@@ -369,10 +369,13 @@ user's harness settings. HarflowMCP injects no GitHub command approvals or publi
 
 | Freedom | Claude | Codex | Vibe |
 | --- | --- | --- | --- |
-| Read only | Plan mode; explicit git commit/push denies; no command allowlist added | Read-only OS sandbox; network blocked; no per-command allowlist | Plan profile; no command allowlist added |
-| Write in repo | Accept-edits mode; explicit git commit/push denies; no command allowlist added | Workspace-write sandbox; no per-command deny list; network off by default | Accept-edits profile; harness/user Bash rules control commands |
-| Publish | Accept-edits mode plus git commit/push allow rules only | Workspace-write sandbox; network on by default; no per-command allowlist | Auto-approve profile, equivalent to Unrestricted |
+| Read only | Plan mode; explicit git commit/push denies; no command allowlist added | Requests read-only sandbox; effective network/write barrier unestablished; no per-command allowlist | Plan profile; no command allowlist added |
+| Write in repo | Accept-edits mode; explicit git commit/push denies; no command allowlist added | Requests workspace-write; no per-command deny list; network-disable pin by default | Accept-edits profile; harness/user Bash rules control commands |
+| Publish | Accept-edits mode plus git commit/push allow rules only | Requests workspace-write; network-enable pin by default; no per-command allowlist | Auto-approve profile, equivalent to Unrestricted |
 | Unrestricted | Bypass-permissions mode; no command allowlist or denies added | Full-access mode; no command allowlist; network cannot be blocked by this sandbox | Auto-approve profile |
+
+Ordinary Codex exec inherits configuration and allow rules that can bypass sandbox pins; see
+[its authority limits](harness-permissions.md#ordinary-codex-exec-authority).
 
 These are HarflowMCP's mechanisms, not an exhaustive list of commands that can run. Inherited
 harness/user settings, credentials, sandbox policy and network determine actual tool access.

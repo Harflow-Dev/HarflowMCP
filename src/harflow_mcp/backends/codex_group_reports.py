@@ -24,7 +24,7 @@ def support():
             'freedoms': ['read_only'], 'network': [False], 'native_subagent': False,
             'caller_approvals': False, 'qualification': 'measured seed only; unmeasured versions refused',
             'configuration': 'no legacy sandbox or permission profile selectors, project configuration, managed configuration, hooks, MCP or plugins; runtime/configuration namespaces outside report root',
-            'boundary': 'native OS filesystem profile; repository remains read-only; own group directory only'}
+            'boundary': 'requested native OS filesystem profile; own group directory write root; effective inherited rule authority not fully qualified'}
 
 
 def qualify(backend):
@@ -193,5 +193,5 @@ def enforcement(value, path):
     if value.freedom != 'read_only':
         raise UnsupportedCapability('group report output requires read_only')
     return replace(value, group_report_output=True, writable_roots=(str(path),),
-                   mechanism='Codex native permission profile extends :read-only; one group report write root; network disabled',
-                   caveats=(*(c for c in value.caveats if c != 'the sandbox rejects writes outright'), 'Repository files remain read-only; only the authorized group report directory permits agent writes.', 'Report-directory grants are checked before launch; concurrent external changes are not atomically pinned. Files in the group are shared; use task-identifiable report filenames. Group output is not trusted for future execution or configuration use.'))
+                   mechanism='Codex native permission profile extends :read-only; one group report write root; network disable pin',
+                   caveats=(*value.caveats, 'The profile requests read-only repository files and one group report write root. Known user/project rule inputs are excluded, but all managed rule authority is not qualified; effective confinement is not established.', 'Report-directory grants are checked before launch; concurrent external changes are not atomically pinned. Files in the group are shared; use task-identifiable report filenames. Group output is not trusted for future execution or configuration use.'))

@@ -166,7 +166,7 @@ mcp = MCPServer(
         "Call list_backends first if you are unsure which to use: it reports what is installed and "
         "what each one can actually do. Backends differ in ways that matter — Claude and vibe "
         "support a turn cap (though a breach on vibe reads as a plain failure, not a distinct "
-        "status), only Claude and opencode report a dollar cost, only Codex enforces restrictions "
+        "status), only Claude and opencode report a dollar cost, only Codex offers restrictions "
         "with a real OS sandbox, only vibe has no model-selection flag at all, and Antigravity "
         "accepts reasoning_effort only at low/medium/high (its CLI refuses xhigh before the run "
         "starts). Every task reports an `enforcement` block describing what was actually "
@@ -185,7 +185,7 @@ mcp = MCPServer(
         "parameter on start_task and resume_task asks for network independently of the freedom: "
         "True asks harflow_mcp to impose no network barrier of its own, False asks it to impose "
         "one, and None keeps each freedom's historical behaviour. It governs harflow_mcp's own "
-        "network barrier only, never reachability.\n\n"
+        "network setting only, never reachability. Ordinary Codex exec inherits allow rules that can bypass sandbox pins; effective OS/write guarantees are false and resolved disable requests report not_controlled.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. wait_for_task, wait_for_tasks and wait_for_workflow share one contract: "
         "timeout_seconds 0..3600 is honoured as asked (never clamped), until='terminal' holds to a "
@@ -580,13 +580,12 @@ async def start_task(
             asks harflow_mcp to impose no network barrier of its own, False asks it to impose one,
             and None (the default) keeps each freedom's historical behaviour exactly. The
             parameter governs harflow_mcp's own network barrier only — never reachability: a
-            corporate firewall or proxy defeats it too. Only codex has a barrier harflow_mcp can
-            actually raise or lower, and its support is non-rectangular (see
+            corporate firewall or proxy defeats it too. Codex accepts sandbox network pins, whose effective barrier can be bypassed by inherited rules, and its support is non-rectangular (see
             capabilities.network_control): enabling is refused at read_only and blocking at
             unrestricted. On claude, opencode, vibe and antigravity, True is accepted — there is
             nothing to impose — and False is an error rather than silently dropped;
-            enforcement.network_access stays "not_controlled" there. What actually applied is
-            stated on the returned task's enforcement.network_access.
+            enforcement.network_access stays "not_controlled" there. The established guarantee is
+            stated on the returned task's enforcement.network_access; requested pins alone are not proof.
         group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
             agent makes through harflow_mcp (unless that dispatch gives its own). Useful for
             tagging a family of dispatches you want to find together later via list_tasks. It
@@ -2580,7 +2579,7 @@ async def _workflow_dispatch(action: str, **kwargs: Any) -> Any:
                                 except backends.UnsupportedCapability:
                                     # The supervisor journals this candidate refusal and tries its fallback.
                                     continue
-                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
+                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, child_network=node_network, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
                 else:
                     configs = [({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None)]
                     for config, freedom, network in configs:
@@ -2592,7 +2591,7 @@ async def _workflow_dispatch(action: str, **kwargs: Any) -> Any:
                                 raise
                             except backends.UnsupportedCapability:
                                 continue
-                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
+                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, child_network=network, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await workflows.start_workflow(root=_reg().log_dir.parent, **kwargs, _verified_caller=caller)

@@ -48,7 +48,7 @@ has one of three states in `scratch.access`:
 * `no_additional_grant`: no grant was added. The backend does not confine writes (opencode, vibe,
   Antigravity, and Claude when read-only), or approved commands may still write. The folder exists and the
   variable is set; the claim is only that Harflow added nothing.
-* `sandbox_read_only`: the folder is exposed but the OS sandbox leaves it read-only (Codex read-only). Codex
+* `sandbox_read_only`: the folder is exposed and effective OS enforcement establishes read-only access. Ordinary Codex exec does not establish this guarantee and reports `no_additional_grant`. Codex
   with caller approvals keeps no scratch grant at all (`HARFLOW_SCRATCH` is then unset) and reports
   `no_additional_grant` for the shared folders: an approved command may run outside the sandbox, so the sandbox
   alone is not a promise that they stay read-only.
@@ -60,7 +60,7 @@ Native workflow children get no shared folders. `scratch.notice` states the actu
 ### Read-only review reports
 
 Set `group_report_output: true` together with `freedom: "read_only"` and a nonempty `group`
-to request report output while preserving read-only repository access:
+to request a report output profile with read-only repository access pins:
 
 ```bash
 harflow-ctl permission-preview --repo /path/to/repo --backend codex --freedom read_only \
@@ -77,7 +77,7 @@ Cached-only qualification discovery reports the `group_report_output` feature; a
 cached-only preview requires an explicit group rather than discovering caller authority.
 
 The initial supported combination is **Codex CLI 0.165.0 on macOS, headless read-only, network
-disabled**. The native profile extends `:read-only` and adds exactly one write root: the task's own
+disable pin**. Effective confinement is not established for all inherited rule authority; known user/project rule inputs are excluded, but all managed rule authority is not qualified. The native profile extends `:read-only` and adds exactly one write root: the task's own
 canonical group directory. It does not add the repository, task scratch, chain scratch, `/tmp`,
 other groups, or protected configuration to the writable set. `enforcement.group_report_output`
 is true, `enforcement.writable_roots` names only this group folder, and `scratch.access.group` is
@@ -119,8 +119,8 @@ external writers.
 ### Nested dispatch
 
 A task started by another task through Harflow is granted write access to a shared folder as a grant only
-within what its dispatcher may itself write. Where the dispatcher's writes are not confined (everything but
-Codex's sandbox) nothing is restricted. A **confined** dispatcher (Codex) cannot widen into another family's
+within its dispatcher's requested scope. Private admission comparisons retain Codex's requested sandbox caps
+for both historical and current records; these are not effective enforcement receipts. Such a dispatcher cannot widen into another family's
 folder by renaming a group or resuming a sibling's chain: the folder must already be one of the dispatcher's
 own recorded writable roots, or (chain only) a brand-new chain, or a chain whose root task was itself
 dispatched by it (strict `spawned_by` ancestry, not merely a shared root task). Anything else is exposed

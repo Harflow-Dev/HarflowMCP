@@ -38,7 +38,8 @@ def test_exact_profile_start_and_resume(scoped, resume):
     assert inv.argv[inv.argv.index('-C') + 1] == str(repo)
     result = backend.group_report_output_enforcement(backend.enforcement('read_only', False), group)
     assert result.writable_roots == (str(group),)
-    assert result.os_enforced and result.writes_confined and result.group_report_output
+    assert not result.os_enforced and not result.writes_confined and result.group_report_output
+    assert any('effective confinement is not established' in caveat for caveat in result.caveats)
 
 
 @pytest.mark.parametrize('mutate', [
@@ -144,7 +145,8 @@ def test_group_enforcement_is_truthful_and_ordinary_unchanged(scoped):
     assert 'group_report_output' not in ordinary.as_dict()
     scoped_value = backend.group_report_output_enforcement(ordinary, group)
     assert 'the sandbox rejects writes outright' not in scoped_value.caveats
-    assert any('Repository files remain read-only' in caveat for caveat in scoped_value.caveats)
+    assert any('profile requests read-only repository files' in caveat for caveat in scoped_value.caveats)
+    assert any('effective confinement is not established' in caveat for caveat in scoped_value.caveats)
 
 
 @pytest.mark.parametrize('name', ['claude', 'opencode', 'vibe', 'antigravity'])

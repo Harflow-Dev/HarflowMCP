@@ -56,6 +56,7 @@ from .backends import (
     NestedDispatchRefused,
     check_nested_depth,
     check_nested_enforcement,
+    requested_cap_for_comparison,
 )
 from .backends import get as get_backend
 from .backends import resume_command
@@ -403,9 +404,9 @@ _UNDETERMINED_UNAUTHORIZED_REACHABLE_NOTICE = (
 # network now works". Worded about what harflow_mcp imposes, never about reachability — the
 # environment decides there, and a claim either way would overclaim.
 _UNCONTROLLED_NETWORK_NOTICE = (
-    "network=True was accepted, but harflow_mcp imposes no network barrier of its own on this "
-    "backend — there is no mechanism it could raise or lower, so whether this run can reach the "
-    "network is decided entirely by the surrounding environment. This is not a claim of "
+    "network=True was accepted, but harflow_mcp cannot establish an effective network barrier on this "
+    "backend. Its requested settings do not establish whether this run can reach the "
+    "network; inherited authority and the surrounding environment can affect access. This is not a claim of "
     "reachability either way."
 )
 
@@ -1116,6 +1117,7 @@ class TaskRegistry:
         child_enforcement: Enforcement,
         child_backend: str,
         child_repo: Path,
+        child_network: bool | None,
         caller_write_approvals: bool = False,
     ) -> tuple[str | None, str | None, int, int, str | None]:
         """`(spawned_by, root_task_id, depth, max_depth, lineage_detected)` for a new dispatch.
@@ -1141,8 +1143,8 @@ class TaskRegistry:
         parent_depth = max(caller.record.depth, signals()[1])
         check_nested_depth(parent_depth, parent_max_depth)
         check_nested_enforcement(
-            caller.record.enforcement or {},
-            child_enforcement,
+            requested_cap_for_comparison(get_backend(caller.record.backend), caller.record.enforcement or {}, caller.record.freedom, caller.record.network),
+            requested_cap_for_comparison(get_backend(child_backend), child_enforcement, child_enforcement.freedom, child_network),
             parent_backend=caller.record.backend,
             child_backend=child_backend,
             parent_repo=caller.record.repo_path,
@@ -1297,7 +1299,7 @@ class TaskRegistry:
         enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, await asyncio.to_thread(git_environment.auth_status)))
         if report_path is not None:
             enforcement = replace(backend.group_report_output_enforcement(enforcement, report_path), group_report_output=True)
-        self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, caller_write_approvals=caller_write_approvals)
+        self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, child_network=network, caller_write_approvals=caller_write_approvals)
         # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
         # scratch directory and appends its path to the recorded writable_roots — after the
         # lineage check above, exactly like here. The preview allocates nothing, so it discloses
@@ -1435,6 +1437,7 @@ class TaskRegistry:
                 child_enforcement=planned_enforcement,
                 child_backend=backend.name,
                 child_repo=repo_path,
+                child_network=network,
                 caller_write_approvals=caller_write_approvals,
             )
             if continuation_of_task_id is not None:
@@ -1695,6 +1698,7 @@ class TaskRegistry:
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=parent.repo_path,
+            child_network=effective_network,
             caller_write_approvals=parent.caller_write_approvals,
         )
         resolved_group = caller.record.group if caller is not None else parent.group
@@ -2614,7 +2618,7 @@ class TaskRegistry:
             caller = store.read(self._log_dir, spawned_by, include_prompt=False)
             if caller is None:
                 return False
-            recorded = caller.enforcement or {}
+            recorded = requested_cap_for_comparison(get_backend(caller.backend), caller.enforcement or {}, caller.freedom, caller.network)
             if recorded.get("writes_confined") is not True:
                 return True
             if str(path) in (recorded.get("writable_roots") or ()):
@@ -4562,6 +4566,7 @@ class TaskRegistry:
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(record.freedom, effective_network), grants, repo_path), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=repo_path,
+            child_network=effective_network,
             caller_write_approvals=record.caller_write_approvals,
         )
         resolved_group = caller.record.group if caller is not None else record.group

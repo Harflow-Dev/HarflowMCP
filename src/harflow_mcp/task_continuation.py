@@ -130,7 +130,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
         backend.validate_allowed_commands(effective_commands, source.freedom, Path(source.repo_path))
         if caller is not None:
             registry._resolve_lineage(caller, child_enforcement=backend.allowed_commands_enforcement(backend.enforcement(source.freedom, source.network), effective_commands),
-                                      child_backend=source.backend, child_repo=Path(source.repo_path))
+                                      child_backend=source.backend, child_repo=Path(source.repo_path), child_network=source.network)
         await asyncio.to_thread(backend.qualify_allowed_commands)
     from .background_idle import resolve
     effective_idle = resolve(background_idle_seconds, source.background_idle_seconds)

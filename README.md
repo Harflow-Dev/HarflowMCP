@@ -37,7 +37,7 @@ Vibe provider HTTP 402 failures retain a safe explanation even without final age
 | Backend | Publish mechanism |
 | --- | --- |
 | Claude | Allows `git commit`, `git push`, `gh pr create/edit/view/comment/review/checks/diff/list`, and `gh repo view`, including their `--help` forms. |
-| Codex | Enables network in its workspace sandbox; it does not restrict individual GitHub commands. |
+| Codex | Requests network enabled in its workspace sandbox; it does not restrict individual GitHub commands. |
 | opencode | Uses the same `build` policy as `write_in_repo`; inherited harness settings still decide command approval. |
 | Vibe / Antigravity | Uses the same approval bypass as `unrestricted`; individual GitHub operations are not filtered. |
 | Cursor | Uses the same print-mode command as `write_in_repo` and `unrestricted`. Plan mode is requested only for `read_only`. Individual GitHub operations are not filtered, and caller approvals and `allowed_commands` are refused. |
@@ -136,6 +136,11 @@ default. Set `HARFLOW_GIT_HTTPS_REWRITE=0` on the server to disable this, or ove
 with `gh auth setup-git`; Harflow never reads or stores tokens. See [Git transport](docs/git-transport.md)
 for observations and sandbox limitations.
 
+Ordinary Codex exec inherits user and trusted project configuration, allow rules and MCP servers.
+Read-only and network-disable pins do not establish effective confinement; permission reports
+return conservative guarantees. Workspace-write may persist project trust. See
+[harness permissions](docs/harness-permissions.md#ordinary-codex-exec-authority).
+
 See the [Changelog](CHANGELOG.md) for change history.
 
 Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; the license notice does not assert ownership of prior contributions.
@@ -143,8 +148,7 @@ Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; t
 Read-only reviewers can opt in to a qualified group-scoped report output directory with
 `group_report_output: true` and a nonempty `group` (`--group-report-output` in `harflow-ctl`).
 The initial supported configuration is headless Codex CLI 0.165.0 on macOS with network disabled
-and compatible execution configuration; unsupported combinations fail explicitly. The repository
-stays read-only. See [shared scratch and review reports](docs/shared-scratch.md#read-only-review-reports).
+and compatible execution configuration; unsupported combinations fail explicitly. The profile requests read-only repository access; effective confinement is not established for all inherited rule authority. See [shared scratch and review reports](docs/shared-scratch.md#read-only-review-reports).
 
 Messages to tasks, workflow runs and workflow nodes queue by default, preserving exact text and order.
 Use `send_message(..., delivery="now")` or `harflow-ctl send TASK TEXT --delivery now` to request

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Correct ordinary Codex exec enforcement reporting for inherited configuration, allow-rule bypasses and MCP startup. Retain private requested-authority caps for nested dispatch, workflow saves and shared scratch without changing launch policy, persisted records or public shapes. Trust-policy choice remains pending (#40).
+
 - Qualify follow-up and session history with bounded metadata-replacement reads and a shared successor snapshot. Preserve the indexed 500-hit window across SQLite join planners (#98).
 
 - Isolate launch qualification failures per task, tolerate legacy same-inode device drift, and bind new launches to the canonical tasks path and inode. Reconcile verified dead owner/agent generations with durable interruption evidence and crash-safe resource/follow-up settlement. Keep uncertain associations and pending reconciliation protected from session reuse and destructive cleanup. `launch-settle` now refuses potentially spawned launches without durable agent identity; human confirmation bypasses only directory binding mismatch (#98).

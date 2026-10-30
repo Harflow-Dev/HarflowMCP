@@ -62,8 +62,8 @@ unsupported; workflow scope is the repository and the owning task's scratch dire
 
 The MCP channel requires HarflowMCP registered in that harness and its MCP approval.
 The CLI channel requires a shell able to write `~/.harflow/tasks` and run `ps`.
-OS sandboxes, including Codex read-only/workspace-write and native profiles with empty
-writable roots, block that CLI path. These are channel requirements, not a claim that every
+Effective OS sandboxes can block that CLI path. Ordinary Codex read-only/workspace-write pins
+do not establish this guarantee because inherited allow rules may execute outside the sandbox. These are channel requirements, not a claim that every
 harness is certified to support registration. No permission is added by registration.
 
 ## Paths and observations

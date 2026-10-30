@@ -453,13 +453,14 @@ def test_publish_attempts_allowed_by_polybridge_matches_the_ladder(backend, free
 
 # Exact measured table. claude/opencode/vibe/antigravity impose no sandbox at all, so network
 # reachability is never something harflow_mcp controls there — "not_controlled" at every freedom.
-# codex alone has an OS sandbox with a measured, freedom-dependent effect on network reachability.
+# Codex passes explicit network pins, but inherited rules can run commands outside its sandbox;
+# ordinary exec therefore cannot claim an effective network barrier.
 EXPECTED_NETWORK_ACCESS: dict[str, dict[str, str]] = {
     "antigravity": dict.fromkeys(FREEDOMS, "not_controlled"),
     "claude": dict.fromkeys(FREEDOMS, "not_controlled"),
     "codex": {
-        "read_only": "blocked",
-        "write_in_repo": "blocked",
+        "read_only": "not_controlled",
+        "write_in_repo": "not_controlled",
         "publish": "enabled",
         "unrestricted": "unrestricted",
     },
@@ -1212,8 +1213,7 @@ def test_codex_network_crossings_collapse_onto_their_neighbours_argv() -> None:
             == build(CodexBackend(), freedom="write_in_repo")
         )
     caveats = " ".join(CodexBackend().enforcement("write_in_repo", True).caveats)
-    assert "not authorized" in caveats
-    assert "exfiltration" in caveats
+    assert "publishing was not authorized" in caveats
 
 
 @pytest.mark.parametrize(("built_network", "claimed_network"), [(True, False), (False, True)])
@@ -1230,18 +1230,18 @@ def test_codex_assert_safe_refuses_an_argv_whose_pair_contradicts_the_resolved_n
 
 # The full enforcement block for every valid (freedom, network) cell on codex — the whole
 # report, not merely "caveats exist". The two refusing cells (read_only+True,
-# unrestricted+False) appear above, in the raising tests. None resolves to the freedom's
-# historical setting, which is itself the pre-change table EXPECTED_NETWORK_ACCESS pins.
+# unrestricted+False) appear above. `enabled` records the requested pin; a blocked pin is
+# `not_controlled` because ordinary exec cannot establish that inherited rules honor it.
 CODEX_CELL_ENFORCEMENT: list[tuple[str, bool | None, str, str]] = [
     # (freedom, network, mechanism, network_access)
-    ("read_only", None, "codex sandbox: read-only", "blocked"),
-    ("read_only", False, "codex sandbox: read-only", "blocked"),
-    ("write_in_repo", None, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
-    ("write_in_repo", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
+    ("read_only", None, "codex sandbox: read-only", "not_controlled"),
+    ("read_only", False, "codex sandbox: read-only", "not_controlled"),
+    ("write_in_repo", None, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "not_controlled"),
+    ("write_in_repo", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "not_controlled"),
     ("write_in_repo", True, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
     ("publish", None, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
     ("publish", True, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
-    ("publish", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
+    ("publish", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "not_controlled"),
     ("unrestricted", None, "codex sandbox: danger-full-access", "unrestricted"),
     ("unrestricted", True, "codex sandbox: danger-full-access", "unrestricted"),
 ]
@@ -1261,10 +1261,10 @@ def test_codex_enforcement_reports_the_resolved_network_for_every_valid_cell(
     enforcement = CodexBackend().enforcement(freedom, network)
 
     assert enforcement.freedom == freedom
-    assert enforcement.mechanism == mechanism
+    assert enforcement.mechanism == mechanism + "; requested pins, effective inherited authority unestablished"
     assert enforcement.network_access == network_access
-    assert enforcement.os_enforced is (freedom != "unrestricted")
-    assert enforcement.writes_confined is (freedom != "unrestricted")
+    assert enforcement.os_enforced is False
+    assert enforcement.writes_confined is False
     assert enforcement.writable_roots == WRITABLE_ROOTS[freedom]
     assert enforcement.commit_push_blocked is False
     assert enforcement.direct_commit_commands_denied is False
@@ -1278,8 +1278,9 @@ def test_codex_enforcement_reports_the_resolved_network_for_every_valid_cell(
     # The mechanism's named pair is cross-checked against the argv the same cell builds, so
     # the report and the invocation can never drift apart.
     argv = start(CodexBackend(), freedom=freedom, network=network)
-    if network_access in ("enabled", "blocked") and freedom != "read_only":
-        expected_pair = NETWORK_ENABLE_PAIR if network_access == "enabled" else NETWORK_DISABLE_PAIR
+    requested_network = CodexBackend()._resolve_network(freedom, network)
+    if freedom in ("write_in_repo", "publish"):
+        expected_pair = NETWORK_ENABLE_PAIR if requested_network else NETWORK_DISABLE_PAIR
         assert expected_pair in argv
     else:
         assert NETWORK_ENABLE_PAIR not in argv
@@ -1288,12 +1289,11 @@ def test_codex_enforcement_reports_the_resolved_network_for_every_valid_cell(
     caveats = " ".join(enforcement.caveats)
     if network_access == "enabled":
         # The general-network caveat follows the resolved setting, not the freedom name.
-        assert "GENERAL network access" in caveats
+        assert "general sandbox network access" in caveats
     else:
         assert "GENERAL network access" not in caveats
     if freedom == "write_in_repo" and network is True:
-        assert "exfiltration" in caveats
-        assert "not authorized" in caveats
+        assert "publishing was not authorized" in caveats
 
 
 @pytest.mark.parametrize(
@@ -1748,17 +1748,12 @@ def test_codex_assert_safe_refuses_publish_missing_the_network_pair() -> None:
         CodexBackend().assert_safe(inv(argv), "publish")
 
 
-def test_codex_asserts_network_blocked_rather_than_hoping_the_user_config_agrees() -> None:
-    """`network_access: blocked` has to be true of the run, not of whoever's machine it is on.
-
-    Measured: with `[sandbox_workspace_write] network_access = true` in the user's own codex config,
-    `-s workspace-write` with no `-c` pair reached the network (HTTP 200). The explicit `=false`
-    overrides that (measured: back to curl exit 6), so the claim holds by construction.
-    """
+def test_codex_reports_network_pin_without_claiming_effective_block() -> None:
+    """The explicit argv pin is retained, but inherited allow rules can run outside the sandbox."""
     argv = start(CodexBackend(), freedom="write_in_repo")
 
     assert NETWORK_DISABLE_PAIR in argv
-    assert CodexBackend().enforcement("write_in_repo").network_access == "blocked"
+    assert CodexBackend().enforcement("write_in_repo").network_access == "not_controlled"
 
     index = argv.index(NETWORK_DISABLE_PAIR)
     del argv[index - 1 : index + 1]
@@ -1772,7 +1767,7 @@ def test_codex_read_only_takes_no_network_override_because_the_key_does_not_appl
     argv = start(CodexBackend(), freedom="read_only")
 
     assert not [a for a in argv if "network_access" in a]
-    assert CodexBackend().enforcement("read_only").network_access == "blocked"
+    assert CodexBackend().enforcement("read_only").network_access == "not_controlled"
 
 
 def test_codex_refuses_both_network_overrides_at_once() -> None:

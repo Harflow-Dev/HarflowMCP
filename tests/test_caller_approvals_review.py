@@ -95,13 +95,13 @@ def test_agent_caller_without_write_approvals_cannot_save_a_candidate_that_has_t
 
 def test_lineage_refuses_write_approvals_the_caller_lacks(tmp_path, monkeypatch):
     from harflow_mcp.tasks import TaskRegistry as Registry_
-    caller = SimpleNamespace(record=SimpleNamespace(task_id="parent", max_depth=3, depth=0, enforcement=get("claude").enforcement("write_in_repo").as_dict(), backend="claude",
+    caller = SimpleNamespace(record=SimpleNamespace(task_id="parent", max_depth=3, depth=0, enforcement=get("claude").enforcement("write_in_repo").as_dict(), backend="claude", freedom="write_in_repo", network=None,
                                                     repo_path="/r", root_task_id=None, caller_write_approvals=False), method="test")
     monkeypatch.setattr("harflow_mcp.workflow_hooks.refuse_managed", lambda *_a: None)
     monkeypatch.setattr("harflow_mcp.caller_policy.signals", lambda: (None, 0))
     shell = SimpleNamespace(_log_dir=Path("/nowhere"))
     child = get("claude").enforcement("write_in_repo")
-    args = dict(child_enforcement=child, child_backend="claude", child_repo=Path("/r"))
+    args = dict(child_enforcement=child, child_backend="claude", child_repo=Path("/r"), child_network=None)
     with pytest.raises(backends.NestedDispatchRefused):
         Registry_._resolve_lineage(shell, caller, caller_write_approvals=True, **args)
     Registry_._resolve_lineage(shell, caller, caller_write_approvals=False, **args)

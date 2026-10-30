@@ -76,7 +76,7 @@ cannot raise it. Check fallback candidates too: switching harnesses changes the 
 
 For example, a local code reviewer needs no publishing access. A Jira inspection needs an approved
 read tool and credentials; a Jira update also needs publishing authorization and its write tool.
-A read-only Codex reviewer cannot run tests that write into the checkout: adjust the node's access
+A read-only Codex reviewer is not authorized to run tests that write into the checkout: adjust the node's access
 or move verification to a suitable node.
 
 ## What each access level actually launches
@@ -84,7 +84,7 @@ or move verification to a suitable node.
 | Harness | `read_only` | `write_in_repo` | `publish` | `unrestricted` |
 | --- | --- | --- | --- | --- |
 | Claude Code | `plan`; direct Git commit/push deny patterns. `local_commit`: denied | `acceptEdits`; same deny patterns. `local_commit`: denied. An exact merge-conclusion grant omits only the commit deny; see below | `acceptEdits`; Git commit/push and bounded PR/repository command allow rules, with bridge deny patterns removed. `local_commit`: allowed | `bypassPermissions`; bridge allow/deny patterns omitted. `local_commit`: allowed |
-| Codex | `read-only` OS sandbox | `workspace-write`; network off by default | `workspace-write`; network on by default | `danger-full-access` |
+| Codex | Requests `read-only`; effective confinement unestablished | Requests `workspace-write`; network-disable pin by default | Requests `workspace-write`; network-enable pin by default | `danger-full-access` |
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
 | Vibe | `ask` approval profile (not a write-tool exclusion) | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
 | Antigravity | `--mode plan` | `--mode accept-edits` | `--dangerously-skip-permissions`; same mechanism as unrestricted | `--dangerously-skip-permissions` |
@@ -98,7 +98,7 @@ These levels authorize an assignment; they do not make the harnesses equally con
   help. Raw `gh api`, merges, releases and repository deletion are excluded from these grants;
   see [publication policy](contracts.md#publication-permission-policy). Deny rules win.
 - **Codex:** HarflowMCP pins `approval_policy="never"`. Missing permission cannot be approved
-  interactively. Workspace writes can include the checkout, temporary directories, configured
+  interactively. Inherited allow rules can still execute commands outside the sandbox, and MCP servers can start outside it. Workspace writes can include the checkout, temporary directories, configured
   writable roots, and the task scratch grant. There is no per-command commit deny list: a local
   commit can be mechanically possible at `write_in_repo`, even though publishing is not authorized.
 - **OpenCode:** no bridge OS sandbox. The measured plan agent declined writes; that observation
@@ -131,21 +131,47 @@ travels in the backend's system prompt where a seam was measured, never in the c
 approve Bash commands or grant network access; other adapters do not gain confinement or a directory grant
 merely because the path is provided.
 
+## Ordinary Codex exec authority
+
+On macOS codex-cli 0.164.0, ordinary `codex exec` loads user configuration and trusted project
+configuration/rules. User and trusted project allow rules permitted outside writes and loopback
+HTTP under read-only and workspace-write/network=false, even with `approval_policy="never"`.
+Inherited MCP servers started outside the worker sandbox. Harflow therefore reports
+`os_enforced=false`, `writes_confined=false`, and `network_access=not_controlled` where a network
+disable setting resolves; explicit/default enable remains `enabled` and full access remains
+`unrestricted`. These values describe established guarantees, not the requested sandbox name.
+
+`writable_roots` includes requested roots and parsed user-file roots, including the historical
+legacy selected-profile merge retained for requested-scope compatibility. It is a partial
+observation, never the complete effective authority. Missing, malformed or unreadable configuration
+cannot establish absence of other roots. Legacy selected-profile parsing is not an effective-config
+resolver. Ordinary workspace-write can persist project trust before loading project configuration.
+Harflow retains its existing argv and configuration/trust policy; a final trust-policy choice is
+pending. `ignore-user-config`, `ignore-rules` and root pins each leave other authority surfaces;
+none is documented as a complete remedy. See [measured facts](backend-cli-facts.md#ordinary-codex-exec-authority).
+
+Qualified extra-path and group-report modes retain their existing gates and requested profiles.
+Extra-path qualification does not exclude all rules. Group-report qualification excludes known
+user/project rule inputs but does not establish absence of all managed rule authority. Neither
+mode restores a blanket effective confinement guarantee. Caller approvals use a different
+app-server transport and trust hardening; approved unsandboxed commands and inherited user MCP
+also prevent blanket confinement there.
+
 ## Network is a separate setting
 
 | Harness/access | Omitted network setting | `network=true` | `network=false` |
 | --- | --- | --- | --- |
-| Codex `read_only` | Blocked | Refused | Blocked |
-| Codex `write_in_repo` | Blocked | General sandbox network enabled | Blocked |
-| Codex `publish` | General sandbox network enabled | Enabled | Blocked |
+| Codex `read_only` | Disable requested; effective barrier unknown | Refused | Disable requested; effective barrier unknown |
+| Codex `write_in_repo` | Disable pin; effective barrier unknown | General sandbox network enabled | Disable pin; effective barrier unknown |
+| Codex `publish` | General sandbox network enabled | Enabled | Disable pin; effective barrier unknown |
 | Codex `unrestricted` | Not controlled by sandbox | Accepted | Refused |
 | Claude, OpenCode, Vibe, Antigravity: all access levels | Not controlled by bridge | Accepted; no bridge barrier | Refused: backend cannot enforce a block |
 
 Network enabled means general network access, not a Git-only exception or proof that a destination
 is reachable. Blocked network can prevent dependency downloads and shell HTTP/Git requests.
 MCP configuration and tool approval remain separate; network settings are not MCP authorization.
-Codex network claims concern sandboxed worker commands, not model API connectivity or blanket
-control of separately running MCP services. A blocked shell can coexist with model requests.
+Codex sandbox network pins concern sandboxed commands. Inherited allow rules can bypass them,
+and they do not control model API connectivity or separately running MCP services.
 A run-wide `network=false` is incompatible with non-Codex nodes and fallback candidates.
 
 ## Per-harness preparation

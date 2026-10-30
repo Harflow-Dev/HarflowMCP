@@ -215,7 +215,7 @@ def test_no_github_rules_injected_without_publish():
         assert rules == ''
 
 
-def test_codex_reports_inherited_configured_writable_roots(tmp_path, monkeypatch):
+def test_codex_reports_user_file_roots_as_partial_observation(tmp_path, monkeypatch):
     from harflow_mcp.backends.codex import CodexBackend
     home = tmp_path/'codex-home'
     home.mkdir()
@@ -223,11 +223,11 @@ def test_codex_reports_inherited_configured_writable_roots(tmp_path, monkeypatch
     monkeypatch.setenv('CODEX_HOME', str(home))
     report = CodexBackend().enforcement('write_in_repo')
     assert '/extra/docs' in report.writable_roots
-    assert any('config.toml' in caveat for caveat in report.caveats)
+    assert any('partial observations' in caveat for caveat in report.caveats)
     assert '/extra/docs' not in CodexBackend().enforcement('read_only').writable_roots
 
 
-def test_codex_profile_writable_roots_override_global(tmp_path, monkeypatch):
+def test_codex_profile_roots_are_reported_as_partial_legacy_observation(tmp_path, monkeypatch):
     from harflow_mcp.backends.codex import CodexBackend
     home = tmp_path/'codex-home'
     home.mkdir()
@@ -236,6 +236,7 @@ def test_codex_profile_writable_roots_override_global(tmp_path, monkeypatch):
     report = CodexBackend().enforcement('publish')
     assert '/profile' in report.writable_roots
     assert '/global' not in report.writable_roots
+    assert any('partial observations' in caveat for caveat in report.caveats)
 
 
 def test_filesystem_permission_error_is_not_harness_denial():

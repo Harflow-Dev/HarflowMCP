@@ -24,7 +24,12 @@ from harflow_mcp.backends import (
     UnsupportedCapability,
     check_network,
 )
-from harflow_mcp.backends.base import Enforcement, check_nested_depth, check_nested_enforcement
+from harflow_mcp.backends.base import (
+    Enforcement,
+    check_nested_depth,
+    check_nested_enforcement,
+    requested_cap_for_comparison,
+)
 
 NETWORKS: list[bool | None] = [None, True, False]
 
@@ -49,6 +54,11 @@ def _id(key: tuple[str, str, bool | None]) -> str:
 
 
 PAIRS = list(product(CONFIG_KEYS, CONFIG_KEYS))
+
+
+def _codex_requested(enforcement, freedom, network=None):
+    """Restore Codex request intent for admission-only cases, not raw report-oracle cases."""
+    return requested_cap_for_comparison(BACKENDS["codex"], enforcement, freedom, network)
 
 
 # --- Independent oracle ---------------------------------------------------------------------
@@ -140,8 +150,8 @@ def test_matrix_matches_independent_oracle(parent_key, child_key) -> None:
 
 def test_codex_read_only_parent_refuses_codex_write_in_repo_child_on_writable_roots() -> None:
     codex = BACKENDS["codex"]
-    parent = codex.enforcement("read_only").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("read_only"), "read_only")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend="codex",
@@ -174,8 +184,8 @@ def test_cross_backend_child_under_confined_codex_parent_refused_on_backend(
     backend's own enforcement()."""
     codex = BACKENDS["codex"]
     parent_enforcement = codex.enforcement(parent_freedom)
-    parent = parent_enforcement.as_dict()
-    child = parent_enforcement  # same values; only the claimed backend name differs
+    parent = _codex_requested(parent_enforcement, parent_freedom)
+    child = parent  # same requested caps; only the claimed backend name differs
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend=child_name,
@@ -210,8 +220,8 @@ def test_child_repo_outside_parent_repo_refused_on_repo(tmp_path: Path) -> None:
     child_repo = tmp_path / "sibling"
     parent_repo.mkdir()
     child_repo.mkdir()
-    parent = codex.enforcement("write_in_repo").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend="codex",
@@ -231,8 +241,8 @@ def test_child_repo_via_symlink_to_outside_still_refused_on_repo(tmp_path: Path)
     outside.mkdir()
     symlink = parent_repo / "escape"
     symlink.symlink_to(outside)
-    parent = codex.enforcement("write_in_repo").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend="codex",
@@ -248,8 +258,8 @@ def test_child_repo_equal_to_parent_repo_accepted(tmp_path: Path) -> None:
     codex = BACKENDS["codex"]
     repo = tmp_path / "repo"
     repo.mkdir()
-    parent = codex.enforcement("write_in_repo").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend="codex",
@@ -264,8 +274,8 @@ def test_child_repo_nested_under_parent_repo_accepted(tmp_path: Path) -> None:
     parent_repo = tmp_path / "parent"
     child_repo = parent_repo / "nested" / "child"
     child_repo.mkdir(parents=True)
-    parent = codex.enforcement("write_in_repo").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     result = backends.nested_enforcement_violation(
         parent, child, parent_backend="codex", child_backend="codex",
@@ -473,8 +483,8 @@ def test_parent_enforcement_none_is_treated_as_fully_unrecorded() -> None:
 
 def test_nested_dispatch_refused_error_message_names_the_rule() -> None:
     codex = BACKENDS["codex"]
-    parent = codex.enforcement("read_only").as_dict()
-    child = codex.enforcement("write_in_repo")
+    parent = _codex_requested(codex.enforcement("read_only"), "read_only")
+    child = _codex_requested(codex.enforcement("write_in_repo"), "write_in_repo")
 
     with pytest.raises(NestedDispatchRefused) as exc_info:
         check_nested_enforcement(

@@ -72,14 +72,15 @@ def test_launch_checks_paths_against_the_repository(storage, tmp_path):
 
 # --- authority envelope ---------------------------------------------------------------------------
 
-def record(*patterns, freedom="write_in_repo"):
-    backend = get("claude")
-    enforcement = backend.allowed_commands_enforcement(backend.enforcement(freedom), tuple(patterns)) if patterns else backend.enforcement(freedom)
-    return SimpleNamespace(freedom=freedom, network=None, enforcement=enforcement.as_dict(), backend="claude", repo_path="/r", caller_write_approvals=False)
+def record(*patterns, freedom="write_in_repo", backend_name="claude", network=None):
+    backend = get(backend_name)
+    enforcement = backend.allowed_commands_enforcement(backend.enforcement(freedom, network), tuple(patterns)) if patterns else backend.enforcement(freedom, network)
+    return SimpleNamespace(freedom=freedom, network=network, enforcement=enforcement.as_dict(), backend=backend_name, repo_path="/r", caller_write_approvals=False)
 
 
 def configs(**agent):
-    return [({"backend": "claude", **agent}, "write_in_repo", None)]
+    network = agent.pop("network", None)
+    return [({"backend": "claude", **agent}, "write_in_repo", network)]
 
 
 def test_agent_caller_cannot_save_grants_beyond_its_own():
@@ -97,6 +98,25 @@ def test_agent_caller_may_save_a_subset_and_an_unrestricted_caller_any_grants():
     workflow_inspection._check_configs(record("make test", freedom="write_in_repo"), configs(allowed_commands=["make test"]))
     workflow_inspection._check_configs(record(freedom="unrestricted"), [({"backend": "claude", "allowed_commands": GRANTS}, "write_in_repo", None)])
     workflow_inspection._check_configs(record(), configs())
+
+
+def test_saved_workflow_candidates_compare_codex_requested_caps_despite_false_reported_claims():
+    parent = record(freedom="write_in_repo", backend_name="codex", network=None)
+    # Same freedom does not permit swapping the parent's requested Codex sandbox for Claude.
+    with pytest.raises(backends.NestedDispatchRefused) as raised:
+        workflow_inspection._check_configs(parent, configs(backend="claude"))
+    assert raised.value.rule == "os_enforced"
+
+    # A default write_in_repo parent requests blocked network; an explicitly enabled candidate
+    # remains a weakening even though the live Codex report says not_controlled.
+    with pytest.raises(backends.NestedDispatchRefused) as raised:
+        workflow_inspection._check_configs(parent, configs(backend="codex", network=True))
+    assert raised.value.rule == "network_access"
+
+
+def test_new_conservative_codex_report_still_allows_same_backend_candidate():
+    parent = record(freedom="write_in_repo", backend_name="codex", network=None)
+    workflow_inspection._check_configs(parent, configs(backend="codex"))
 
 
 # --- signature and sessions -----------------------------------------------------------------------
@@ -182,14 +202,14 @@ def agent_caller_server(tmp_path, monkeypatch):
     root = tmp_path / "state"
     with state_ownership.state_session(resolve_layout(root=root)):
         (root / "tasks").mkdir()
-    holder = SimpleNamespace(held=(), write=False)
+    holder = SimpleNamespace(held=(), write=False, backend="claude", freedom="write_in_repo", network=None)
 
     def caller():
         from harflow_mcp import store
-        backend = get("claude")
-        enforcement = backend.allowed_commands_enforcement(backend.enforcement("write_in_repo"), holder.held) if holder.held else backend.enforcement("write_in_repo")
-        rec = store.TaskRecord(task_id="parent", backend="claude", session_id="s", repo_path=str(tmp_path), started_at="2026-10-25T00:00:00+00:00", prompt="p", status="running",
-                               freedom="write_in_repo", enforcement=enforcement.as_dict(), max_depth=3, depth=0, caller_write_approvals=holder.write)
+        backend = get(holder.backend)
+        enforcement = backend.allowed_commands_enforcement(backend.enforcement(holder.freedom, holder.network), holder.held) if holder.held else backend.enforcement(holder.freedom, holder.network)
+        rec = store.TaskRecord(task_id="parent", backend=holder.backend, session_id="s", repo_path=str(tmp_path), started_at="2026-10-25T00:00:00+00:00", prompt="p", status="running",
+                               freedom=holder.freedom, network=holder.network, enforcement=enforcement.as_dict(), max_depth=3, depth=0, caller_write_approvals=holder.write)
         return lineage.Caller(rec, "test")
 
     async def verified():
@@ -245,6 +265,26 @@ async def test_start_refuses_on_demand_and_node_grants_beyond_the_agent_callers(
     saved(holder.store, "fallback", on_demand_nodes=on_demand(fallbacks=[{"backend": "claude", "allowed_commands": ["make test"]}]))
     with pytest.raises(MCPError, match='nested dispatch refused'):
         await start(holder, "fallback")
+
+
+async def test_real_workflow_preflight_preserves_default_network_cap_and_allows_narrower_publish_candidate(agent_caller_server):
+    holder = agent_caller_server
+    holder.backend = "codex"
+    holder.freedom = "write_in_repo"
+    holder.network = None
+    widening = node_graph({"backend": "codex"}, network=True)
+    widening["orchestrator"] = {"backend": "codex"}
+    holder.store.save("network-widening", widening)
+    with pytest.raises(MCPError, match="nested dispatch refused") as raised:
+        await start(holder, "network-widening")
+    assert "network_access" in str(raised.value)
+
+    holder.freedom = "publish"
+    narrower = graph()
+    narrower["nodes"][1].update(agent={"backend": "codex"}, freedom="publish", network=False)
+    narrower["orchestrator"] = {"backend": "codex"}
+    holder.store.save("network-narrowing", narrower)
+    await start(holder, "network-narrowing")
 
 
 async def test_start_refuses_on_demand_write_approvals_the_caller_lacks(agent_caller_server, monkeypatch, synthetic_permission_identity):

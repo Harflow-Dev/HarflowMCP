@@ -759,14 +759,10 @@ def test_write_in_repo_with_network_is_disclosed_though_it_never_authorized_publ
     assert "is authorized to commit, push, and open a PR" not in notice
 
 
-def test_publish_with_network_blocked_is_still_disclosed_but_worded_differently(
+def test_publish_with_network_false_is_disclosed_without_claiming_a_block(
     tmp_path: Path,
 ) -> None:
-    """The other crossed cell: publishing is authorized, but network-backed push is not possible.
-
-    The notice must not claim "nothing here blocked that", and must not claim publishing is
-    stopped outright either — a push to a local-path remote inside a writable root was measured
-    to still succeed with `network_access=false`.
+    """Publishing intent merits a branch notice; the false pin is not proof of a block.
     """
     repo = _repo_with_remote(tmp_path, branch="main")
 
@@ -776,13 +772,10 @@ def test_publish_with_network_blocked_is_still_disclosed_but_worded_differently(
 
     assert notice is not None
     assert "'main'" in notice
-    # Excluding one phrase is too weak on its own — it would accept the *unauthorized* wording,
-    # which is false here. Assert all three truths this cell has to carry.
+    # Publishing remains authorized even though ordinary exec cannot establish effective network
+    # confinement; the notice must neither claim a block nor borrow unauthorized wording.
     assert "is authorized to attempt commits, pushes, and PR creation" in notice
-    # Whole clauses, not the nouns: "permits a network-backed push but blocks a local path" would
-    # satisfy a bare `"network-backed push" in notice` while saying the exact opposite.
-    assert "blocks a network-backed push" in notice
-    assert "still succeeds" in notice
+    assert "blocks a network-backed push" not in notice
     assert "does not authorize" not in notice
 
 
@@ -1218,11 +1211,11 @@ async def test_a_network_request_with_no_barrier_is_disclosed_and_persisted(
     )
     await task.done.wait()
 
-    assert any("no network barrier" in n for n in task.bridge_notices), task.bridge_notices
+    assert any("cannot establish an effective network barrier" in n for n in task.bridge_notices), task.bridge_notices
     record = store.read(tmp_path / "state" / "tasks", task.task_id)
     assert record is not None
     assert record.network is True
-    assert any("no network barrier" in n for n in record.bridge_notices)
+    assert any("cannot establish an effective network barrier" in n for n in record.bridge_notices)
 
 
 async def test_no_such_notice_when_nothing_was_asked(git_repo: Path, tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ from mcp import Client, MCPError
 
 from harflow_mcp import backends, ctl, server, tasks
 from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION
-from harflow_mcp.backends.base import nested_enforcement_violation
+from harflow_mcp.backends.base import nested_enforcement_violation, requested_cap_for_comparison
 from harflow_mcp.extra_paths import normalize_paths
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
@@ -63,7 +63,7 @@ async def test_preview_exposes_effective_scopes_without_task_or_scratch(git_repo
         'the working directory', str(grant.resolve()), tasks.FUTURE_TASK_SCRATCH_ROOT,
         tasks.FUTURE_CHAIN_SCRATCH_ROOT, tasks.FUTURE_GROUP_SCRATCH_ROOT,
     ]
-    assert result['enforcement']['network_access'] == 'blocked'
+    assert result['enforcement']['network_access'] == 'not_controlled'
     assert result['enforcement']['publish_attempts_allowed_by_polybridge'] is False
     assert not registry._tasks
     assert not registry.log_dir.exists()
@@ -150,15 +150,20 @@ def test_nested_enforcement_reports_actual_roots_and_allows_typed_narrowing(git_
     parent = backend.extra_path_enforcement(backend.enforcement('write_in_repo'), normalize_paths([str(directory)]), git_repo)
     child = backend.extra_path_enforcement(backend.enforcement('write_in_repo'), normalize_paths([str(exact)]), git_repo)
     arguments = dict(parent_backend='codex', child_backend='codex', parent_repo=str(git_repo), child_repo=str(git_repo))
-    assert nested_enforcement_violation(parent.as_dict(), child, **arguments) is None
-    assert nested_enforcement_violation(child.as_dict(), parent, **arguments)[0] == 'extra_writable_paths'
+    codex = backends.get('codex')
+    parent_cap = requested_cap_for_comparison(codex, parent, 'write_in_repo', None)
+    child_cap = requested_cap_for_comparison(codex, child, 'write_in_repo', None)
+    assert nested_enforcement_violation(parent_cap, child_cap, **arguments) is None
+    assert nested_enforcement_violation(child_cap, parent_cap, **arguments)[0] == 'extra_writable_paths'
     assert str(directory.resolve()) in parent.writable_roots
 
 
 def test_nested_enforcement_rejects_legacy_temp_widening(git_repo, tmp_path, qualified):
     backend = backends.get('codex')
     parent = backend.extra_path_enforcement(backend.enforcement('write_in_repo'), normalize_paths([str(tmp_path)]), git_repo)
-    violation = nested_enforcement_violation(parent.as_dict(), backend.enforcement('write_in_repo'),
+    parent_cap = requested_cap_for_comparison(backend, parent, 'write_in_repo', None)
+    child = requested_cap_for_comparison(backend, backend.enforcement('write_in_repo'), 'write_in_repo', None)
+    violation = nested_enforcement_violation(parent_cap, child,
         parent_backend='codex', child_backend='codex', parent_repo=str(git_repo), child_repo=str(git_repo))
     assert violation[0] == 'writable_roots'
 

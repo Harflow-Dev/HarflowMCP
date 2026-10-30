@@ -326,7 +326,7 @@ async def test_read_only_tasks_get_the_environment_and_no_grant(name, tmp_path, 
         assert task.enforcement["writable_roots"] == [] or env["HARFLOW_CHAIN_SCRATCH"] not in task.enforcement["writable_roots"]
         scratch = task.snapshot()["scratch"]
         assert scratch["writable"] == [] and scratch["task"] is None
-        expected = "sandbox_read_only" if name == "codex" else "no_additional_grant"
+        expected = "no_additional_grant"
         assert scratch["access"] == {"chain": expected, "group": expected}
     finally:
         await stop(registry, task)
@@ -445,7 +445,7 @@ async def test_unsupported_grants_still_expose_the_folders_for_native_free_dispa
     ("claude", "write_in_repo", True, False, "writable"),
     ("claude", "read_only", True, False, "no_additional_grant"),
     ("codex", "write_in_repo", True, False, "writable"),
-    ("codex", "read_only", True, False, "sandbox_read_only"),
+    ("codex", "read_only", True, False, "no_additional_grant"),
     # An approved command may run outside the sandbox, so a folder without a grant is not claimed read-only.
     ("codex", "write_in_repo", False, True, "no_additional_grant"),
     ("codex", "read_only", False, True, "no_additional_grant"),
@@ -468,14 +468,12 @@ async def test_access_states_never_overclaim(name, freedom, scratch_allowed, app
 # ---- nested authority ------------------------------------------------------------------------
 
 
-def seed_caller(tmp_path, task_id="caller", *, confined=True, roots=(), backend="claude", repo="/tmp"):
+def seed_caller(tmp_path, task_id="caller", *, roots=(), backend="codex", freedom="write_in_repo", repo="/tmp"):
     log_dir = log_dir_of(tmp_path)
-    enforcement = backends.get("codex").enforcement("write_in_repo").as_dict()
-    if not confined:
-        enforcement["writes_confined"] = False
+    enforcement = backends.get(backend).enforcement(freedom).as_dict()
     if roots is not None:
         enforcement["writable_roots"] = list(roots)
-    assert store.write_landed(log_dir, record(task_id, enforcement=enforcement, backend=backend, repo_path=str(repo)))
+    assert store.write_landed(log_dir, record(task_id, enforcement=enforcement, backend=backend, freedom=freedom, repo_path=str(repo)))
     return enforcement
 
 
@@ -485,7 +483,7 @@ def allows(registry, tmp_path, kind, identity, task_id="child", spawned_by="call
 
 
 def test_an_unconfined_caller_restricts_nothing(tmp_path):
-    seed_caller(tmp_path, confined=False)
+    seed_caller(tmp_path, backend="claude")
     registry = TaskRegistry(log_dir=log_dir_of(tmp_path), open_monitor=False)
     assert allows(registry, tmp_path, "group", "Z") and allows(registry, tmp_path, "chain", "other-family")
 
@@ -510,6 +508,23 @@ def test_a_confined_caller_grants_only_what_it_holds_or_began(tmp_path):
     assert not allows(registry, tmp_path, "chain", "caller")             # the caller's own root chain it does not hold
     assert not allows(registry, tmp_path, "chain", "unknown-chain")      # unreadable denies
     assert not allows(registry, tmp_path, "chain", "child1", spawned_by="missing-caller")
+
+
+@pytest.mark.parametrize("legacy_claims", [False, True], ids=["new-conservative", "legacy-true"])
+def test_codex_requested_comparison_preserves_shared_folder_scope(tmp_path, legacy_claims):
+    log_dir = log_dir_of(tmp_path)
+    held = str(shared_scratch.directory(log_dir, "group", "X"))
+    enforcement = backends.get("codex").enforcement("write_in_repo").as_dict()
+    if legacy_claims:
+        enforcement.update(os_enforced=True, writes_confined=True)
+    enforcement["writable_roots"] = ["the working directory", "/tmp", "$TMPDIR", held]
+    caller = record("caller", backend="codex", freedom="write_in_repo", network=None,
+                    enforcement=enforcement, repo_path=str(tmp_path))
+    store.write_landed(log_dir, caller)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+
+    assert allows(registry, tmp_path, "group", "X")
+    assert not allows(registry, tmp_path, "group", "Y")
 
 
 def test_the_denial_persists_across_hops(tmp_path):
@@ -1349,7 +1364,7 @@ async def test_allocation_reports_whether_the_fresh_chain_shortcut_applies(tmp_p
         fresh = await allocate("fresh-id")
         assert fresh.access["chain"] == "writable" and fresh.denied == []
         reused = await allocate("reused-id")
-        assert reused.access["chain"] == "sandbox_read_only" and reused.denied == ["chain"] and pre_existing.is_dir()
+        assert reused.access["chain"] == "no_additional_grant" and reused.denied == ["chain"] and pre_existing.is_dir()
     finally:
         for hold in holds:
             hold.release()
@@ -1373,7 +1388,7 @@ async def test_a_denied_nested_group_loses_its_grant_reports_read_only_and_is_no
         assert env["HARFLOW_GROUP_SCRATCH"] not in roots and env["HARFLOW_CHAIN_SCRATCH"] in roots  # its own fresh chain stays granted
         assert Path(env["HARFLOW_GROUP_SCRATCH"]).is_dir()
         scratch = task.snapshot()["scratch"]
-        assert scratch["access"]["group"] == "sandbox_read_only" and scratch["access"]["chain"] == "writable"
+        assert scratch["access"]["group"] == "no_additional_grant" and scratch["access"]["chain"] == "writable"
         assert scratch["group"] not in task.enforcement["writable_roots"]
         notices = [text for text in task.bridge_notices if "HARFLOW_GROUP_SCRATCH" in text and "No write access" in text]
         assert len(notices) == 1 and not any("HARFLOW_CHAIN_SCRATCH" in text and "No write access" in text for text in task.bridge_notices)
@@ -1402,7 +1417,7 @@ async def test_a_confined_caller_resuming_another_familys_task_gets_that_chain_r
     try:
         chain = str(shared_scratch.directory(log_dir, "chain", "sibling"))
         assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
-        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert task.snapshot()["scratch"]["access"]["chain"] == "no_additional_grant"
         assert task.spawned_by == "caller" and any("No write access" in text for text in task.bridge_notices)
     finally:
         await stop(registry, task)
@@ -1422,7 +1437,7 @@ async def test_a_confined_caller_continuing_another_familys_task_gets_that_chain
     try:
         chain = str(shared_scratch.directory(log_dir, "chain", "sibling"))
         assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
-        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert task.snapshot()["scratch"]["access"]["chain"] == "no_additional_grant"
         assert any("No write access" in text and "HARFLOW_CHAIN_SCRATCH" in text for text in task.bridge_notices)
     finally:
         await stop(registry, task)
@@ -1432,7 +1447,7 @@ async def test_an_unconfined_caller_continuing_a_root_level_task_still_gets_its_
     from harflow_mcp import lineage
     from harflow_mcp.task_continuation import continue_task
     capture = Capture(monkeypatch)
-    seed_caller(tmp_path, "caller", confined=False, roots=None, backend="codex", repo=tmp_path)
+    seed_caller(tmp_path, "caller", roots=None, backend="codex", freedom="unrestricted", repo=tmp_path)
     log_dir = log_dir_of(tmp_path)
     sibling_family(tmp_path)
     caller_record = store.read(log_dir, "caller", include_prompt=False)
@@ -1460,7 +1475,7 @@ async def test_a_continuation_of_a_confined_dispatchers_task_keeps_the_denial(tm
     try:
         chain = str(shared_scratch.directory(log_dir, "chain", "root-x"))
         assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
-        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert task.snapshot()["scratch"]["access"]["chain"] == "no_additional_grant"
         assert any("No write access" in text and "HARFLOW_CHAIN_SCRATCH" in text for text in task.bridge_notices)
     finally:
         await stop(registry, task)

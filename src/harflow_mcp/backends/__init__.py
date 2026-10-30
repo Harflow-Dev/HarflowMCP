@@ -33,6 +33,7 @@ from .base import (
     classic_invocation_problem,
     check_nested_depth,
     check_nested_enforcement,
+    requested_cap_for_comparison,
     check_network,
     check_reasoning_effort,
     interactive_session_id_ok,

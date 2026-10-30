@@ -100,7 +100,8 @@ async def test_list_backends_describes_every_one(monkeypatch) -> None:
         "unrestricted cannot block (danger-full-access disables the sandbox entirely, "
         "so no barrier remains to raise). Either direction is a claim about "
         "harflow_mcp's own -c override only, never about reachability — the "
-        "surrounding network can still defeat it"
+        "surrounding network can still defeat it. Inherited allow rules can "
+        "bypass disable pins, so effective barrier reporting remains conservative"
     ]
     assert by_name["opencode"]["capabilities"]["supports_turn_cap"] is False
     # Only codex has an OS boundary; opencode's restrictions are the agent's own.
