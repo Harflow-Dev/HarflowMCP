@@ -2100,7 +2100,7 @@ def test_v9_catalog_coexists_with_v10_bootstrap_and_keeps_progress(tmp_path, mon
     assert len(calls) == 100 and new_page['bootstrap_pending']
     with sqlite3.connect(new_path) as db:
         assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('11',)
-        assert db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() == ('2',)
+        assert db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() == ('3',)
         assert db.execute('SELECT COUNT(*) FROM pending').fetchone()[0] == 105
 
     # Alternating compatible engines advances each namespace independently.

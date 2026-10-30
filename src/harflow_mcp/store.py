@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 from contextvars import ContextVar
 
-from . import control, events, identity, supervision, background_idle
+from . import control, events, identity, limit_hits, supervision, background_idle
 from .backends import Accumulator, classified_denials
 from .backends import get as get_backend
 from .backends import resume_command
@@ -506,6 +506,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
         header['status'] = 'running'
     caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'live_input', 'background_idle_seconds', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
     header['_caller'] = {key: getattr(record, key) for key in caller_keys}
+    header['_limit_hit'] = limit_hits.evidence(record)
     try:
         stamp = datetime.fromisoformat(record.started_at).timestamp()
     except (ValueError, TypeError, OverflowError):

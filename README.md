@@ -98,6 +98,7 @@ remain unknown. See [the interaction contract](docs/contracts.md#caller-loss-and
 - [Shared scratch folders](docs/shared-scratch.md)
 - [Task artifacts](docs/task-artifacts.md)
 - [Task and workflow notifications](docs/task-notifications.md) (qualified Harflow database required)
+- [Recent usage-limit hits](docs/usage-limits.md)
 - [Public contracts and runtime compatibility](docs/contracts.md)
 - [Release validation and publication](docs/releasing.md)
 - [Development and technical references](docs/development.md)

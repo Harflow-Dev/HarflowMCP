@@ -285,6 +285,12 @@ async def _notification_authority() -> None:
         raise MCPError(INVALID_PARAMS, 'Completion subscriptions require a direct caller; delegated tasks cannot authorize server network egress')
 
 
+async def _limit_hits_authority() -> None:
+    """Refuse a workflow-managed or unverifiable caller before any catalog lookup."""
+    if await _verified_workflow_caller() is not None:
+        raise MCPError(INVALID_PARAMS, 'Usage-limit history requires a direct caller; delegated tasks cannot read it')
+
+
 def _backend(name: str):
     try:
         backend = backends.get(name)
@@ -1921,6 +1927,34 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
         page['items'] = visible
         page['related_headers'] = filter_task_reads(page.get('related_headers', []), managed)
         return id_resolution.echo(page, predecessor_task_id=predecessor, task_ids=listed or [])
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@_task_document_errors
+@bounded_request
+async def recent_limit_hits(backend: str | None = None, model: str | None = None, since: str | None = None, repo: str | None = None, group: str | None = None) -> dict[str, Any]:
+    """Latest provider usage-limit hit per backend and requested model, from persisted task records; direct callers only.
+
+    Read-only: nothing is retried, switched or continued. Evidence is a persisted task
+    failure_diagnostic with category usage_limit (never provider_error or prose). There is no
+    pagination: a query sees only the newest 500 hits that match its since, backend and model
+    bounds, so filtering by backend (or backend and model) gives each its own newest-500 window,
+    while an unfiltered query sees only the newest 500 overall. repo and group filter inside that
+    window. model is the requested model; a task on the backend default has requested_model null.
+    since is an inclusive ISO8601 timestamp with timezone. At most 50 backend/model keys are returned.
+    scan.complete is false when older matching hits were left unexamined, the key cap was reached, or
+    the index is still preparing (index_state), so retry while it is preparing.
+    Each hit carries task_id, title, group, observed_at (when the task settled: finished_at, else
+    started_at, named by observed_at_source; not necessarily when the provider rejected the request), diagnostic and reset {raw, at, state}. A numeric reset is epoch seconds.
+    reset.state is future, elapsed or unknown; elapsed only says the stated time has passed and does
+    not say the provider is available again. See docs/usage-limits.md.
+    """
+    await _limit_hits_authority()
+    from . import limit_hits
+    try:
+        return await asyncio.to_thread(limit_hits.recent, _reg().log_dir, {'backend': backend, 'model': model, 'since': since, 'repo': repo, 'group': group})
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 

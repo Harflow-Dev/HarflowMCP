@@ -19,7 +19,7 @@ FORMATS = frozenset({CTL_FORMAT, SETUP_FORMAT, EVENT_FORMAT, VERSION_INFO_FORMAT
 COMMON_FIELDS = frozenset({"product", "format", "v", "product_version"})
 MAX_VERSION_COMPONENT = 2_147_483_647
 _VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", re.ASCII)
-CAPABILITIES = ("ctl.v1", "setup.v1", "events.v1", "version-info.v1", "state-recovery.v1", "caller-approvals.monitor-respond.v1", "statistics-page.v1", "backend-qualification.v1", "messaging.v1")
+CAPABILITIES = ("ctl.v1", "setup.v1", "events.v1", "version-info.v1", "state-recovery.v1", "caller-approvals.monitor-respond.v1", "statistics-page.v1", "backend-qualification.v1", "messaging.v1", "limit-hits.v1")
 
 
 def parse_version(value: str) -> tuple[int, int, int]:

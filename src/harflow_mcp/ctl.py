@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -128,6 +129,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     notification_p = sub.add_parser('workflow-notifications', help='read root workflow subscriptions and up to 50 recent deliveries; direct callers only')
     notification_p.add_argument('workflow_run_id')
     notification_p.add_argument('--json', action='store_true')
+
+    hits_p = sub.add_parser('limit-hits', help='latest provider usage-limit hit per backend and requested model from persisted task records; direct callers only')
+    hits_p.add_argument('--backend')
+    hits_p.add_argument('--model', help='requested model (a task on the backend default has none)')
+    hits_p.add_argument('--since', help='inclusive ISO8601 timestamp with timezone')
+    hits_p.add_argument('--repo')
+    hits_p.add_argument('--group')
+    hits_p.add_argument('--json', action='store_true')
 
     statistics_p = sub.add_parser("statistics-page", help="bounded finished retained-history statistics; direct callers only")
     statistics_p.add_argument("--since", required=True, help="inclusive timezone-qualified ISO8601 start")
@@ -1753,6 +1762,21 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                                      limit=args.limit, cursor=args.cursor)
         except StatisticsError as exc:
             return _fail(args, exc.code, str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "limit-hits":
+        from .takeover import caller_refusal
+        refusal = caller_refusal(default_log_dir())
+        if refusal is not None:
+            return _fail(args, refusal[0], "Usage-limit history requires a direct caller: " + refusal[1])
+        from . import limit_hits
+        try:
+            result = limit_hits.recent(default_log_dir(), {key: getattr(args, key) for key in limit_hits.ACCEPTED_FILTERS})
+        except ValueError as exc:
+            return _fail(args, "invalid_params", str(exc))
+        except (OSError, sqlite3.Error) as exc:
+            return _fail(args, "limit_hits_error", f"Usage-limit history is unavailable: {exc}")
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 

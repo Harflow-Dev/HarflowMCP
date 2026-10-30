@@ -525,7 +525,7 @@ Private optional `finished_at_sequence` is a nonnegative exact integer witness m
 Older writers invalidate completion by advancing sequence alone. Reads expose unknown
 without rewriting state; new bookkeeping cannot recertify stale dates, while a fresh
 terminal transition records new evidence. Root and child creation initialize null with
-witness zero. Task projection 2 and run projection 3 use `.listing.v11.sqlite3`, preserving
+witness zero. Task projection 3 and run projection 3 use `.listing.v11.sqlite3`, preserving
 older derivative namespaces and their sidecars while retaining the shared lock.
 Optional `workflow_id` derives only from the pinned run definition; modern IDs identify
 definition generations and distinguish delete/recreate without matching the current
@@ -609,6 +609,40 @@ Statistics describes retained history only. `retention` reports days (default 30
 unknown; selecting 90 days does not imply 90-day history exists. This query never runs retention,
 reconstructs deleted data, replays raw logs, starts models or scans N task statuses.
 
+
+## Recent usage-limit hits
+
+`harflow-ctl limit-hits [--backend B] [--model M] [--since ISO8601] [--repo PATH] [--group G] --json`
+and the MCP tool `recent_limit_hits` expose capability `limit-hits.v1` through the existing
+`harflow.ctl` v1 result envelope. Require the capability on the fresh handshake; an older engine
+answers the command with a usage error, which is "unsupported". The read is limited to a verified
+direct caller: managed callers, other agent callers and undecidable caller identity are refused
+before the catalog is opened (MCP `invalid_params`; ctl `agent_caller` or `caller_undecidable`). It
+never retries, continues or switches a provider. Behavior and caveats are in
+[usage limits](usage-limits.md).
+
+`result` carries `hits`, `scan` and `index_state`. Each hit has `backend`, `requested_model`
+(nullable), `task_id`, `title` (nullable), `group` (nullable), `observed_at` (UTC ISO8601),
+`observed_at_source` (`finished_at` or `started_at`), `diagnostic` (`category` `usage_limit`, plus
+the bounded `source`, `reason`, `provider_code` and `http_status` the record holds) and `reset`.
+`reset.state` is `future`, `elapsed` or `unknown`; `raw` (the persisted epoch-seconds number or
+offset-qualified ISO8601 string) and `at` (UTC ISO8601) are present for a usable value. A value that
+fails validation omits both; a value that validates but cannot be represented as a date keeps `raw`
+and omits `at`, with state `unknown`. `observed_at` is when the task settled, not necessarily when the
+provider rejected the request.
+`elapsed` is not availability. `scan` is `{examined, limit: 500, complete}`; `index_state` is the
+listing catalog state (`status` `ready`, `preparing` or `blocked`). Canonical examples are
+`contracts/v1/ctl-limit-hits-{ready,empty,preparing}.json`; `version-info.json` now lists the
+capability, so HarflowMac must re-vendor the three fixtures, `version-info.json` and the manifest.
+
+Hits come from the `task_limit_hits` side table of the disposable listing catalog, written from a
+task record whose `failure_diagnostic.category` is `usage_limit`. Task projection 3 backfills it;
+the catalog stays `.listing.v11.sqlite3` because the table is created in place and the projection
+bump rebuilds the task headers. A query takes the newest 500 rows in `(observed_at, id)` order that
+satisfy the indexed `since`, `backend` and `model` bounds, isolated in a subquery so equal timestamps
+cannot widen it, then applies `repo` and `group` inside that window and keeps the latest hit per
+`(backend, requested_model)`, at most 50 pairs. There is no pagination. An unreadable catalog answers
+the ctl error code `limit_hits_error`.
 
 ## Workflow caller input projections
 
@@ -1011,8 +1045,8 @@ projects the compact status, validated against the compact status fields (a mana
 `harflow-ctl workflow-status` it projects the reply's top-level keys (not with `--monitor-view`).
 Omitting `fields` leaves every reply unchanged.
 
-The listing catalog is now `.listing.v11.sqlite3` (schema version 11, adding `run_meta`). Task
-projection 2 and run projection 3 are unchanged; older engines keep their own `.listing.v10`
+The listing catalog is now `.listing.v11.sqlite3` (schema version 11, adding `run_meta` and, with
+task projection 3, `task_limit_hits`). Run projection 3 is unchanged; older engines keep their own `.listing.v10`
 namespace and sidecars, and the new catalog rebuilds through bounded bootstrap. No `contracts/v1`
 fixture changes.
 

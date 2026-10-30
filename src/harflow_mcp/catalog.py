@@ -25,7 +25,7 @@ from typing import Any, Callable
 from .read_metrics import span
 
 CATALOG_FILENAME = '.listing.v11.sqlite3'
-TASK_PROJECTION_VERSION = '2'
+TASK_PROJECTION_VERSION = '3'
 RUN_PROJECTION_VERSION = '3'
 # A filtered listing page examines at most this many catalog rows after its cursor.
 SCAN_ROWS = 2000
@@ -504,6 +504,13 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS run_meta (id TEXT PRIMARY KEY,workflow_id TEXT,repo_path TEXT NOT NULL,name_folded TEXT NOT NULL,is_root INTEGER NOT NULL)')
         db.execute('CREATE INDEX IF NOT EXISTS run_meta_workflow ON run_meta(workflow_id)')
         db.execute('CREATE INDEX IF NOT EXISTS run_meta_repo ON run_meta(repo_path)')
+        # Persisted task usage-limit evidence, newest first. Reads take a bounded window of the newest
+        # rows; backend and model bound that window through their own indexes, repo and group filter inside it.
+        db.execute('CREATE TABLE IF NOT EXISTS task_limit_hits (id TEXT PRIMARY KEY,observed_at REAL NOT NULL,backend TEXT NOT NULL,model TEXT,grp TEXT,repo_path TEXT NOT NULL,payload TEXT NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_chronology ON task_limit_hits(observed_at DESC,id DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_backend ON task_limit_hits(backend,observed_at DESC,id DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_backend_model ON task_limit_hits(backend,model,observed_at DESC,id DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_model ON task_limit_hits(model,observed_at DESC,id DESC)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
@@ -514,6 +521,7 @@ class Catalog:
         if version != ('11',):
             db.execute('DELETE FROM workflow_links')
             db.execute('DELETE FROM run_meta')
+            db.execute('DELETE FROM task_limit_hits')
             db.execute('DELETE FROM task_groups')
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
@@ -526,12 +534,12 @@ class Catalog:
             db.execute('DELETE FROM state')
             db.execute("INSERT INTO state VALUES ('schema_version','11')")
         if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != (TASK_PROJECTION_VERSION,):
-            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending'):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'task_limit_hits'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('task_projection_version',?)", (TASK_PROJECTION_VERSION,))
         if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != (RUN_PROJECTION_VERSION,):
-            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links', 'run_meta'):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links', 'run_meta', 'task_limit_hits'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('run_projection_version',?)", (RUN_PROJECTION_VERSION,))
@@ -611,6 +619,13 @@ class Catalog:
             db.execute('INSERT OR REPLACE INTO workflow_links VALUES (?,?,?)', (identifier, *links))
         elif self.suffix == '.json':
             db.execute('DELETE FROM workflow_links WHERE id=?', (identifier,))
+        limit_hit = header.pop('_limit_hit', None)
+        if self.suffix == '.meta.json':
+            # Every put replaces this source's hit, so a record that no longer carries the evidence drops it.
+            db.execute('DELETE FROM task_limit_hits WHERE id=?', (identifier,))
+        if self.suffix == '.meta.json' and limit_hit is not None and not header.get('needs_direct_lookup'):
+            db.execute('INSERT INTO task_limit_hits VALUES (?,?,?,?,?,?,?)', (identifier, limit_hit['observed_at'], limit_hit['backend'], limit_hit['model'], limit_hit['grp'], limit_hit['repo_path'],
+                                                                              json.dumps(limit_hit['payload'], ensure_ascii=True, separators=(',', ':'))))
         group = header.get('group')
         db.execute('DELETE FROM task_groups WHERE id=?', (identifier,))
         if isinstance(group, str) and len(group) <= 128:
@@ -620,6 +635,8 @@ class Catalog:
         if self.suffix == '.json' and header.get('needs_direct_lookup'):
             # A budget placeholder is unknown, so it must not keep filter metadata.
             db.execute('DELETE FROM run_meta WHERE id=?', (identifier,))
+        elif self.suffix == '.meta.json' and header.get('needs_direct_lookup'):
+            db.execute('DELETE FROM task_limit_hits WHERE id=?', (identifier,))
         db.execute("INSERT INTO entries VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stamp=CASE WHEN json_extract(entries.payload,'$.needs_direct_lookup')=1 THEN excluded.stamp ELSE entries.stamp END,active=excluded.active,session=excluded.session,payload=excluded.payload",
                    (identifier, stamp, int(active), session_id, json.dumps(header, ensure_ascii=True, separators=(',', ':'))))
         generation = db.execute("SELECT value FROM state WHERE key='scan_generation'").fetchone()
@@ -651,7 +668,7 @@ class Catalog:
         assert_owned(self.state_layout)
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
-        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links', 'run_meta'):
+        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links', 'run_meta', 'task_limit_hits'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:
@@ -764,7 +781,7 @@ class Catalog:
         # Reconcile every projection namespace against the verified discovery.
         stale = db.execute("""WITH projected AS (
             SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers UNION SELECT id FROM task_groups
-            UNION SELECT run_id AS id FROM checkout_tasks UNION SELECT id FROM run_meta
+            UNION SELECT run_id AS id FROM checkout_tasks UNION SELECT id FROM run_meta UNION SELECT id FROM task_limit_hits
             UNION SELECT json_extract(payload,'$.workflow_run_id') AS id FROM associations
         ) SELECT id FROM projected WHERE id IS NOT NULL
           AND id NOT IN (SELECT id FROM seen WHERE generation=?)""", (generation,))
@@ -773,6 +790,32 @@ class Catalog:
                 self._remove(db, identifier)
         db.execute('DELETE FROM pending WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
         db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
+
+    def limit_hit_window(self, db: sqlite3.Connection, limit: int, filters: dict[str, Any]) -> tuple[list[tuple[float, str, str | None, dict[str, Any]]], int, bool]:
+        """Newest usage-limit hits as ``(observed_at, backend, model, payload)``, the cap applied first.
+
+        The window is the newest ``limit`` rows in ``(observed_at, id)`` order that satisfy the
+        indexed predicates ``since``, ``backend`` and ``model``; each combination is served by an
+        index whose trailing columns are the ordering, so the scan stops after ``limit`` rows. It is
+        isolated in a subquery so no other filter can replace its index bounds and many equal
+        timestamps cannot widen it. ``repo`` and ``group`` then filter inside that window. Returns
+        the rows, the rows examined and whether older matching rows were left unexamined.
+        """
+        bounds, bound_values = [], []
+        for key, column, operator in (('backend', 'backend', '='), ('model', 'model', '='), ('since', 'observed_at', '>=')):
+            if key in filters:
+                bounds.append(f'{column} {operator} ?')
+                bound_values.append(filters[key])
+        bound = 'WHERE ' + ' AND '.join(bounds) + ' ' if bounds else ''
+        total = db.execute('SELECT COUNT(*) FROM (SELECT 1 FROM task_limit_hits ' + bound + 'ORDER BY observed_at DESC,id DESC LIMIT ?)', (*bound_values, limit + 1)).fetchone()[0]
+        conditions, values = [], []
+        for key, column in (('repo', 'repo_path'), ('group', 'grp')):
+            if key in filters:
+                conditions.append(f't.{column}=?')
+                values.append(filters[key])
+        rows = db.execute('SELECT t.observed_at,t.backend,t.model,t.payload FROM (SELECT id AS wid FROM task_limit_hits ' + bound + 'ORDER BY observed_at DESC,id DESC LIMIT ?) JOIN task_limit_hits t ON t.id=wid'
+                          + (' WHERE ' + ' AND '.join(conditions) if conditions else '') + ' ORDER BY t.observed_at DESC,t.id DESC', (*bound_values, limit, *values)).fetchall()
+        return [(stamp, backend, model, json.loads(payload)) for stamp, backend, model, payload in rows], min(total, limit), total > limit
 
     @layout_operation
     def prefix_names(self, prefix: str, limit: int) -> dict[str, Any] | None:

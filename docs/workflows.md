@@ -813,6 +813,11 @@ the switch reason are recorded.
 
 ### Usage-limit recovery
 
+To see which backend and model combinations were recently rejected by a usage limit, and when the
+provider says each resets, use `recent_limit_hits`; see [usage limits](usage-limits.md). It reads
+persisted task records, including workflow node tasks, and does not cover Codex-native workflow
+attempts or workflow recovery state.
+
 Claude, Codex, opencode, Vibe, and Antigravity interpret their own authoritative usage-limit
 signals. A confirmed rejection remains a failure even after useful progress or an earlier
 successful turn. Warnings, assistant/tool prose, and silence do not establish a usage limit.

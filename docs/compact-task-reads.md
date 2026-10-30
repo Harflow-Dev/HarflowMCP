@@ -163,7 +163,7 @@ zero. A legacy terminal workflow's valid `updated_at` strictly before a requeste
 can establish only that it is too old for that window; it must never supply its completion
 date. Recent, future, invalid or contradictory metadata retains uncertainty.
 
-Task projection version 2 and workflow projection version 3 rebuild existing headers
+Task projection version 3 and workflow projection version 3 rebuild existing headers
 through bounded bootstrap without rewriting authoritative history. The `.listing.v11.sqlite3`
 derivative namespace coexists with older engines' v9 and v10 caches and sidecars, sharing the
 existing `.listing.lock`. Recovery removes only the current derivative namespace. Completion, identity,
