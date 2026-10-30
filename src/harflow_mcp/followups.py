@@ -404,17 +404,20 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
 @task_operation
 def successor_candidates(log_dir: Path, record: store.TaskRecord, *, cached: bool = False) -> list[str]:
     """Same-session successors and continuations of `record`, oldest first."""
+    from .task_supervision import read_task_records
+
     key = _key(log_dir, record.task_id)
     # Requalify history before using a result; cached absence is not current authority.
-    records = store.scan(log_dir).require_complete()
+    records = read_task_records(log_dir)
+    indexed = {r.task_id: r for r in records}
     found: set[str] = set()
     if record.session_id:
-        found |= store.session_successor_task_ids(log_dir, record.task_id, record.session_id)
+        found |= store.session_successor_task_ids(log_dir, record.task_id, record.session_id, records=records)
     found |= {r.task_id for r in records if r.continuation_of_task_id == record.task_id}
     found.discard(record.task_id)
 
     def started(identifier: str) -> tuple[str, str]:
-        other = store.read(log_dir, identifier)
+        other = indexed.get(identifier)
         return (other.started_at if other is not None and other.started_at else "", identifier)
 
     ordered = sorted(found, key=started)
@@ -433,8 +436,10 @@ def _resolve(
 ) -> bool:
     """Apply the read-time rules to `doc` in place; whether anything changed. These only repair
     what a crash or a failed terminal write left behind."""
+    from .task_supervision import read_task_records
+
     assert_task_owned(log_dir)
-    store.scan(log_dir).require_complete()
+    read_task_records(log_dir)
     changed = False
     now = _now()
     verdicts: dict[str, str] = {}

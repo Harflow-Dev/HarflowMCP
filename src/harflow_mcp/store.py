@@ -1306,10 +1306,10 @@ def _record_holds_session(record: TaskRecord) -> bool:
 def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
     """Ids of the records whose run may still hold `session_id` — see `_record_holds_session`.
     Records only: takeover reservations are `control.takeover_reservations`."""
-    from .task_supervision import session_reservations
+    from .task_supervision import read_task_records, session_reservations
     return {
         record.task_id
-        for record in read_all(log_dir)
+        for record in read_task_records(log_dir)
         if record.session_id == session_id and _record_holds_session(record)
     } | {launch["task_id"] for launch in session_reservations(log_dir) if launch.get("session_id") == session_id}
 
@@ -1330,9 +1330,10 @@ def live_session_ids(log_dir: Path) -> set[str]:
     ruled out (`undecidable`, e.g. `ps` unavailable) still counts as busy, on the same "never guess
     a session is free" rule; only a confirmed-`dead` pid clears it.
     """
+    from .task_supervision import read_task_records, session_reservations
+
     # A backend that mints its own id may have died before disclosing one; nothing to exclude.
-    live = {record.session_id for record in read_all(log_dir) if _record_holds_session(record)}
-    from .task_supervision import session_reservations
+    live = {record.session_id for record in read_task_records(log_dir) if _record_holds_session(record)}
     live.update(launch["session_id"] for launch in session_reservations(log_dir) if launch.get("session_id"))
     live.update(
         session_id
@@ -1343,7 +1344,9 @@ def live_session_ids(log_dir: Path) -> set[str]:
 
 
 @task_operation
-def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> set[str]:
+def session_successor_task_ids(
+    log_dir: Path, task_id: str, session_id: str, *, records: list[TaskRecord] | None = None
+) -> set[str]:
     """Find writes after a selected conversation checkpoint, including settled ones.
 
     Resume lineage catches descendants that never disclosed a session ID. A
@@ -1353,7 +1356,9 @@ def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> 
     instead of treating incomplete history as unchanged. Call under the
     existing session lock when the answer gates a spawn.
     """
-    records = read_all(log_dir)
+    if records is None:
+        from .task_supervision import read_task_records
+        records = read_task_records(log_dir)
     indexed = {record.task_id: record for record in records}
     source = indexed.get(task_id)
     if source is None or source.session_id != session_id:

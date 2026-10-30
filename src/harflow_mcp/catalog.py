@@ -855,7 +855,7 @@ class Catalog:
             if key in filters:
                 conditions.append(f't.{column}=?')
                 values.append(filters[key])
-        rows = db.execute('SELECT t.observed_at,t.backend,t.model,t.payload FROM (SELECT id AS wid FROM task_limit_hits ' + bound + 'ORDER BY observed_at DESC,id DESC LIMIT ?) JOIN task_limit_hits t ON t.id=wid'
+        rows = db.execute('SELECT t.observed_at,t.backend,t.model,t.payload FROM (SELECT id AS wid FROM task_limit_hits ' + bound + 'ORDER BY observed_at DESC,id DESC LIMIT ?) CROSS JOIN task_limit_hits t ON t.id=wid'
                           + (' WHERE ' + ' AND '.join(conditions) if conditions else '') + ' ORDER BY t.observed_at DESC,t.id DESC', (*bound_values, limit, *values)).fetchall()
         return [(stamp, backend, model, json.loads(payload)) for stamp, backend, model, payload in rows], min(total, limit), total > limit
 

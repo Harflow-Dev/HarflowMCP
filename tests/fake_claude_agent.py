@@ -15,6 +15,7 @@ Each user message's text is a command:
     silentbg <id>      start a background task that never finishes, answer STARTED
     error              end the turn with an error result
     die <code>         exit at once with <code>, no result
+    block              mark readiness, ignore stdin EOF and wait for termination
 
 Every line received on stdin is appended to $FAKE_CLAUDE_LOG, one JSON object per line. The first
 argument is the session id it reports.
@@ -175,6 +176,15 @@ def turn(text: str, pending_eof: list[bool]) -> None:
         start_background(words[1])
         assistant("STARTED")
         result("STARTED")
+    elif command == "block":
+        fail_safe = threading.Event()
+        ready = os.environ.get("FAKE_CLAUDE_BLOCK_READY")
+        if ready:
+            with open(ready, "w") as handle:
+                handle.write(str(os.getpid()))
+        # Keep the agent alive after its owner's stdin closes, without further stdout writes.
+        fail_safe.wait(timeout=120)
+        os._exit(124)
     elif command == "error":
         result("it broke", error=True)
     elif command == "die":

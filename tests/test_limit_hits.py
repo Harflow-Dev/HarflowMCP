@@ -259,6 +259,12 @@ def window_steps(directory, filters=None, limit=500):
     return result, steps[0]
 
 
+def analyze_hit_indexes(directory):
+    layout = resolve_layout(log_dir=directory)
+    with state_ownership.state_session(layout), catalog.Catalog(directory, store.RECORD_SUFFIX, layout=layout).connect() as db:
+        db.execute("ANALYZE")
+
+
 def row(number, stamp, backend="codex", model="m", group=None, repo="/r"):
     return (f"id{number:05}", stamp, backend, model, group, repo, json.dumps({"task_id": f"id{number:05}", "backend": backend}))
 
@@ -357,6 +363,31 @@ def test_tied_timestamps_keep_the_window_and_work_bounded(directory):
     assert [payload["task_id"] for _, _, _, payload in large[0]][:2] == ["id04999", "id04998"]
 
 
+def test_query_work_scales_with_the_500_row_window_after_analyze(directory):
+    insert_hits(directory, [row(n, 1_790_000_000.0 + n, repo="/kept" if n % 2 == 0 else "/other")
+                            for n in range(600)])
+    analyze_hit_indexes(directory)
+    filters = ({}, {"since": 1_790_000_000.0}, {"repo": "/kept"})
+    small = [window_steps(directory, value) for value in filters]
+
+    insert_hits(directory, [row(n, 1_790_000_000.0 + n, repo="/kept" if n % 2 == 0 else "/other")
+                            for n in range(600, 1200)])
+    analyze_hit_indexes(directory)
+    large = [window_steps(directory, value) for value in filters]
+
+    for (small_result, small_steps), (large_result, large_steps), filter_value in zip(small, large, filters):
+        assert small_result[1:] == (500, True)
+        assert large_result[1:] == (500, True)
+        assert len(small_result[0]) == len(large_result[0]) == (250 if "repo" in filter_value else 500)
+        assert large_steps <= small_steps * 1.05
+        ids = [payload["task_id"] for _, _, _, payload in large_result[0]]
+        assert ids == sorted(ids, reverse=True)
+    # Repository filtering is applied after the capped chronology window, not before it.
+    assert [payload["task_id"] for _, _, _, payload in large[2][0][0]] == [
+        f"id{number:05}" for number in range(1198, 698, -2)
+    ]
+
+
 @pytest.mark.parametrize("bound, values, index", [
     ("", (), "task_limit_hit_chronology"),
     ("WHERE observed_at >= ? ", (0.0,), "task_limit_hit_chronology (observed_at>?)"),
@@ -369,8 +400,9 @@ def test_hit_query_plan_walks_an_ordered_index_inside_the_window(directory, boun
     insert_hits(directory, [row(n, 1_790_000_000.0) for n in range(50)])
     layout = resolve_layout(log_dir=directory)
     with state_ownership.state_session(layout), catalog.Catalog(directory, store.RECORD_SUFFIX, layout=layout).connect() as db:
+        db.execute("ANALYZE")
         plan = [detail for *_, detail in db.execute(
-            "EXPLAIN QUERY PLAN SELECT t.observed_at FROM (SELECT id AS wid FROM task_limit_hits " + bound + "ORDER BY observed_at DESC,id DESC LIMIT ?) JOIN task_limit_hits t ON t.id=wid WHERE t.repo_path=? ORDER BY t.observed_at DESC,t.id DESC",
+            "EXPLAIN QUERY PLAN SELECT t.observed_at FROM (SELECT id AS wid FROM task_limit_hits " + bound + "ORDER BY observed_at DESC,id DESC LIMIT ?) CROSS JOIN task_limit_hits t ON t.id=wid WHERE t.repo_path=? ORDER BY t.observed_at DESC,t.id DESC",
             (*values, 500, "/r"))]
     assert any("USING COVERING INDEX " + index in detail for detail in plan), plan
     assert "SEARCH t USING INDEX sqlite_autoindex_task_limit_hits_1 (id=?)" in plan

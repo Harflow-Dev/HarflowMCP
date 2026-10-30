@@ -369,21 +369,54 @@ async def test_owner_killed_after_spawn_keeps_the_hold_until_the_agent_is_dead(t
     import os
     import signal
     install_fake_claude(tmp_path, monkeypatch)
+    ready = tmp_path / "fake-agent-blocked.ready"
+    monkeypatch.setenv("FAKE_CLAUDE_BLOCK_READY", str(ready))
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
-    task = await reg.start("slow 30 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
-    record = await wait_for_record(log_dir, task.task_id, lambda record: record.pid and record.owner)
-    os.kill(record.owner["pid"], signal.SIGKILL)
-    identities.dead(record.owner["pid"])
-    identities.alive(record.pid)
-    resolve = task_resources.task_resolver(log_dir)
-    entry = ledger(tmp_path).entries()[0]
-    assert resolve(entry) == resources.KEEP
-    assert task_resources.reap(log_dir).removed == []
-    os.kill(record.pid, signal.SIGKILL)
-    identities.dead(record.pid)
-    await wait_for(lambda: task_resources.reap(log_dir).removed != [] or ledger(tmp_path).entries() == [])
-    assert ledger(tmp_path).entries() == []
+    agent_pid = owner_pid = None
+    cleanup_pids = set()
+
+    def process_exists(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    try:
+        task = await reg.start("block", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
+        record = await wait_for_record(log_dir, task.task_id, lambda record: record.pid and record.owner)
+        agent_pid, owner_pid = record.pid, record.owner["pid"]
+        cleanup_pids.update((agent_pid, owner_pid))
+        await wait_for(lambda: ready.is_file() and ready.read_text() == str(agent_pid))
+        assert ready.read_text() == str(agent_pid)
+
+        os.kill(owner_pid, signal.SIGKILL)
+        cleanup_pids.discard(owner_pid)
+        identities.dead(owner_pid)
+        # The fixture agent ignores owner stdin EOF and makes no writes after its ready marker.
+        identities.alive(agent_pid)
+        os.kill(agent_pid, 0)
+        resolve = task_resources.task_resolver(log_dir)
+        entry = next(entry for entry in ledger(tmp_path).entries() if entry.owner.task_id == task.task_id)
+        assert resolve(entry) == resources.KEEP
+        assert task_resources.reap(log_dir).removed == []
+
+        os.kill(agent_pid, signal.SIGKILL)
+        await wait_for(lambda: not process_exists(agent_pid), timeout=10)
+        cleanup_pids.discard(agent_pid)
+        identities.dead(agent_pid)
+        await wait_for(lambda: task_resources.reap(log_dir).removed != [] or ledger(tmp_path).entries() == [])
+        assert ledger(tmp_path).entries() == []
+    finally:
+        # Cleanup only fixture-owned PIDs not already observed gone; never keep a stale PID for reuse.
+        for pid in tuple(cleanup_pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                cleanup_pids.discard(pid)
 
 
 def test_granted_launch_without_a_record_is_kept_until_a_person_releases_it(tmp_path, monkeypatch, identities, capsys):
