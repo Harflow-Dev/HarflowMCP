@@ -546,7 +546,7 @@ def test_old_task_and_run_projection_versions_rebuild_required_metadata(workflow
     assert header["finished_at"] is None
     assert header["workflow_id"] == workflow_references.workflow_identity(run["definition"])
     with catalog.Catalog(storage.runs, ".json", layout=layout).connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() == ("3",)
+        assert db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() == ("4",)
 
 
 def test_v9_and_v10_workflow_catalogs_keep_independent_projection_freshness(workflow_store, monkeypatch):
@@ -583,7 +583,7 @@ def test_v9_and_v10_workflow_catalogs_keep_independent_projection_freshness(work
     assert current_header["workflow_id"] == run["definition"]["workflow_id"]
     assert current_header["finished_at"] == 1_700_000_000.0
     with sqlite3.connect(current_path) as db:
-        assert db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() == ("3",)
+        assert db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() == ("4",)
 
     clock.value = 1_700_000_010.0
     updated = storage.update_run(run["workflow_run_id"], lambda row: row.update(summary="updated"), "bookkeeping")

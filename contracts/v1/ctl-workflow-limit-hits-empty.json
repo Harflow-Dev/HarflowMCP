@@ -1,0 +1,1 @@
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.5","result":{"current":[],"index_state":{"blocked_records":0,"pending_records":0,"source":"workflow_catalog","status":"ready"},"latest":[],"scan":{"complete":true,"current_examined":0,"current_limit":100,"examined":0,"limit":500},"unavailable":[]},"v":1}

@@ -485,6 +485,27 @@
       "required_capabilities": [],
       "valid": true
     },
+    "ctl-workflow-limit-hits-ready.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-workflow-limit-hits-empty.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-workflow-limit-hits-preparing.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
     "ctl-approval-error-already-answered.json": {
       "encoding": "json",
       "expected_product_version": "0.0.5",
@@ -856,7 +877,7 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "f54cffbc0a7d6fe92c3a2fba86c2ddbdd8c57c2fab4b5f2933dcc4c312eaff60",
+    "version-info.json": "a55abe06bd94967f601c2de025e4b7120e74b92b495c847c9420187715fc3fbb",
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -885,6 +906,9 @@
     "ctl-limit-hits-ready.json": "3de29d03044d800fc893bd3213ff2af57c8300addda762f08b9f62db2f416208",
     "ctl-limit-hits-empty.json": "1d7c49e1be8243724f4eda374756526cf5eb6a09e087d64b3a33c94cc4393fb5",
     "ctl-limit-hits-preparing.json": "345abfea8e68f99d88930b45a00db7d8d344fc231718ec233f3c7cbdbcf94b48",
+    "ctl-workflow-limit-hits-ready.json": "32c3ee7cdc13a281a8b6627102ba65363ca325c669e3a0ac270d9ea6d5fcba31",
+    "ctl-workflow-limit-hits-empty.json": "a18f3f47c152084937b090b3616f2696281e6425f43b87f88dc4226c1c9491bf",
+    "ctl-workflow-limit-hits-preparing.json": "74ad30139f4940ff386301abbe5f27fe6054c20d04fdff019bee488a476e1499",
     "ctl-approval-error-already-answered.json": "adca538a289a9b3bd8caeac8e643e240c01e3f21ccd401724c36b0765d86b0c4",
     "ctl-approval-error-caller-undecidable-approval.json": "19b205b2f9abb54468e4e60db7194179c9080e0518a02ecfe6311eb88cfd3985",
     "ctl-approval-error-caller-undecidable-global.json": "6860900bbc83a59a3a4f79bea00507ef9811b90b38de4db99e74697589ffb092",

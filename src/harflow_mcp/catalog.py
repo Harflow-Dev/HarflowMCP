@@ -26,7 +26,7 @@ from .read_metrics import span
 
 CATALOG_FILENAME = '.listing.v11.sqlite3'
 TASK_PROJECTION_VERSION = '3'
-RUN_PROJECTION_VERSION = '3'
+RUN_PROJECTION_VERSION = '4'
 # A filtered listing page examines at most this many catalog rows after its cursor.
 SCAN_ROWS = 2000
 
@@ -511,6 +511,25 @@ class Catalog:
         db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_backend ON task_limit_hits(backend,observed_at DESC,id DESC)')
         db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_backend_model ON task_limit_hits(backend,model,observed_at DESC,id DESC)')
         db.execute('CREATE INDEX IF NOT EXISTS task_limit_hit_model ON task_limit_hits(model,observed_at DESC,id DESC)')
+        # Workflow usage-limit evidence per attempt, and the runs blocked on a usage-limit recovery. The
+        # workflow, repo and root columns repeat the run's lossless metadata so each filter has an ordered
+        # index; a query bounds its window with one of them.
+        db.execute('CREATE TABLE IF NOT EXISTS run_limit_hits (run_id TEXT NOT NULL,hit_key TEXT NOT NULL,root_id TEXT NOT NULL,workflow_id TEXT,repo_path TEXT NOT NULL,backend TEXT NOT NULL,requested_model TEXT,observed_model TEXT,finished_at REAL NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(run_id,hit_key))')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_hit_chronology ON run_limit_hits(finished_at DESC,run_id DESC,hit_key DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_hit_workflow ON run_limit_hits(workflow_id,finished_at DESC,run_id DESC,hit_key DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_hit_repo ON run_limit_hits(repo_path,finished_at DESC,run_id DESC,hit_key DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_hit_root ON run_limit_hits(root_id,finished_at DESC,run_id DESC,hit_key DESC)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_hit_run ON run_limit_hits(run_id,finished_at DESC,hit_key DESC)')
+        # One row per run that kept fewer hits than it recorded; keys_exceeded says a key was dropped too.
+        db.execute('CREATE TABLE IF NOT EXISTS run_limit_meta (run_id TEXT PRIMARY KEY,root_id TEXT NOT NULL,workflow_id TEXT,repo_path TEXT NOT NULL,keys_exceeded INTEGER NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_meta_keys ON run_limit_meta(keys_exceeded)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_meta_workflow ON run_limit_meta(workflow_id,keys_exceeded)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_meta_repo ON run_limit_meta(repo_path,keys_exceeded)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_meta_root ON run_limit_meta(root_id,keys_exceeded)')
+        db.execute('CREATE TABLE IF NOT EXISTS run_limit_blocking (run_id TEXT PRIMARY KEY,root_id TEXT NOT NULL,workflow_id TEXT,repo_path TEXT NOT NULL,payload TEXT NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_blocking_workflow ON run_limit_blocking(workflow_id,run_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_blocking_repo ON run_limit_blocking(repo_path,run_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_limit_blocking_root ON run_limit_blocking(root_id,run_id)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
@@ -522,6 +541,9 @@ class Catalog:
             db.execute('DELETE FROM workflow_links')
             db.execute('DELETE FROM run_meta')
             db.execute('DELETE FROM task_limit_hits')
+            db.execute('DELETE FROM run_limit_hits')
+            db.execute('DELETE FROM run_limit_blocking')
+            db.execute('DELETE FROM run_limit_meta')
             db.execute('DELETE FROM task_groups')
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
@@ -534,12 +556,12 @@ class Catalog:
             db.execute('DELETE FROM state')
             db.execute("INSERT INTO state VALUES ('schema_version','11')")
         if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != (TASK_PROJECTION_VERSION,):
-            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'task_limit_hits'):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'task_limit_hits', 'run_limit_hits', 'run_limit_blocking', 'run_limit_meta'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('task_projection_version',?)", (TASK_PROJECTION_VERSION,))
         if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != (RUN_PROJECTION_VERSION,):
-            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links', 'run_meta', 'task_limit_hits'):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links', 'run_meta', 'task_limit_hits', 'run_limit_hits', 'run_limit_blocking', 'run_limit_meta'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('run_projection_version',?)", (RUN_PROJECTION_VERSION,))
@@ -626,6 +648,14 @@ class Catalog:
         if self.suffix == '.meta.json' and limit_hit is not None and not header.get('needs_direct_lookup'):
             db.execute('INSERT INTO task_limit_hits VALUES (?,?,?,?,?,?,?)', (identifier, limit_hit['observed_at'], limit_hit['backend'], limit_hit['model'], limit_hit['grp'], limit_hit['repo_path'],
                                                                               json.dumps(limit_hit['payload'], ensure_ascii=True, separators=(',', ':'))))
+        run_limit_hits = header.pop('_limit_hits', None)
+        run_limit_blocking = header.pop('_limit_blocking', None)
+        run_limit_meta = header.pop('_limit_meta', None)
+        if self.suffix == '.json':
+            # Every put replaces this run's rows, so a run that loses its evidence or stops blocking drops them.
+            db.execute('DELETE FROM run_limit_hits WHERE run_id=?', (identifier,))
+            db.execute('DELETE FROM run_limit_blocking WHERE run_id=?', (identifier,))
+            db.execute('DELETE FROM run_limit_meta WHERE run_id=?', (identifier,))
         group = header.get('group')
         db.execute('DELETE FROM task_groups WHERE id=?', (identifier,))
         if isinstance(group, str) and len(group) <= 128:
@@ -637,6 +667,15 @@ class Catalog:
             db.execute('DELETE FROM run_meta WHERE id=?', (identifier,))
         elif self.suffix == '.meta.json' and header.get('needs_direct_lookup'):
             db.execute('DELETE FROM task_limit_hits WHERE id=?', (identifier,))
+        if self.suffix == '.json' and not header.get('needs_direct_lookup'):
+            for hit in run_limit_hits or ():
+                db.execute('INSERT INTO run_limit_hits VALUES (?,?,?,?,?,?,?,?,?,?)', (identifier, hit['hit_key'], hit['root_id'], hit['workflow_id'], hit['repo_path'], hit['backend'], hit['requested_model'],
+                                                                                      hit['observed_model'], hit['finished_at'], json.dumps(hit['payload'], ensure_ascii=True, separators=(',', ':'))))
+            if run_limit_meta is not None:
+                db.execute('INSERT INTO run_limit_meta VALUES (?,?,?,?,?)', (identifier, run_limit_meta['root_id'], run_limit_meta['workflow_id'], run_limit_meta['repo_path'], int(run_limit_meta['keys_exceeded'])))
+            if run_limit_blocking is not None:
+                db.execute('INSERT INTO run_limit_blocking VALUES (?,?,?,?,?)', (identifier, run_limit_blocking['root_id'], run_limit_blocking['workflow_id'], run_limit_blocking['repo_path'],
+                                                                                json.dumps(run_limit_blocking['payload'], ensure_ascii=True, separators=(',', ':'))))
         db.execute("INSERT INTO entries VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stamp=CASE WHEN json_extract(entries.payload,'$.needs_direct_lookup')=1 THEN excluded.stamp ELSE entries.stamp END,active=excluded.active,session=excluded.session,payload=excluded.payload",
                    (identifier, stamp, int(active), session_id, json.dumps(header, ensure_ascii=True, separators=(',', ':'))))
         generation = db.execute("SELECT value FROM state WHERE key='scan_generation'").fetchone()
@@ -670,6 +709,8 @@ class Catalog:
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
         for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links', 'run_meta', 'task_limit_hits'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
+        for table in ('run_limit_hits', 'run_limit_blocking', 'run_limit_meta'):
+            db.execute(f'DELETE FROM {table} WHERE run_id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:
         # Older processes do not honor our lock. A matching-file replacement may
@@ -782,6 +823,7 @@ class Catalog:
         stale = db.execute("""WITH projected AS (
             SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers UNION SELECT id FROM task_groups
             UNION SELECT run_id AS id FROM checkout_tasks UNION SELECT id FROM run_meta UNION SELECT id FROM task_limit_hits
+            UNION SELECT run_id AS id FROM run_limit_hits UNION SELECT run_id AS id FROM run_limit_blocking UNION SELECT run_id AS id FROM run_limit_meta
             UNION SELECT json_extract(payload,'$.workflow_run_id') AS id FROM associations
         ) SELECT id FROM projected WHERE id IS NOT NULL
           AND id NOT IN (SELECT id FROM seen WHERE generation=?)""", (generation,))
@@ -816,6 +858,112 @@ class Catalog:
         rows = db.execute('SELECT t.observed_at,t.backend,t.model,t.payload FROM (SELECT id AS wid FROM task_limit_hits ' + bound + 'ORDER BY observed_at DESC,id DESC LIMIT ?) JOIN task_limit_hits t ON t.id=wid'
                           + (' WHERE ' + ' AND '.join(conditions) if conditions else '') + ' ORDER BY t.observed_at DESC,t.id DESC', (*bound_values, limit, *values)).fetchall()
         return [(stamp, backend, model, json.loads(payload)) for stamp, backend, model, payload in rows], min(total, limit), total > limit
+
+    @staticmethod
+    def _run_limit_bound(filters: dict[str, Any], indexes: dict[str, tuple[str, str]], default: str) -> tuple[str, str, list[Any], list[tuple[str, Any]]]:
+        """The index that bounds a run limit query, its equality predicate and the filters left for the outer query.
+
+        ``root_workflow_run_id``, ``workflow_id`` and ``repo`` each have an ordered index; the first present
+        (in that order) bounds the window and the others filter inside it.
+        """
+        for key in ('root_workflow_run_id', 'workflow_id', 'repo'):
+            if key in filters:
+                index, column = indexes[key]
+                rest = [(indexes[other][1], filters[other]) for other in ('root_workflow_run_id', 'workflow_id', 'repo') if other in filters and other != key]
+                return index, f'{column}=?', [filters[key]], rest
+        return default, '', [], []
+
+    def run_limit_hit_window(self, db: sqlite3.Connection, limit: int, filters: dict[str, Any], run_ids: list[str] | None = None) -> tuple[list[tuple[float, str, str, str | None, str | None, str, dict[str, Any]]], int, bool]:
+        """Newest workflow usage-limit hits as ``(finished_at, run_id, backend, requested_model, observed_model, root_id, payload)``.
+
+        A direct query takes the newest ``limit`` rows in ``(finished_at, run_id, hit_key)`` order that
+        satisfy one indexed bound (the root, else the workflow, else the repo, plus the ``since`` and
+        ``before`` range on ``finished_at``), isolated in a subquery so no other predicate can change the
+        scan; the remaining equality filters apply inside that window. A query for ``run_ids`` (a managed
+        caller's own run and descendants) starts from at most ``RUN_HIT_LIMIT`` rows per run and applies
+        every filter before the cap. Returns the rows, the rows examined and whether more were left.
+        """
+        indexes = {'root_workflow_run_id': ('run_limit_hit_root', 'root_id'), 'workflow_id': ('run_limit_hit_workflow', 'workflow_id'), 'repo': ('run_limit_hit_repo', 'repo_path')}
+        range_conditions, range_values = [], []
+        for key, operator in (('since', '>='), ('before', '<')):
+            if key in filters:
+                range_conditions.append(f'finished_at {operator} ?')
+                range_values.append(filters[key])
+        columns = 'finished_at,run_id,backend,requested_model,observed_model,root_id,payload'
+        order = 'ORDER BY finished_at DESC,run_id DESC,hit_key DESC'
+        if run_ids is not None:
+            conditions = ['run_id IN (' + ','.join('?' * len(run_ids)) + ')', *range_conditions]
+            values: list[Any] = [*run_ids, *range_values]
+            for key, column in (('root_workflow_run_id', 'root_id'), ('workflow_id', 'workflow_id'), ('repo', 'repo_path')):
+                if key in filters:
+                    conditions.append(f'{column}=?')
+                    values.append(filters[key])
+            where = ' WHERE ' + ' AND '.join(conditions)
+            source = 'FROM run_limit_hits INDEXED BY run_limit_hit_run' + where + ' ' + order
+            total = db.execute('SELECT COUNT(*) FROM (SELECT 1 ' + source + ' LIMIT ?)', (*values, limit + 1)).fetchone()[0]
+            rows = db.execute('SELECT ' + columns + ' ' + source + ' LIMIT ?', (*values, limit)).fetchall()
+        else:
+            index, equality, equality_values, rest = self._run_limit_bound(filters, indexes, 'run_limit_hit_chronology')
+            bound_conditions = ([equality] if equality else []) + range_conditions
+            bound = ' WHERE ' + ' AND '.join(bound_conditions) if bound_conditions else ''
+            bound_values = [*equality_values, *range_values]
+            source = 'FROM run_limit_hits INDEXED BY ' + index + bound + ' ' + order
+            total = db.execute('SELECT COUNT(*) FROM (SELECT 1 ' + source + ' LIMIT ?)', (*bound_values, limit + 1)).fetchone()[0]
+            outer = ''.join(f' AND t.{column}=?' for column, _ in rest)
+            rows = db.execute('SELECT t.finished_at,t.run_id,t.backend,t.requested_model,t.observed_model,t.root_id,t.payload FROM (SELECT run_id AS wr,hit_key AS wk ' + source + ' LIMIT ?) '
+                              'CROSS JOIN run_limit_hits t ON t.run_id=wr AND t.hit_key=wk WHERE 1=1' + outer + ' ORDER BY t.finished_at DESC,t.run_id DESC,t.hit_key DESC',
+                              (*bound_values, limit, *[value for _, value in rest])).fetchall()
+        return [(*row[:6], json.loads(row[6])) for row in rows], min(total, limit), total > limit
+
+    def run_limit_blocking_window(self, db: sqlite3.Connection, limit: int, filters: dict[str, Any], run_ids: list[str] | None = None) -> tuple[list[tuple[str, str, dict[str, Any]]], bool]:
+        """Runs blocked on a usage-limit recovery as ``(run_id, root_id, payload)`` in run id order.
+
+        Bounded like ``run_limit_hit_window``: an indexed root, workflow or repo bound selects the first
+        ``limit`` rows and the other equality filters apply inside them; ``since`` and ``before`` do not
+        apply, since a blocking row has no time of its own. Returns the rows and whether more were left.
+        """
+        indexes = {'root_workflow_run_id': ('run_limit_blocking_root', 'root_id'), 'workflow_id': ('run_limit_blocking_workflow', 'workflow_id'), 'repo': ('run_limit_blocking_repo', 'repo_path')}
+        if run_ids is not None:
+            conditions, values = ['run_id IN (' + ','.join('?' * len(run_ids)) + ')'], [*run_ids]
+            for key, column in (('root_workflow_run_id', 'root_id'), ('workflow_id', 'workflow_id'), ('repo', 'repo_path')):
+                if key in filters:
+                    conditions.append(f'{column}=?')
+                    values.append(filters[key])
+            rows = db.execute('SELECT run_id,root_id,payload FROM run_limit_blocking WHERE ' + ' AND '.join(conditions) + ' ORDER BY run_id LIMIT ?', (*values, limit + 1)).fetchall()
+            capped = len(rows) > limit
+        else:
+            index, equality, equality_values, rest = self._run_limit_bound(filters, indexes, '')
+            source = 'FROM run_limit_blocking' + (f' INDEXED BY {index} WHERE {equality}' if equality else '') + ' ORDER BY run_id'
+            capped = db.execute('SELECT COUNT(*) FROM (SELECT 1 ' + source + ' LIMIT ?)', (*equality_values, limit + 1)).fetchone()[0] > limit
+            outer = ''.join(f' AND t.{column}=?' for column, _ in rest)
+            rows = db.execute('SELECT t.run_id,t.root_id,t.payload FROM (SELECT run_id AS wr ' + source + ' LIMIT ?) CROSS JOIN run_limit_blocking t ON t.run_id=wr WHERE 1=1' + outer + ' ORDER BY t.run_id',
+                              (*equality_values, limit, *[value for _, value in rest])).fetchall()
+        return [(run_id, root_id, json.loads(payload)) for run_id, root_id, payload in rows[:limit]], capped
+
+    def run_limit_truncated(self, db: sqlite3.Connection, filters: dict[str, Any], run_ids: list[str] | None = None, *, any_truncation: bool = False) -> bool:
+        """Whether a run in scope dropped hits that could change the answer.
+
+        Only runs over the retention cap have a ``run_limit_meta`` row. A direct query looks at the same
+        scope as its hit window (the first of root, workflow and repo, else everything) with an indexed
+        ``LIMIT 1``; a managed query looks up its verified run ids by primary key. Unless
+        ``any_truncation`` is set (a ``since`` or ``before`` bound can hide dropped older hits), only a
+        run that also dropped a whole key counts.
+        """
+        extra = '' if any_truncation else 'keys_exceeded=1'
+        if run_ids is not None:
+            where = ['run_id IN (' + ','.join('?' * len(run_ids)) + ')'] + ([extra] if extra else [])
+            return db.execute('SELECT 1 FROM run_limit_meta WHERE ' + ' AND '.join(where) + ' LIMIT 1', run_ids).fetchone() is not None
+        for key, column, index in (('root_workflow_run_id', 'root_id', 'run_limit_meta_root'), ('workflow_id', 'workflow_id', 'run_limit_meta_workflow'), ('repo', 'repo_path', 'run_limit_meta_repo')):
+            if key in filters:
+                return db.execute(f'SELECT 1 FROM run_limit_meta INDEXED BY {index} WHERE {column}=?' + (f' AND {extra}' if extra else '') + ' LIMIT 1', (filters[key],)).fetchone() is not None
+        if any_truncation:
+            return db.execute('SELECT 1 FROM run_limit_meta LIMIT 1').fetchone() is not None
+        return db.execute('SELECT 1 FROM run_limit_meta INDEXED BY run_limit_meta_keys WHERE keys_exceeded=1 LIMIT 1').fetchone() is not None
+
+    def incomplete_sources(self, db: sqlite3.Connection, limit: int) -> tuple[list[tuple[str, str | None, str | None]], bool]:
+        """Up to ``limit`` ids whose header needs direct inspection, with ``(id, reason, blocker)``, from the partial index."""
+        rows = db.execute("SELECT id,json_extract(payload,'$.note'),json_extract(payload,'$.index_blocker') FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 ORDER BY id LIMIT ?", (limit + 1,)).fetchall()
+        return rows[:limit], len(rows) > limit
 
     @layout_operation
     def prefix_names(self, prefix: str, limit: int) -> dict[str, Any] | None:

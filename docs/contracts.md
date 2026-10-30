@@ -525,7 +525,7 @@ Private optional `finished_at_sequence` is a nonnegative exact integer witness m
 Older writers invalidate completion by advancing sequence alone. Reads expose unknown
 without rewriting state; new bookkeeping cannot recertify stale dates, while a fresh
 terminal transition records new evidence. Root and child creation initialize null with
-witness zero. Task projection 3 and run projection 3 use `.listing.v11.sqlite3`, preserving
+witness zero. Task projection 3 and run projection 4 use `.listing.v11.sqlite3`, preserving
 older derivative namespaces and their sidecars while retaining the shared lock.
 Optional `workflow_id` derives only from the pinned run definition; modern IDs identify
 definition generations and distinguish delete/recreate without matching the current
@@ -643,6 +643,54 @@ satisfy the indexed `since`, `backend` and `model` bounds, isolated in a subquer
 cannot widen it, then applies `repo` and `group` inside that window and keeps the latest hit per
 `(backend, requested_model)`, at most 50 pairs. There is no pagination. An unreadable catalog answers
 the ctl error code `limit_hits_error`.
+
+## Workflow usage-limit hits
+
+`harflow-ctl workflow-limit-hits [--workflow-id W] [--repo PATH] [--since ISO8601] [--before ISO8601]
+[--root-workflow-run-id RUN] [--current-only] --json` and the MCP tool `workflow_limit_hits` expose
+capability `workflow-limit-hits.v1` through the existing `harflow.ctl` v1 result envelope. Require the
+capability on the fresh handshake; an older engine answers the command with a usage error, which is
+"unsupported". It is a read-only command (no mutation authority is needed) and never retries, continues
+or switches a provider. A direct caller reads every run; a workflow orchestrator reads its own run and
+descendants verified through persisted invocation links, never ancestors or siblings; workflow workers
+and builders are refused, and an undecidable caller identity is refused, before any run is looked up
+(MCP `invalid_params`; ctl `workflow_read_refused`; bad filters are `invalid_params`). `root_workflow_run_id` is refused for managed callers. A ctl I/O failure answers `workflow_limit_hits_error`. Behavior
+and caveats are in [usage limits](usage-limits.md#workflow-usage-limits).
+
+`result` carries `current`, `latest`, `unavailable`, `scan` and `index_state`.
+
+- `current` lists runs blocked on a usage-limit recovery (`orchestrator_usage_recovery` or
+  `worker_usage_recovery` on a run that is not `completed`, `failed`, `cancelled` or `cancelling`), each reported on the owning run:
+  `root_workflow_run_id`, `workflow_run_id`, `run_status`, `role` (`orchestrator`, `builder` or `worker`), nullable
+  `node_id` and `execution_id`, `decision_id`, nullable `backend` and `requested_model`, `diagnostic`, `reset`
+  and, when an execution is named, `detail_ref`. At most 100.
+- `latest` is the newest hit per (`backend`, `requested_model`, `observed_model`), at most 50. A hit carries
+  `root_workflow_run_id`, `workflow_run_id`, `node_id`, `role`, `execution_id`, `attempt` (the 1-based position of
+  the attempt in its execution), `task_id`, nullable `transport_task_id`, `backend`, nullable `requested_model` and
+  `observed_model`, `observed_at` (UTC ISO8601), `observed_at_source` (`finished_at`, `started_at`,
+  `activation_finished_at`, `activation_created_at` or `run_updated_at`), `diagnostic` (`category`
+  `usage_limit`, plus the bounded `source`, `reason`, `provider_code` and `http_status`), `reset
+  {raw, at, state}` as for `limit-hits`, an optional `recovery {accepted, answer}` and `detail_ref
+  {tool: "get_workflow_run_detail", workflow_run_id, view: "execution:<id>"}`.
+- `unavailable` lists up to 20 runs whose document is unreadable or invalid (`workflow_run_id`, `reason`,
+  `code`); a run with a malformed `reset_at` is one of them, not an unknown reset.
+- `scan` is `{examined, limit: 500, current_examined, current_limit: 100, complete}`; `index_state` is the run
+  catalog state (`status` `ready`, `preparing` or `blocked`). `complete` is false when a window or key cap ended the
+  answer early, while a run is unavailable and while the index is not ready.
+
+Canonical examples are `contracts/v1/ctl-workflow-limit-hits-{ready,empty,preparing}.json`;
+`version-info.json` lists the capability, so HarflowMac must re-vendor the three fixtures, `version-info.json`
+and the manifest.
+
+Hits come from the `run_limit_hits` side table and blockers from `run_limit_blocking`, both written from the run
+document by the same transaction that writes its header, so a run that loses its evidence or stops blocking drops
+its rows, and discovery prunes rows of deleted runs. Run projection 4 backfills them; the catalog stays
+`.listing.v11.sqlite3`. A direct query takes the newest 500 rows in `(observed_at, run id, task id)` order that
+satisfy one indexed bound, isolated in a subquery so equal timestamps cannot widen it: the first of
+`root_workflow_run_id`, `workflow_id` and `repo` that is set, together with the `since`/`before` range. The other
+equality filters apply inside that window. A managed orchestrator's query starts from the rows of its tree
+members, verified before the query (at most 65 runs), and applies every filter before the cap. A run with more than 100 hits keeps its newest 100 plus the newest hit of up to 20 further keys (at most 120 rows) and is recorded in `run_limit_meta`; `scan.complete` is false when `since` or `before` is set and an in-scope run is truncated, or when an in-scope run dropped a whole key. A managed query's members are the children named by its own verified runs' invocations (at most 200 examined, 65 verified; each child is read once with the catalog byte bound and its parent edge checked); an unresolved named child yields a `preparing` response. There is no
+pagination.
 
 ## Workflow caller input projections
 
@@ -1046,7 +1094,7 @@ projects the compact status, validated against the compact status fields (a mana
 Omitting `fields` leaves every reply unchanged.
 
 The listing catalog is now `.listing.v11.sqlite3` (schema version 11, adding `run_meta` and, with
-task projection 3, `task_limit_hits`). Run projection 3 is unchanged; older engines keep their own `.listing.v10`
+task projection 3, `task_limit_hits`; with run projection 4, `run_limit_hits`, `run_limit_blocking` and `run_limit_meta`). Older engines keep their own `.listing.v10`
 namespace and sidecars, and the new catalog rebuilds through bounded bootstrap. No `contracts/v1`
 fixture changes.
 

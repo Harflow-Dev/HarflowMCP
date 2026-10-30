@@ -667,7 +667,7 @@ MCP_RESOLVED = {
     ("read_workflow_assigned_input", "task_id"), ("inspect_workflow_node", "workflow_run_id"),
     ("inspect_workflow_node", "task_id"), ("send_workflow_message", "run_id"), ("send_workflow_message", "task_id"),
     ("cancel_workflow_message", "run_id"), ("get_workflow_artifacts", "workflow_run_id"),
-    ("get_workflow_artifacts", "task_id"),
+    ("get_workflow_artifacts", "task_id"), ("workflow_limit_hits", "root_workflow_run_id"),
 }
 MCP_EXEMPT: dict[tuple[str, str], str] = {}
 
@@ -683,7 +683,7 @@ CTL_RESOLVED = {
     ("workflow-assigned-input", "workflow_run_id"), ("workflow-builder-followup", "workflow_run_id"),
     ("workflow-cancel", "workflow_run_id"), ("workflow-cancel-message", "workflow_run_id"),
     ("workflow-detail", "workflow_run_id"), ("workflow-inspect", "--task-id"), ("workflow-inspect", "workflow_run_id"),
-    ("workflow-list-page", "--related-run-id"), ("workflow-list-page", "--run-ids"),
+    ("workflow-limit-hits", "--root-workflow-run-id"), ("workflow-list-page", "--related-run-id"), ("workflow-list-page", "--run-ids"),
     ("workflow-notifications", "workflow_run_id"), ("workflow-pause", "workflow_run_id"),
     ("workflow-recover", "workflow_run_id"), ("workflow-resume", "workflow_run_id"),
     ("workflow-revise-goal", "workflow_run_id"), ("workflow-send", "--task-id"), ("workflow-send", "workflow_run_id"),

@@ -3039,6 +3039,37 @@ async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, ac
 
 @mcp.tool()
 @_task_document_errors
+async def workflow_limit_hits(workflow_id: str | None = None, repo: str | None = None, since: str | None = None, before: str | None = None, root_workflow_run_id: str | None = None, current_only: StrictBool = False) -> dict[str, Any]:
+    """Provider usage-limit hits and blocking recoveries of workflow runs, from persisted run evidence.
+
+    Read-only: nothing is retried, switched or continued. Evidence is only an attempt's
+    failure_diagnostic with category usage_limit (headless and Codex-native attempts alike) and the
+    run's orchestrator or worker usage-limit recovery checkpoint; node results and prose are never
+    read. Direct callers read every run; a workflow orchestrator reads its own run and descendants
+    verified through persisted invocation links; workers and builders are refused.
+
+    current lists runs blocked on a usage-limit recovery (at most 100), reported on the owning run
+    even while its root is running. latest is the newest hit per (backend, requested_model,
+    observed_model) among the newest 500 hits matching the window bound: the first of
+    root_workflow_run_id (not supported for managed callers), workflow_id and repo that is set, plus the since (inclusive) and before
+    (exclusive) ISO8601 range with timezone; the other filters apply inside that window and there is no
+    pagination. At most 50 keys are returned. current_only reports only current. Each hit carries
+    root_workflow_run_id, workflow_run_id, node_id, execution_id, attempt, task_id, transport_task_id,
+    observed_at (when the attempt settled; observed_at_source names the field), diagnostic, reset
+    {raw, at, state} (a numeric reset is epoch seconds; elapsed does not say the provider is available
+    again), an accepted recovery {accepted, answer} when one answered it, and detail_ref, the
+    get_workflow_run_detail arguments for execution:<id>. Each attempt is its own hit: native children
+    that share a transport report it in transport_task_id. unavailable lists up to 20 runs whose
+    document could not be read. scan.complete is false when a cap was reached, runs are unavailable or
+    the index is still preparing (index_state), so retry while it is preparing.
+    See docs/usage-limits.md.
+    """
+    filters = {'workflow_id': workflow_id, 'repo': repo, 'since': since, 'before': before, 'root_workflow_run_id': root_workflow_run_id, 'current_only': current_only}
+    return await _workflow_call('limit_hits', filters=filters)
+
+
+@mcp.tool()
+@_task_document_errors
 async def get_workflow_status(workflow_run_id: str, fields: list[str] | None = None) -> dict[str, Any]:
     """Read a workflow run's execution state and task associations.
 

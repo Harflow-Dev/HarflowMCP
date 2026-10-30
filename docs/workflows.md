@@ -815,8 +815,11 @@ the switch reason are recorded.
 
 To see which backend and model combinations were recently rejected by a usage limit, and when the
 provider says each resets, use `recent_limit_hits`; see [usage limits](usage-limits.md). It reads
-persisted task records, including workflow node tasks, and does not cover Codex-native workflow
-attempts or workflow recovery state.
+persisted task records, including workflow node tasks. To see the attempts of workflow runs that hit
+a usage limit (Codex-native attempts included) and which runs are blocked on a usage-limit
+recovery, use `workflow_limit_hits` or `harflow-ctl workflow-limit-hits`; see
+[workflow usage limits](usage-limits.md#workflow-usage-limits). A workflow orchestrator may read its
+own run and verified descendants; nothing is retried, switched or continued by either read.
 
 Claude, Codex, opencode, Vibe, and Antigravity interpret their own authoritative usage-limit
 signals. A confirmed rejection remains a failure even after useful progress or an earlier

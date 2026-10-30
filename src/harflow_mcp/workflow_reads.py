@@ -16,12 +16,12 @@ from . import id_resolution
 from .catalog import bounded_request
 from .read_metrics import span
 
-BOUNDED_READ_ACTIONS = frozenset({"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "detail"})
+BOUNDED_READ_ACTIONS = frozenset({"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "detail", "limit_hits"})
 READ_ONLY_CLI_ACTIONS = {
     "validate": "validate", "list": "list", "list-page": "list_run_page",
     "get": "get", "list-runs": "list_runs", "status": "status", "detail": "detail",
     "wait": "wait", "inspect": "inspect", "assigned-input": "assigned_input",
-    "artifacts": "artifacts", "preview": "preview", "notifications": "notifications",
+    "artifacts": "artifacts", "preview": "preview", "notifications": "notifications", "limit-hits": "limit_hits",
 }
 READ_ACTIONS = BOUNDED_READ_ACTIONS | frozenset(READ_ONLY_CLI_ACTIONS.values())
 READ_ONLY_CLI_COMMANDS = frozenset("workflow-" + name for name in READ_ONLY_CLI_ACTIONS)
@@ -164,15 +164,32 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
             from .workflow_responses import RUN_LIST_FIELDS, validate_run_fields
             selected = validate_run_fields(kwargs["fields"], RUN_LIST_FIELDS, "run header")
         kwargs.pop("fields", None)
+    if action == "limit_hits":
+        from .workflow_limit_hits import validate_filters as validate_limit_hit_filters
+        validate_limit_hit_filters(kwargs.get("filters"))
     if reader is None:
         async def reader():
             return await asyncio.to_thread(managed_reader, directory)
     with span("authority"):
-        if action in {'list_run_page', 'get_run_header'}:
+        if action in {'list_run_page', 'get_run_header', 'limit_hits'}:
             from .workflow_inspection import managed_page_reader, page_indexing_response
-            ready, managed = await asyncio.to_thread(managed_page_reader, directory)
+            try:
+                ready, managed = await asyncio.to_thread(managed_page_reader, directory)
+            except ValueError as exc:
+                if action != 'limit_hits':
+                    raise
+                from .workflow_limit_hits import Refused
+                raise Refused(str(exc)) from None
             if not ready:
+                if action == 'limit_hits':
+                    # Authority is not established, so nothing global (ids or counts) is exposed.
+                    from .workflow_limit_hits import pending
+                    state = page_indexing_response(directory)['catalog_state']
+                    return pending({key: state[key] for key in ('status', 'source', 'reason') if key in state})
                 return page_indexing_response(directory)
+            if action == 'limit_hits':
+                from .workflow_limit_hits import refuse_managed
+                refuse_managed(managed, kwargs.get('filters'))
         elif bounded_read and action in {"status", "detail", "list"}:
             from .workflow_inspection import managed_page_reader, page_indexing_response
             ready, managed = await asyncio.to_thread(managed_page_reader, directory)
@@ -219,6 +236,11 @@ async def _resolve_run_arguments(action: str, directory: Path, managed: Any, kwa
     if action in {"status", "detail", "get_run_header"}:
         resolved["primary"] = await one(kwargs["run_id"])
         kwargs["run_id"] = resolved["primary"].id
+    elif action == "limit_hits":
+        filters = kwargs.get("filters") or {}
+        if filters.get("root_workflow_run_id") is not None:
+            resolved["root_workflow_run_id"] = await leniently(filters["root_workflow_run_id"])
+            kwargs["filters"] = {**filters, "root_workflow_run_id": resolved["root_workflow_run_id"].id}
     elif action == "list_run_page":
         if kwargs.get("related_run_id") is not None:
             resolved["related_run_id"] = await leniently(kwargs["related_run_id"])
@@ -232,6 +254,9 @@ async def _resolve_run_arguments(action: str, directory: Path, managed: Any, kwa
 async def _perform(action: str, directory: Path, managed: Any, kwargs: dict[str, Any]) -> Any:
     with span("import"):
         from . import workflows
+    if action == "limit_hits":
+        from .workflow_limit_hits import recent
+        return await _read(recent, directory, managed, kwargs.get("filters"))
     if managed is not None:
         association, owned_run = managed
         owned_run = await _read(on_demand_projection, workflows.WorkflowStore(directory.parent), owned_run)
@@ -347,6 +372,9 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
         return {"workflows" if action == "list" else "runs": entries}
     if action == "get":
         return await read("get", name=args.name)
+    if action == "limit-hits":
+        return await read("limit_hits", filters={"workflow_id": args.workflow_id, "repo": args.repo, "since": args.since, "before": args.before,
+                                                 "root_workflow_run_id": args.root_workflow_run_id, "current_only": args.current_only})
     if action == "detail":
         if args.monitor_view:
             from .workflow_responses import monitor_detail

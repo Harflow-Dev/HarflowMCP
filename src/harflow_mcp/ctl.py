@@ -90,7 +90,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 # is destructive and takes the full id, so it is not listed.
 _PREFIX_NOTE = "a unique prefix of at least 8 characters is accepted"
 _PREFIX_ARGUMENTS = {"task_id", "workflow_run_id", "--task-id", "--task-ids", "--workflow-run-id", "--source-run",
-                     "--related-run-id", "--run-ids"}
+                     "--related-run-id", "--run-ids", "--root-workflow-run-id"}
 
 
 def _document_id_prefixes(subparsers: Any) -> None:
@@ -443,7 +443,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     workflow_parsers = []
     from .workflow_reads import RUN_SCOPES, RUN_STATUSES
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message", "limit-hits"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action == "recover":
             wp.description = "Explicitly recover a failed settled run or an interrupted root with a confirmed-dead scheduler. Supply a reason; uncertain task ownership blocks recovery. Interrupted recovery preserves existing attempts and decision budgets."
@@ -503,6 +503,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--limit", type=int)
             wp.add_argument("--before-seq", type=int)
             wp.add_argument("--after-seq", type=int)
+        if action == "limit-hits":
+            wp.description = "Blocking usage-limit recoveries (current) and the latest usage-limit hit per backend, requested model and observed model (latest) from persisted workflow run evidence. Direct callers read every run; a workflow orchestrator reads its own run and verified descendants; workers and builders are refused. Read-only: nothing is retried, switched or continued. The hit window is the newest 500 hits matching the first of --root-workflow-run-id, --workflow-id and --repo, plus the --since/--before range; the other filters apply inside it."
+            wp.add_argument("--workflow-id", help="stable workflow identity of the run")
+            wp.add_argument("--repo", help="exact recorded repository path of the run")
+            wp.add_argument("--since", help="hits observed at or after this ISO8601 timestamp with timezone")
+            wp.add_argument("--before", help="hits observed before this ISO8601 timestamp with timezone")
+            wp.add_argument("--root-workflow-run-id", help="only runs of this workflow tree")
+            wp.add_argument("--current-only", action="store_true", help="report only blocking recoveries")
         if action == "list-runs":
             wp.add_argument("--offset", type=int, default=0)
             wp.add_argument("--limit", type=int, default=100)
@@ -1554,7 +1562,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             from .backends.native import available as native_available
             from .workflow_definition_documents import definition_warnings
             return {**diagnostics, "warnings": definition_warnings(canonical), "valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
-        if action in {"list", "list-runs", "list-page", "get", "status", "detail"}:
+        if action in {"list", "list-runs", "list-page", "get", "status", "detail", "limit-hits"}:
             from .read_metrics import span
             with span("import"):
                 from .workflow_reads import cli_read
@@ -1681,6 +1689,9 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         code = data.get("code") if isinstance(data, dict) else None
         if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable", *id_resolution.CODES}:
             code = "workflow_error"
+            if args.command == "workflow-limit-hits":
+                from .workflow_limit_hits import Refused
+                code = "workflow_read_refused" if isinstance(exc, Refused) else "invalid_params" if isinstance(exc, ValueError) else "workflow_limit_hits_error" if isinstance(exc, (OSError, sqlite3.Error)) else code
         return _fail(args, code, str(exc), data)
     from .read_metrics import span
     with span("serialization"):

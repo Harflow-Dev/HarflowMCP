@@ -1103,6 +1103,8 @@ class WorkflowStore:
         header = self.run_header(run)
         from .workflow_responses import run_meta
         header['_run_meta'] = run_meta(run)
+        from .workflow_limit_hits import evidence
+        header['_limit_hits'], header['_limit_blocking'], header['_limit_meta'] = evidence(run, header['_run_meta'])
         header['_checkout'] = [{'task_id': task['task_id'], 'workflow_run_id': run['workflow_run_id'],
                                 'repo_path': str(Path(run['repo_path']).resolve()), 'freedom': task.get('freedom', 'write_in_repo'),
                                 'execution_kind': task.get('execution_kind', 'headless'),
@@ -1129,6 +1131,19 @@ class WorkflowStore:
             return catalog.header_page(identifiers, load)
         from .workflow_reads import validate_run_filters
         return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, filters=filters, validator=validate_run_filters)
+
+    @layout_operation
+    def limit_hit_catalog(self) -> tuple[Any, Any]:
+        """The run catalog and the bounded loader that indexes a pending run, for the limit hit reads."""
+        from .catalog import Catalog
+        def load(identifier: str, *, _metadata_budget=None):
+            try:
+                run = self.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+            except FileNotFoundError:
+                return None
+            return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
+        load.bounded_metadata = True
+        return Catalog(self.runs, '.json', layout=self.state_layout), load
 
     @layout_operation
     def prepare_run_catalog(self) -> dict[str, Any]:
@@ -1162,6 +1177,37 @@ class WorkflowStore:
                     db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (row[0],))
                     return {"state": "preparing", "members": []}
         return {"state": "ready", "members": [{"id": r[0], "created_at": r[1], "parent": r[2], "root": r[3]} for r in rows]}
+
+    @layout_operation
+    def child_states(self, run_ids: list[str]) -> dict[str, tuple[str, str | None, str | None]]:
+        """Index state of named runs: ``ok``, ``blocked`` (needs direct inspection, with reason and code), ``missing`` (no such run) or ``unresolved``.
+
+        Unresolved means the run has no settled catalog row: absent, pending, changed on disk, or the
+        discovery pass did not complete. Only the named runs are consulted.
+        """
+        catalog = self._ownership_catalog()
+        result: dict[str, tuple[str, str | None, str | None]] = {}
+        with catalog.connect() as db:
+            catalog._discover(db)
+            values = dict(db.execute("SELECT key,value FROM state"))
+            complete = values.get("complete") == "1" and values.get("directory_mtime") == str(self.runs.stat().st_mtime_ns)
+            for run_id in run_ids:
+                row = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup'),json_extract(payload,'$.note'),json_extract(payload,'$.index_blocker') FROM entries WHERE id=?", (run_id,)).fetchone()
+                if row is None and complete and not (self.runs / f"{run_id}.json").exists():
+                    result[run_id] = ("missing", None, None)
+                    continue
+                pending = db.execute("SELECT 1 FROM pending WHERE id=?", (run_id,)).fetchone() is not None
+                known = db.execute("SELECT 1 FROM sources WHERE id=?", (run_id,)).fetchone() is not None
+                changed = row is not None and known and catalog._changed(db, run_id)
+                if changed and not pending:
+                    # A document modified in place leaves the directory untouched, so discovery would never
+                    # revisit it; queue it for the next bootstrap slice (blocked placeholders included).
+                    db.execute("INSERT OR IGNORE INTO pending VALUES (?)", (run_id,))
+                if not complete or row is None or pending or changed:
+                    result[run_id] = ("unresolved", None, None)
+                else:
+                    result[run_id] = ("blocked", row[1], row[2]) if row[0] else ("ok", None, None)
+        return result
 
     @layout_operation
     def get_run_header(self, run_id: str, *, _catalog: Any = None) -> dict[str, Any]:

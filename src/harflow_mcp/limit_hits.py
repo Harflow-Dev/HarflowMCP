@@ -40,6 +40,17 @@ def _iso(stamp: float) -> str | None:
         return None
 
 
+def bounded_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
+    """The usage-limit diagnostic fields a hit keeps, each bounded; shared with the workflow hits."""
+    kept: dict[str, Any] = {'category': CATEGORY}
+    for key, limit in _DIAGNOSTIC_TEXT.items():
+        if isinstance(diagnostic.get(key), str):
+            kept[key] = diagnostic[key][:limit]
+    if type(diagnostic.get('http_status')) is int:
+        kept['http_status'] = diagnostic['http_status']
+    return kept
+
+
 def evidence(record: Any) -> dict[str, Any] | None:
     """The side-table row for a persisted usage-limit diagnostic, else None.
 
@@ -54,12 +65,7 @@ def evidence(record: Any) -> dict[str, Any] | None:
         source, stamp = 'started_at', _stamp(record.started_at)
     if stamp is None:
         return None
-    kept: dict[str, Any] = {'category': CATEGORY}
-    for key, limit in _DIAGNOSTIC_TEXT.items():
-        if isinstance(diagnostic.get(key), str):
-            kept[key] = diagnostic[key][:limit]
-    if type(diagnostic.get('http_status')) is int:
-        kept['http_status'] = diagnostic['http_status']
+    kept = bounded_diagnostic(diagnostic)
     group = record.group if isinstance(record.group, str) else None
     title = record.title if isinstance(record.title, str) else None
     payload = {'task_id': record.task_id, 'backend': record.backend, 'requested_model': record.model,
