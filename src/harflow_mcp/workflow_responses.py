@@ -148,6 +148,78 @@ def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def run_meta(run: dict[str, Any]) -> dict[str, Any]:
+    """Lossless, untruncated values behind the run listing filters (never read from a header)."""
+    definition = run.get("definition")
+    workflow_id = None
+    if run.get("kind") != "builder" and isinstance(definition, dict) and (definition.get("workflow_id") or definition.get("name")):
+        from .workflow_references import workflow_identity
+        workflow_id = workflow_identity(definition)
+    return {"workflow_id": workflow_id, "repo_path": str(run.get("repo_path", "")),
+            "name_folded": str(run.get("name", "")).casefold(), "is_root": not run.get("parent_link")}
+
+
+# Field vocabularies for the `fields` projection. COMPACT_FIELDS is every key `compact` can emit; a
+# test keeps it in step with `compact`.
+RUN_REQUIRED_FIELDS = frozenset({"workflow_run_id", "status", "created_at", "updated_at"})
+COMPACT_FIELDS = frozenset({
+    "workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason",
+    "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling",
+    "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract",
+    "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count", "monitor_controls",
+    "resolved_from", "messages", "messages_truncated", "interaction_state", "workflow_id", "approval_summary",
+    "parent_workflow_run_id", "root_workflow_run_id", "parent_execution_id", "orchestrator_mode", "orchestrator_session_owner_run_id",
+    "pending_inputs", "pending_attention", "input_delivery_receipt", "input_source", "tree_settling", "suspended_via_root",
+    "checklist_disposition", "usage_limit_recovery", "on_demand_calls_count", "on_demand_state", "response_version", "details",
+    "progress", "input_question", "input_question_items", "question_items", "reason", "wait_reason", "failure_reason",
+    "attention_reason", "summary", "checkout_wait", "resources", "worktree", "resource_wait", "resource_waits",
+    "resource_held_waiting_for_slot", "current_stage", "child_invocations", "decision_errors"})
+# Keys a run listing header adds to `compact`, and diagnostics a placeholder header carries.
+RUN_HEADER_EXTRA_FIELDS = frozenset({"repo_path", "prompt", "prompt_truncated", "backends", "decisions", "sessions"})
+RUN_LIST_FIELDS = COMPACT_FIELDS | RUN_HEADER_EXTRA_FIELDS
+_RETAINED_DIAGNOSTICS = frozenset({"needs_direct_lookup", "index_blocker", "note", "resolved_from"})
+
+
+def run_status_fields() -> frozenset[str]:
+    """Everything a status read may carry: the compact reply, a managed summary and the full run document."""
+    from . import workflow_run_documents as documents
+    from .workflow_reads import MANAGED_SUMMARY_DERIVED, MANAGED_SUMMARY_FIELDS
+    derived = {"on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "pending_inputs", "pending_attention",
+               "interaction_state", "messages", "input_question_items", "question_items", "finished_at", "settling"}
+    return COMPACT_FIELDS | frozenset(documents.CORE) | frozenset(documents.OPTIONAL) | frozenset(MANAGED_SUMMARY_FIELDS) | frozenset(MANAGED_SUMMARY_DERIVED) | derived
+
+
+def validate_run_fields(fields: Any, vocabulary: frozenset[str], subject: str) -> frozenset[str]:
+    """Return the selected field set (always including the required identity and status fields)."""
+    from .task_reads import _unknown_names
+    accepted = ", ".join(sorted(vocabulary))
+    required = ", ".join(sorted(RUN_REQUIRED_FIELDS))
+    if not isinstance(fields, list):
+        raise ValueError(f"fields must be a list of {subject} field names, not {type(fields).__name__}; accepted: {accepted}")
+    if not fields:
+        raise ValueError(f"fields must be a nonempty list of {subject} field names; accepted: {accepted}. Identity and status fields are always included: {required}")
+    bad = [index for index, item in enumerate(fields) if not isinstance(item, str)]
+    if bad:
+        raise ValueError("fields entries must be strings; " + ", ".join(f"index {index} is {type(fields[index]).__name__}" for index in bad))
+    unknown = [item for item in fields if item not in vocabulary]
+    if unknown:
+        raise ValueError(_unknown_names(f"{subject} fields", unknown, accepted, vocabulary=set(vocabulary)) + f". Identity and status fields are always included: {required}")
+    return frozenset(fields) | RUN_REQUIRED_FIELDS
+
+
+def project_run(item: dict[str, Any], selected: frozenset[str]) -> dict[str, Any]:
+    """Select keys of an already-built reply, so values equal the unprojected reply's.
+
+    A selected field keeps its ``_truncated`` marker. While the run awaits input its actionable
+    question fields stay, and placeholder diagnostics are never dropped.
+    """
+    keep = set(selected) | _RETAINED_DIAGNOSTICS
+    keep |= {name + "_truncated" for name in selected}
+    if item.get("status") == "needs_input":
+        keep |= _ACTION_FIELDS | {"input_question_truncated", "input_decision_id", "interaction_owner", "pending_input_count"}
+    return {key: value for key, value in item.items() if key in keep}
+
+
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}

@@ -2976,7 +2976,7 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 
 @mcp.tool()
 @_task_document_errors
-async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
+async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None, workflow_id: str | None = None, repo: str | None = None, status: list[str] | None = None, since: str | None = None, before: str | None = None, title_contains: str | None = None, scope: Literal["all", "root", "nested"] | None = None, fields: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
 
     Deferred explicit run_ids and ancestor reads report preparation; preserve loaded headers
@@ -2984,13 +2984,28 @@ async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, ac
     incomplete counts, without publishing unknown placeholder outcomes. A header's optional
     resumed_at (Unix seconds) is the caller's last continuation; it is absent if never resumed,
     unlike updated_at, which changes on every write.
+
+    Optional filters narrow the page: workflow_id (stable workflow identity), repo (exact
+    recorded repo path), status (list of run statuses: pending, starting, building, running,
+    pausing, paused, needs_input, needs_attention, cancelling, completed, failed, cancelled; the
+    indexed status shown on each item), since (inclusive) and before (exclusive) ISO8601 created_at
+    bounds with timezone, title_contains (case-insensitive run name text) and scope (all, the
+    default; root; nested child runs). Runs have no group, so there is no group filter. Filters
+    cannot be combined with run_ids or related_run_id. A filtered page examines at most 2000
+    catalog rows after its cursor and never computes a filtered total (total_active_count is
+    null). When that window ends before the page fills, the reply has scan_incomplete true, any
+    matches so far, and a next_cursor after the last examined row: keep calling with it until
+    has_more is false. A cursor is bound to the filters that produced it. fields selects item
+    keys (workflow_run_id, status, created_at and updated_at are always included; while a run
+    needs_input its question fields stay); values equal the unprojected reply.
     """
-    return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
+    filters = {"workflow_id": workflow_id, "repo": repo, "status": status, "since": since, "before": before, "title_contains": title_contains, "scope": scope}
+    return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids, filters=filters, fields=fields)
 
 
 @mcp.tool()
 @_task_document_errors
-async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
+async def get_workflow_status(workflow_run_id: str, fields: list[str] | None = None) -> dict[str, Any]:
     """Read a workflow run's execution state and task associations.
 
     Child runs of Run workflow nodes report their parent and root links,
@@ -3002,9 +3017,17 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     caller liveness, advisory human Monitor availability and any persisted handover audit.
     Unknown caller identity never authorizes handover; server death alone is insufficient.
     resumed_at (Unix seconds) appears once the caller has resumed or answered the run.
+    fields selects reply keys (workflow_run_id, status, created_at and updated_at are always
+    included; while the run needs_input its question fields stay). Values equal the unprojected
+    reply, which is read first, so derived status and managed-caller summaries are unchanged.
     """
-    from .workflow_responses import compact
-    return compact(await _workflow_call("status", run_id=workflow_run_id))
+    from .workflow_responses import COMPACT_FIELDS, compact, project_run, validate_run_fields
+    try:
+        selected = validate_run_fields(fields, COMPACT_FIELDS | {"resolved_from"}, "run status") if fields is not None else None
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    result = compact(await _workflow_call("status", run_id=workflow_run_id))
+    return project_run(result, selected) if selected is not None else result
 
 
 async def _wait_workflow_full(

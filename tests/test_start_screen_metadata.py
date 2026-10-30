@@ -576,7 +576,7 @@ def test_v9_and_v10_workflow_catalogs_keep_independent_projection_freshness(work
         assert "workflow_id" not in old_header_value
         assert "finished_at" not in old_header_value
         with sqlite3.connect(old_path) as db:
-            assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ("10",)
+            assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ("11",)
             assert db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() == ("1",)
 
     current_header = storage.list_run_page(run_ids=[run["workflow_run_id"]])["items"][0]

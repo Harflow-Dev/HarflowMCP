@@ -1577,6 +1577,16 @@ request. Supported writes invalidate the catalog before source replacement, so i
 projection cannot leave stale authority ready. Derivative schema upgrades rebuild the catalog
 without rewriting historical metadata.
 
+Run history can be narrowed with `workflow_id`, `repo`, `status`, `since`/`before`,
+`title_contains` and `scope` (`all`, `root` or `nested`) on `list_workflow_run_page` and
+`workflow-list-page`; runs have no group. A filtered page examines at most 2000 catalog rows, so a
+sparse filter can return few or no items with `scan_incomplete: true` and a `next_cursor` that
+resumes after the last examined row. Keep paging until `has_more` is false; filtered pages report
+`total_active_count: null`. Filters cannot be combined with `run_ids` or `related_run_id`. Pass
+`fields` to `list_workflow_run_page`, `get_workflow_status` or `workflow-status` to receive only
+named keys (identity and status fields are always included). The exact rules are in
+[contracts.md](contracts.md#bounded-workflow-run-filters-and-field-projections).
+
 Activity initially reads the newest 100 events and tails new events from that boundary.
 Approaching within 200 points of the oldest visible activity automatically reads one older
 byte window, with a 1 MiB scan ceiling and the existing response byte ceilings. Each conversation

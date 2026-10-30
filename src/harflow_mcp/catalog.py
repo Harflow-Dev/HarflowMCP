@@ -24,9 +24,11 @@ from typing import Any, Callable
 
 from .read_metrics import span
 
-CATALOG_FILENAME = '.listing.v10.sqlite3'
+CATALOG_FILENAME = '.listing.v11.sqlite3'
 TASK_PROJECTION_VERSION = '2'
 RUN_PROJECTION_VERSION = '3'
+# A filtered listing page examines at most this many catalog rows after its cursor.
+SCAN_ROWS = 2000
 
 
 def catalog_path(directory: Path) -> Path:
@@ -250,6 +252,37 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _run_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
+    """SQL for normalized run filters over ``entries``; lossless columns come from ``run_meta``."""
+    conditions, values, meta, meta_values = [], [], [], []
+    for key, value in filters.items():
+        if key == 'since':
+            conditions.append('stamp >= ?')
+            values.append(value)
+        elif key == 'before':
+            conditions.append('stamp < ?')
+            values.append(value)
+        elif key == 'status':
+            conditions.append("json_extract(payload,'$.status') IN (" + ','.join('?' * len(value)) + ')')
+            values.extend(value)
+        elif key == 'workflow_id':
+            meta.append('workflow_id=?')
+            meta_values.append(value)
+        elif key == 'repo':
+            meta.append('repo_path=?')
+            meta_values.append(value)
+        elif key == 'title_contains':
+            meta.append('instr(name_folded,?)>0')
+            meta_values.append(value)
+        elif key == 'scope':
+            meta.append('is_root=?')
+            meta_values.append(int(value == 'root'))
+    if meta:
+        conditions.append('EXISTS (SELECT 1 FROM run_meta WHERE run_meta.id=entries.id AND ' + ' AND '.join(meta) + ')')
+        values.extend(meta_values)
+    return conditions, values
+
+
 class Catalog:
     def __init__(self, directory: Path, suffix: str, *, layout: StateLayout | None = None):
         self.state_layout = layout if layout is not None else current_owned().layout
@@ -467,14 +500,20 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS workflow_links (id TEXT PRIMARY KEY,root_workflow_run_id TEXT,parent_workflow_run_id TEXT)')
         db.execute('CREATE INDEX IF NOT EXISTS workflow_link_root ON workflow_links(root_workflow_run_id)')
         db.execute('CREATE INDEX IF NOT EXISTS workflow_link_parent ON workflow_links(parent_workflow_run_id)')
+        # Lossless run filter columns, independent of header truncation.
+        db.execute('CREATE TABLE IF NOT EXISTS run_meta (id TEXT PRIMARY KEY,workflow_id TEXT,repo_path TEXT NOT NULL,name_folded TEXT NOT NULL,is_root INTEGER NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_meta_workflow ON run_meta(workflow_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS run_meta_repo ON run_meta(repo_path)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
         # Version 9 adds lossless bounded group matching independently of display
-        # truncation; version 10 adds the indexed run-tree links. Older derivative
-        # projections rebuild through bounded discovery.
-        if version != ('10',):
+        # truncation; version 10 adds the indexed run-tree links; version 11 adds the
+        # lossless run filter columns. Older derivative projections rebuild through
+        # bounded discovery.
+        if version != ('11',):
             db.execute('DELETE FROM workflow_links')
+            db.execute('DELETE FROM run_meta')
             db.execute('DELETE FROM task_groups')
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
@@ -485,14 +524,14 @@ class Catalog:
             db.execute('DELETE FROM pending')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','10')")
+            db.execute("INSERT INTO state VALUES ('schema_version','11')")
         if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != (TASK_PROJECTION_VERSION,):
             for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('task_projection_version',?)", (TASK_PROJECTION_VERSION,))
         if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != (RUN_PROJECTION_VERSION,):
-            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links'):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links', 'run_meta'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('run_projection_version',?)", (RUN_PROJECTION_VERSION,))
@@ -562,6 +601,11 @@ class Catalog:
                 db.execute('DELETE FROM callers WHERE id=?', (identifier,))
                 header.update(status='unknown', needs_direct_lookup=True, index_blocker='unsupported_caller_identity', note='caller identity exceeds bounded index; direct inspection required')
                 active = True
+        run_meta = header.pop('_run_meta', None)
+        if self.suffix == '.json' and run_meta is not None and not header.get('needs_direct_lookup'):
+            db.execute('INSERT OR REPLACE INTO run_meta VALUES (?,?,?,?,?)', (identifier, run_meta['workflow_id'], run_meta['repo_path'], run_meta['name_folded'], int(run_meta['is_root'])))
+        elif self.suffix == '.json':
+            db.execute('DELETE FROM run_meta WHERE id=?', (identifier,))
         if self.suffix == '.json' and not header.get('needs_direct_lookup'):
             links = (header.get('root_workflow_run_id') or None, header.get('parent_workflow_run_id') or None)
             db.execute('INSERT OR REPLACE INTO workflow_links VALUES (?,?,?)', (identifier, *links))
@@ -573,6 +617,9 @@ class Catalog:
             db.execute('INSERT INTO task_groups VALUES (?,?)', (identifier, group))
         session_id = header.get('session_id')
         header = bound_header(header)
+        if self.suffix == '.json' and header.get('needs_direct_lookup'):
+            # A budget placeholder is unknown, so it must not keep filter metadata.
+            db.execute('DELETE FROM run_meta WHERE id=?', (identifier,))
         db.execute("INSERT INTO entries VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stamp=CASE WHEN json_extract(entries.payload,'$.needs_direct_lookup')=1 THEN excluded.stamp ELSE entries.stamp END,active=excluded.active,session=excluded.session,payload=excluded.payload",
                    (identifier, stamp, int(active), session_id, json.dumps(header, ensure_ascii=True, separators=(',', ':'))))
         generation = db.execute("SELECT value FROM state WHERE key='scan_generation'").fetchone()
@@ -604,7 +651,7 @@ class Catalog:
         assert_owned(self.state_layout)
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
-        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links'):
+        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links', 'run_meta'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:
@@ -717,7 +764,7 @@ class Catalog:
         # Reconcile every projection namespace against the verified discovery.
         stale = db.execute("""WITH projected AS (
             SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers UNION SELECT id FROM task_groups
-            UNION SELECT run_id AS id FROM checkout_tasks
+            UNION SELECT run_id AS id FROM checkout_tasks UNION SELECT id FROM run_meta
             UNION SELECT json_extract(payload,'$.workflow_run_id') AS id FROM associations
         ) SELECT id FROM projected WHERE id IS NOT NULL
           AND id NOT IN (SELECT id FROM seen WHERE generation=?)""", (generation,))
@@ -791,9 +838,13 @@ class Catalog:
 
     @layout_operation
     def page(self, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None], *, limit: int = PAGE_LIMIT,
-             cursor: str | None = None, active_only: bool = False, session_id: str | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
-        from .task_reads import validate_filters
-        filters = validate_filters(filters or {})
+             cursor: str | None = None, active_only: bool = False, session_id: str | None = None, filters: dict[str, Any] | None = None,
+             validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
+        if validator is None:
+            from .task_reads import validate_filters as validator
+        filters = validator(filters or {})
+        # Run filters (some cannot use an index) examine a bounded window of rows per page.
+        windowed = self.suffix == '.json' and bool(filters)
         if type(limit) is not int or not 1 <= limit <= PAGE_LIMIT:
             raise ValueError('limit must be 1–100')
         if not isinstance(active_only, bool) or session_id is not None and (not isinstance(session_id, str) or len(session_id) > 256):
@@ -817,10 +868,17 @@ class Catalog:
             pending = self.bootstrap(db, loader)
             incomplete = db.execute("SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1").fetchone() is not None
             conditions, values = [], []
+            scoped, scoped_values = [], []
             if session_id is not None:
                 conditions.append('session=?')
                 values.append(session_id)
-            for key, value in filters.items():
+                scoped.append('session=?')
+                scoped_values.append(session_id)
+            if windowed:
+                filter_conditions, filter_values = _run_filter_conditions(filters)
+                conditions.extend(filter_conditions)
+                values.extend(filter_values)
+            for key, value in ([] if windowed else filters.items()):
                 if key == 'predecessor_task_id':
                     conditions.append("(json_extract(payload,'$.parent_task_id') = ? OR json_extract(payload,'$.continuation_of_task_id') = ?)")
                     values.extend((value, value))
@@ -838,20 +896,42 @@ class Catalog:
                     conditions.append("json_extract(payload,'$." + field + "') = ?")
                     values.append(value)
             base = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-            active_count = db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if conditions else ' WHERE active=1'), values).fetchone()[0]
+            # Filtered run pages never compute a filtered total (it would scan the whole catalog).
+            active_count = None if windowed else db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if conditions else ' WHERE active=1'), values).fetchone()[0]
             count_values = list(values)
             root_counts = db.execute("SELECT COUNT(*),COALESCE(SUM(json_extract(payload,'$.status') IN ('needs_attention','needs_input')),0) FROM entries WHERE active=1 AND json_extract(payload,'$.parent_workflow_run_id') IS NULL").fetchone()
             counts = {'total_active_count': active_count, 'total_active_root_count': root_counts[0], 'total_attention_root_count': root_counts[1], 'counts_complete': not pending and not incomplete}
             if pending and not active_only:
                 counts.update(total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': True, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **counts}
+                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': True, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **({'scan_incomplete': False} if windowed else {}), **counts}
             if active_only:
                 conditions.append('active=1')
+                scoped.append('active=1')
             if boundary is not None:
-                conditions.append('(stamp < ? OR (stamp = ? AND id < ?))')
-                values.extend((boundary[0], boundary[0], boundary[1]))
+                # A row-value bound seeks the (stamp, id) index on both columns, so many equal
+                # stamps never widen the scanned range.
+                conditions.append('(stamp,id) < (?,?)')
+                values.extend(boundary)
+                scoped.append('(stamp,id) < (?,?)')
+                scoped_values.extend(boundary)
+            window_end, rows_beyond, where_scope = None, False, ''
+            if windowed:
+                # The window is the next SCAN_ROWS rows in keyset order that satisfy the scope
+                # (active_only, session, cursor) before any filter applies.
+                where_scope = ' WHERE ' + ' AND '.join(scoped) if scoped else ''
+                edge = db.execute('SELECT stamp,id FROM entries' + where_scope + ' ORDER BY stamp DESC,id DESC LIMIT 2 OFFSET ?', (*scoped_values, SCAN_ROWS - 1)).fetchall()
+                if edge:
+                    window_end, rows_beyond = edge[0], len(edge) > 1
             where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-            rows = db.execute('SELECT id,stamp,payload FROM entries' + where + ' ORDER BY stamp DESC,id DESC LIMIT ?', (*values, limit + 1)).fetchall()
+            if windowed:
+                # Isolate the candidate window first (scope and cursor bounds only), so no filter
+                # can replace its index bounds; filters then apply to at most SCAN_ROWS rows.
+                window = 'SELECT id AS wid,stamp AS wstamp FROM entries' + where_scope + ' ORDER BY stamp DESC,id DESC LIMIT ?'
+                outer = ' WHERE ' + ' AND '.join(filter_conditions) if filter_conditions else ''
+                rows = db.execute('SELECT id,stamp,payload FROM (' + window + ') JOIN entries ON entries.id=wid' + outer + ' ORDER BY wstamp DESC,wid DESC LIMIT ?',
+                                  (*scoped_values, SCAN_ROWS, *filter_values, limit + 1)).fetchall()
+            else:
+                rows = db.execute('SELECT id,stamp,payload FROM entries' + where + ' ORDER BY stamp DESC,id DESC LIMIT ?', (*values, limit + 1)).fetchall()
             items, used, last = [], 512, None
             for identifier, stamp, payload in rows[:limit]:
                 previous = last
@@ -884,11 +964,18 @@ class Catalog:
                 last = (identifier, stamp)
             more = len(rows) > len(items)
             following = cursor if pending and more and last is None else None
+            def encode(identifier, stamp):
+                return base64.urlsafe_b64encode(json.dumps({'version': 1, 'scope': scope, 'id': identifier, 'stamp': stamp}, separators=(',', ':')).encode()).decode()
             if more and last is not None:
-                following = base64.urlsafe_b64encode(json.dumps({'version': 1, 'scope': scope, 'id': last[0], 'stamp': last[1]}, separators=(',', ':')).encode()).decode()
-            counts['total_active_count'] = db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if count_values else ' WHERE active=1'), count_values).fetchone()[0]
+                following = encode(*last)
+            scan_incomplete = False
+            if windowed and not more and rows_beyond:
+                # The window ended before the end of history: continue after the last examined row.
+                # Only a page that did not fill is scan_incomplete; a full page just has more.
+                scan_incomplete, more, following = len(items) < limit, True, encode(window_end[1], window_end[0])
+            counts['total_active_count'] = None if windowed else db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if count_values else ' WHERE active=1'), count_values).fetchone()[0]
             refreshed_roots = db.execute("SELECT COUNT(*),COALESCE(SUM(json_extract(payload,'$.status') IN ('needs_attention','needs_input')),0) FROM entries WHERE active=1 AND json_extract(payload,'$.parent_workflow_run_id') IS NULL").fetchone()
             counts.update(total_active_root_count=refreshed_roots[0], total_attention_root_count=refreshed_roots[1])
             if pending or incomplete:
                 counts.update(counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-            return {'items': items, 'next_cursor': following, 'has_more': more, 'bootstrap_pending': pending, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **counts}
+            return {'items': items, 'next_cursor': following, 'has_more': more, 'bootstrap_pending': pending, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **({'scan_incomplete': scan_incomplete} if windowed else {}), **counts}

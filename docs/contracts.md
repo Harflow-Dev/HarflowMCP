@@ -525,7 +525,7 @@ Private optional `finished_at_sequence` is a nonnegative exact integer witness m
 Older writers invalidate completion by advancing sequence alone. Reads expose unknown
 without rewriting state; new bookkeeping cannot recertify stale dates, while a fresh
 terminal transition records new evidence. Root and child creation initialize null with
-witness zero. Task projection 2 and run projection 3 use `.listing.v10.sqlite3`, preserving
+witness zero. Task projection 2 and run projection 3 use `.listing.v11.sqlite3`, preserving
 older derivative namespaces and their sidecars while retaining the shared lock.
 Optional `workflow_id` derives only from the pinned run definition; modern IDs identify
 definition generations and distinguish delete/recreate without matching the current
@@ -585,7 +585,7 @@ flags. Native logical copies reference their transport contribution and set both
 unless separately proven disjoint. The nested `accounting.additive` flag qualifies token scope. See
 [backend accounting qualification](backend-cli-facts.md#durable-execution-accounting-qualification).
 
-The separate disposable `.statistics.v1.sqlite3` projection leaves listing v10 unchanged. Each
+The separate disposable `.statistics.v1.sqlite3` projection leaves listing v11 unchanged. Each
 foreground call classifies at most 100 metadata documents using the existing metadata-byte budget;
 there is no detached preparer. Discovery caps raw directory names at 100000 and candidate task/
 run/ownership documents at 10000. A two-second foreground deadline covers enumeration, reads,
@@ -955,6 +955,66 @@ as duplicates.
 The new fields, `data` members and error codes are additive; unknown optional fields are ignored, and
 the `ctl-batch.json` fixture shows a prefix row. The exception is the documented ctl code change:
 `unknown_workflow_run` replaces `workflow_error` for a missing run.
+
+### Bounded workflow run filters and field projections
+
+`list_workflow_run_page` (MCP) and `harflow-ctl workflow-list-page` accept optional filters; every
+one is additive and an older engine rejects an unknown ctl flag with a usage error. Runs have no
+group, so there is no `group` filter.
+
+| Filter | ctl flag | Meaning |
+| --- | --- | --- |
+| `workflow_id` | `--workflow-id` | Stable workflow identity of the run (the `workflow_id` header field; legacy runs use their derived `legacy-` identity). |
+| `repo` | `--repo` | Exact `repo_path` recorded for the run. |
+| `status` | `--status a,b` | List of run statuses: `pending`, `starting`, `building`, `running`, `pausing`, `paused`, `needs_input`, `needs_attention`, `cancelling`, `completed`, `failed`, `cancelled`. Matches the indexed status shown on each item, which is the stored status, not a status derived from child runs. |
+| `since`, `before` | `--since`, `--before` | `created_at` bounds as ISO8601 timestamps with a time zone: `since` inclusive, `before` exclusive. |
+| `title_contains` | `--title-contains` | Case-folded substring of the run name. |
+| `scope` | `--scope` | `all` (default, the unfiltered behaviour), `root` (runs without a parent) or `nested` (child runs). |
+
+Filters combine with AND, are validated before any read (unknown names and statuses report
+did-you-mean hints), and cannot be combined with `run_ids` or `related_run_id`. MCP refuses these
+with invalid params; `harflow-ctl` reports `workflow_error`. `active_only` still applies. Filter values come from a lossless `run_meta`
+side table of the listing catalog, never from a truncated header.
+
+Filtered pages are bounded by a scan window. A page examines at most 2000 catalog rows after its
+cursor, in `(created_at DESC, id DESC)` order, and applies the filters inside that window. When the
+window ends before the end of history, the reply has `has_more: true` and a `next_cursor` positioned
+at the last examined row, so a sparse filter makes progress on every call; keep calling until
+`has_more` is false. `scan_incomplete: true` additionally means the page did not fill (it carries
+the matches found so far); a page that fills, wherever its last match sits, has
+`scan_incomplete: false` and still carries `has_more` and the cursor. A page length, including zero, never means the end of history.
+Filtered replies carry `scan_incomplete` (absent on unfiltered replies) and report
+`total_active_count: null`: filtered totals are not computed. `total_active_root_count`,
+`total_attention_root_count` and `counts_complete` keep their unfiltered meaning. A cursor is bound
+to the filters that produced it; one reused with different filters, or between a filtered and an
+unfiltered listing, is refused as an invalid cursor. A catalog that is still indexing reports
+`bootstrap_pending` and its usual state fields exactly as an unfiltered page does.
+
+Runs whose header could not be built (no `run_meta`, status `unknown`) can match only `since` and
+`before`, which use the indexed creation stamp; `history_incomplete` signals that such runs exist.
+
+A workflow-managed builder or orchestrator that lists runs sees its own run only; the filters are
+evaluated against that run's own metadata (including `repo`), so a match returns a page of one and a
+mismatch an empty page. Worker nodes remain refused.
+
+`fields` (list of field names; ctl `--fields a,b`) selects keys after the reply is fully built, so
+values equal the unprojected reply and there is no header-only shortcut. `workflow_run_id`,
+`status`, `created_at` and `updated_at` are always included, a selected field keeps its
+`<field>_truncated` marker, placeholder diagnostics (`needs_direct_lookup`, `index_blocker`, `note`)
+are never dropped, and while a run is `needs_input` its question fields (`input_question`,
+`input_question_items`, `question_items`, `pending_inputs`, `pending_attention`) and the fields
+needed to answer (`input_decision_id`, `interaction_owner`, `pending_input_count`) stay. A page with
+`related_headers` keeps each item's `parent_workflow_run_id` and `orchestrator_session_owner_run_id`. Unknown names
+are refused with the accepted list and a did-you-mean hint. On `list_workflow_run_page` it projects
+`items` and `related_headers` from the listing header vocabulary; on `get_workflow_status` it
+projects the compact status, validated against the compact status fields (a managed caller's summary is projected the same way); on
+`harflow-ctl workflow-status` it projects the reply's top-level keys (not with `--monitor-view`).
+Omitting `fields` leaves every reply unchanged.
+
+The listing catalog is now `.listing.v11.sqlite3` (schema version 11, adding `run_meta`). Task
+projection 2 and run projection 3 are unchanged; older engines keep their own `.listing.v10`
+namespace and sidecars, and the new catalog rebuilds through bounded bootstrap. No `contracts/v1`
+fixture changes.
 
 ## Provider failure diagnostics
 

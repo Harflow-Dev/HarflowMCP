@@ -1101,6 +1101,8 @@ class WorkflowStore:
 
     def _catalog_run_header(self, run: dict[str, Any]) -> dict[str, Any]:
         header = self.run_header(run)
+        from .workflow_responses import run_meta
+        header['_run_meta'] = run_meta(run)
         header['_checkout'] = [{'task_id': task['task_id'], 'workflow_run_id': run['workflow_run_id'],
                                 'repo_path': str(Path(run['repo_path']).resolve()), 'freedom': task.get('freedom', 'write_in_repo'),
                                 'execution_kind': task.get('execution_kind', 'headless'),
@@ -1112,7 +1114,7 @@ class WorkflowStore:
         return header
 
     @layout_operation
-    def list_run_page(self, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, run_ids: list[str] | None = None) -> dict[str, Any]:
+    def list_run_page(self, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, run_ids: list[str] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         from .catalog import Catalog
         def load(identifier: str, *, _metadata_budget=None):
             try:
@@ -1125,7 +1127,8 @@ class WorkflowStore:
         if run_ids is not None:
             identifiers = [_identifier(identifier) for identifier in run_ids]
             return catalog.header_page(identifiers, load)
-        return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only)
+        from .workflow_reads import validate_run_filters
+        return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, filters=filters, validator=validate_run_filters)
 
     @layout_operation
     def prepare_run_catalog(self) -> dict[str, Any]:

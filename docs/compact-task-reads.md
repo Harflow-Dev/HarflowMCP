@@ -87,7 +87,7 @@ implementation machine, with zero metadata reads and zero log reads. This is a
 local reproducibility sample, not a latency guarantee or a cold-bootstrap claim.
 
 Group matching uses a separate bounded index of the exact label, even when the
-displayed header is shortened. The v10 derivative catalog rebuilds existing history
+displayed header is shortened. The v11 derivative catalog rebuilds existing history
 through the usual bounded bootstrap; retry while `bootstrap_pending` is true.
 
 ## Batched full status reads
@@ -164,8 +164,8 @@ can establish only that it is too old for that window; it must never supply its 
 date. Recent, future, invalid or contradictory metadata retains uncertainty.
 
 Task projection version 2 and workflow projection version 3 rebuild existing headers
-through bounded bootstrap without rewriting authoritative history. The `.listing.v10.sqlite3`
-derivative namespace coexists with older engines' v9 caches and sidecars, sharing the
+through bounded bootstrap without rewriting authoritative history. The `.listing.v11.sqlite3`
+derivative namespace coexists with older engines' v9 and v10 caches and sidecars, sharing the
 existing `.listing.lock`. Recovery removes only the current derivative namespace. Completion, identity,
 classification and settlement metadata survive normal 2 KiB header pressure. A header
 whose required evidence cannot fit retains a direct-lookup marker and makes the catalog

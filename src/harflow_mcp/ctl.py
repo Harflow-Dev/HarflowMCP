@@ -433,6 +433,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
+    from .workflow_reads import RUN_SCOPES, RUN_STATUSES
     for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action == "recover":
@@ -463,6 +464,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--monitor-view", action="store_true")
             wp.add_argument("--snapshot", action="store_true")
             wp.add_argument("--cursor")
+            wp.add_argument("--fields", help="comma-separated top-level reply fields; workflow_run_id, status, created_at and updated_at are always included (not with --monitor-view)")
         if action == "detail":
             wp.add_argument("--monitor-view", action="store_true")
             wp.add_argument("--view", required=True, help="Lossless detail view, including on_demand_nodes, on_demand_calls or on_demand_state")
@@ -501,6 +503,15 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument('--active-only', action='store_true')
             wp.add_argument('--related-run-id')
             wp.add_argument('--run-ids')
+            wp.description = "Newest-first run headers. Filters (not combinable with --run-ids or --related-run-id) examine at most 2000 catalog rows per page: a reply with scan_incomplete true carries a next_cursor to continue from the last examined row. Filtered replies report total_active_count null."
+            wp.add_argument('--workflow-id', help='stable workflow identity of the run')
+            wp.add_argument('--repo', help='exact recorded repository path of the run')
+            wp.add_argument('--status', help='comma-separated run statuses (' + ', '.join(RUN_STATUSES) + ')')
+            wp.add_argument('--since', help='created at or after this ISO8601 timestamp with timezone')
+            wp.add_argument('--before', help='created before this ISO8601 timestamp with timezone')
+            wp.add_argument('--title-contains', dest='title_contains', help='case-insensitive text within the run name')
+            wp.add_argument('--scope', choices=RUN_SCOPES, help='all (default), root runs only, or nested child runs only')
+            wp.add_argument('--fields', help='comma-separated run header fields; workflow_run_id, status, created_at and updated_at are always included')
         if action == "recover":
             reason_group = wp.add_mutually_exclusive_group(required=True)
             reason_group.add_argument("--reason")
