@@ -872,7 +872,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         # exactly this choice rather than recomputing a different source.
         from .workflow_child_sessions import select
         try:
-            selection = select(store, supervisor.run(), node, activation, token)
+            selection = await asyncio.to_thread(select, store, supervisor.run(), node, activation, token)
         except w.WorkflowError as exc:
             invocation["child_session_refusal"] = str(exc)
             supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_session_refused", str(exc))

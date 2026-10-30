@@ -44,11 +44,14 @@ async def test_three_crashed_runs_resume_original_conversations(registry, tmp_pa
         return kwargs
     monkeypatch.setattr(registry, '_launch_resume', launch)
     for source in sources:
-        assert not registry.session_has_live_run(source.session_id)
+        # Observation is read-only: dead generations remain claimed until a mutation explicitly
+        # admits recovery under the session lock.
+        assert registry.session_has_live_run(source.session_id)
+        assert task_supervision.read_launch(registry.log_dir, source.task_id)['state'] == 'spawned'
         await registry.resume_record(source, 'continue', task_id=f'resume-{source.task_id}')
     assert [value['session_id'] for value in launches] == [source.session_id for source in sources]
     assert [value['parent_task_id'] for value in launches] == [source.task_id for source in sources]
-    assert all(task_supervision.read_launch(registry.log_dir, source.task_id)['state'] == 'spawned' for source in sources)
+    assert all(task_supervision.read_launch(registry.log_dir, source.task_id)['state'] == 'settled' for source in sources)
 
 
 @pytest.mark.parametrize('owner,agent', [('dead', 'alive'), ('dead', 'undecidable'), ('undecidable', 'dead'), ('alive', 'dead')])

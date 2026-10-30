@@ -542,7 +542,10 @@ class State:
         except Exception:
             log.debug("could not read protected follow-up tasks", exc_info=True)
         self.pinned = pinned
-        self.receipts = [r for r in reservations(self.log_dir) if r["state"] not in ("settled", "not_started")]
+        from .task_supervision import scan_launches
+        launch_scan = scan_launches(self.log_dir)
+        self.refused.extend(launch_scan.refusals)
+        self.receipts = [r for r in launch_scan.entries if r["state"] not in ("settled", "not_started") or r.get("reconciliation_pending")]
         self.continuations: list[dict[str, Any]] = []
         launching = {r["task_id"] for r in self.receipts}
         for path in self.log_dir.glob("*.continuation.json"):

@@ -53,6 +53,11 @@ Version 0.0.5 is a pre-release. [Harflow](https://github.com/Harflow-Dev/Harflow
 Detached task owners preserve output capture and live input across MCP server restarts.
 Tasks can take turns on a named, exclusive resource (a simulator, a device, a database) with `resources`; a waiting task is acknowledged at once and reports `waiting_for_resources` until it spawns. A task can also run in its own linked Git worktree with `worktree`, leaving your checkout untouched. Workflows can declare run and node resource scopes and share one root-run worktree across nodes and linked child runs. See [resources and worktrees](docs/resources-and-worktrees.md). Final review summaries and workflow plans receive task-identifiable files discoverable through task artifacts, including read-only runs. Child workflows receive pinned parent specifications throughout their nodes. Every task also gets scratch folders shared across its resume chain and its group (`HARFLOW_CHAIN_SCRATCH`, `HARFLOW_GROUP_SCRATCH`), so outputs survive between runs; see [shared scratch](docs/shared-scratch.md).
 
+Confirmed-dead detached launches reconcile interruption evidence and resource/session claims during
+maintenance or resume admission. Missing or uncertain process generations stay protected; one damaged
+launch receipt reports a per-task refusal while unrelated discovery continues. Human `launch-settle`
+uses the same death checks. See [abandoned launch recovery](docs/supervision.md#dead-executions-and-disk-capacity).
+
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
 Task status distinguishes the dispatching server, execution owner and responding server.
 A normal attachment to a task launched by this server is not recovered; another observer or missing

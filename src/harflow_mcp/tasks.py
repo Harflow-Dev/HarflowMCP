@@ -1714,6 +1714,8 @@ class TaskRegistry:
             async with control.session_lock(
                 self._log_dir, parent.session_id, timeout=SESSION_LOCK_TIMEOUT_SECONDS
             ):
+                from .task_recovery import recover_abandoned
+                await asyncio.to_thread(recover_abandoned, self._log_dir, held_session=parent.session_id)
                 if self.session_has_live_run(parent.session_id):
                     raise SessionBusyError(
                         f"session {parent.session_id} already has a running task, or is held by a takeover in "
@@ -4195,14 +4197,16 @@ class TaskRegistry:
         # `covered` is what the cascade passes have already processed (None when a pass reported none).
         covered = self._covered_by(result)
         requested: list[str] = []
+        launch_refusals: dict[str, Any] = {}
         handled: set[str] = set()
         for _ in range(CASCADE_MAX_ROUNDS):
             # A pending launch can sit under a recorded intermediate (a task that already has a record),
             # so the walk is seeded with every recorded descendant the cascade covers.
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             seeds = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
-            pending = [item for item in await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(seeds))
-                       if item not in handled]
+            descendant_scan = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(seeds))
+            launch_refusals.update(getattr(descendant_scan, "refusals", {}))
+            pending = [item for item in descendant_scan if item not in handled]
             # A pending launch that spawns between the recorded snapshot above and the pending scan is in
             # neither: it is no longer pending and was not recorded when the seeds were taken. Convergence is
             # therefore decided from a view taken after the scan, and a launch that became a task at any
@@ -4225,6 +4229,8 @@ class TaskRegistry:
             result = self._merge_cascade_results(result, latest)
         if handled:
             result = {**result, "pending_cancel_requested": requested}
+        if launch_refusals:
+            result = {**result, "launch_refusals": list(launch_refusals.values()), "history_incomplete": True, "cascade_incomplete": True}
         return {key: value for key, value in result.items() if key != _COVERED_KEY}
 
     @staticmethod
@@ -4575,6 +4581,8 @@ class TaskRegistry:
             async with control.session_lock(
                 self._log_dir, record.session_id, timeout=SESSION_LOCK_TIMEOUT_SECONDS
             ):
+                from .task_recovery import recover_abandoned
+                await asyncio.to_thread(recover_abandoned, self._log_dir, held_session=record.session_id)
                 if self.session_has_live_run(record.session_id):
                     raise SessionBusyError(
                         f"session {record.session_id} already has a running task, or is held by a takeover in "
@@ -5495,6 +5503,13 @@ def _maintain(log_dir: Path) -> Any:
     The reaper only ever removes entries whose owner is provably settled or never started, and
     waiting launches run it themselves, so a failure here is logged and never changes the sweep.
     """
+    try:
+        from .task_recovery import recover_abandoned
+        recover_abandoned(log_dir)
+    except StateOwnershipError:
+        raise
+    except Exception:
+        log.debug("abandoned launch recovery pass failed", exc_info=True)
     swept = retention.maybe_sweep(log_dir)
     try:
         from . import task_resources

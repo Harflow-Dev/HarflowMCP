@@ -1866,7 +1866,12 @@ async def list_tasks(
     entries = [task.brief() for task in live]
     entries.extend(_reg().recovered_briefs(exclude={task.task_id for task in live}))
     known = {entry["task_id"] for entry in entries}
-    entries.extend(entry for entry in await asyncio.to_thread(task_resources.pending_views, _reg().log_dir) if entry["task_id"] not in known)
+    pending_entries = await asyncio.to_thread(task_resources.pending_views, _reg().log_dir)
+    refusals = {entry["task_id"]: entry["launch_refusal"] for entry in pending_entries if entry.get("launch_refusal")}
+    for entry in entries:
+        if entry["task_id"] in refusals:
+            entry["launch_refusal"] = refusals[entry["task_id"]]
+    entries.extend(entry for entry in pending_entries if entry["task_id"] not in known)
     if waiting_for_resource is not None:
         entries = [entry for entry in entries if entry.get("pending_launch") and entry.get("launch_state") == "waiting_for_resources"
                    and waiting_for_resource in (entry.get("resources") or {}).get("names", [])]

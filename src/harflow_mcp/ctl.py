@@ -271,16 +271,17 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     settle_p = sub.add_parser(
         "launch-settle",
-        help="settle a launch whose owner died after it was granted and left no task record "
-        "(for a person, never an agent)",
-        description="For a launch that has no task record and whose owner is confirmed dead, after its resources or "
-        "worktree were granted: whether the agent started cannot be known. Releases the launch's reservations, its "
-        "session claim and its worktree usage, and marks queued follow-ups delivery_unknown (back in the queue only "
-        "when the agent provably never started). Run it only after checking that no agent for this task is running.")
+        help="settle a launch with verified dead owner and agent identities (for a person, never an agent)",
+        description="Uses the same conservative recovery as maintenance. Requires durable owner and agent "
+        "process-generation evidence and confirms both dead. A human confirmation bypasses only a tasks-directory "
+        "binding mismatch, never live, unknown or missing agent identity. Proven pre-spawn worktree failures "
+        "and waiting-for-resource failures may settle without an agent record. A fully terminal launch with a "
+        "matching task record can repair only its directory binding (binding_repaired), preserving outcomes. "
+        "Terminal launches without agent identity cannot be rebound. No process is signalled and no exit code is inferred.")
     settle_p.add_argument("--task-id", required=True)
     settle_p.add_argument(
         "--confirm-uncertain", action="store_true", required=True,
-        help="required: you have checked that no agent for this task is running")
+        help="required: confirm directory-binding recovery; process death evidence is still mandatory")
     settle_p.add_argument("--json", action="store_true")
 
     worktree_list_p = sub.add_parser("worktree-list", help="list task and workflow worktrees Harflow created, with their users")
@@ -1273,7 +1274,7 @@ def _cmd_launch_settle(args: argparse.Namespace) -> int:
         result = id_resolution.echo(task_resources.settle_uncertain(default_log_dir(), task_id), primary=resolution)
     except _StatusReadRefused as exc:
         return _fail(args, exc.code, exc.message, exc.data)
-    except (task_resources.LaunchSettleRefused, resources.ResourceError) as exc:
+    except (task_resources.LaunchSettleRefused, resources.ResourceError, store.TaskDocumentError) as exc:
         return _fail(args, exc.code, str(exc))  # a corrupt, repairing or locked ledger settles nothing
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))

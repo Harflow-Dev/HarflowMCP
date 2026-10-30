@@ -119,6 +119,12 @@ class ResourceWaitCancelled(ResourceError):
     code = "resource_wait_cancelled"
 
 
+class ResourceOwnerMismatch(ResourceError):
+    """A task recovery receipt named another owner's reservation."""
+
+    code = "resource_owner_mismatch"
+
+
 class UnknownReservation(ResourceError):
     code = "unknown_reservation"
 
@@ -664,6 +670,20 @@ class ResourceLedger:
         validate_reservation_id(reservation_id)
 
         def action(transaction: _Transaction) -> str:
+            outcome = transaction.release(reservation_id)
+            transaction.grant_pass()
+            return outcome
+
+        return self._transact(action)
+
+    def release_owned_task(self, reservation_id: str, task_id: str) -> str:
+        """Release only this task's entry, checking ownership in the same leaf transaction."""
+        validate_reservation_id(reservation_id)
+
+        def action(transaction: _Transaction) -> str:
+            raw = transaction.find(reservation_id)
+            if raw is not None and (raw["owner"]["kind"] != "task" or raw["owner"].get("task_id") != task_id):
+                raise ResourceOwnerMismatch(f"reservation {reservation_id} is not owned by task {task_id}; recovery retains its claims")
             outcome = transaction.release(reservation_id)
             transaction.grant_pass()
             return outcome

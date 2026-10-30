@@ -9,7 +9,6 @@ from harflow_mcp import followups, inbox, server, store, task_resources, task_su
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.state_ownership import state_session
 from harflow_mcp.tasks import TaskRegistry
-from mcp.shared.exceptions import MCPError
 
 
 @pytest.fixture
@@ -80,19 +79,19 @@ def test_unrelated_terminal_device_drift_does_not_block_session_liveness(owned_l
 
 
 @pytest.mark.parametrize("state", ["reserved", "claimed", "waiting_for_resources", "granted", "spawned"])
-def test_each_unresolved_state_still_refuses_device_drift(owned_log_dir, state):
-    _write_receipt(owned_log_dir, "c" * 32, state)
+def test_each_unresolved_state_accepts_legacy_inode_after_device_drift(owned_log_dir, state):
+    task_id = "c" * 32
+    _write_receipt(owned_log_dir, task_id, state)
 
-    with pytest.raises(store.TaskDocumentError, match="Incompatible task launch reservation"):
-        store.live_session_ids(owned_log_dir)
+    assert task_supervision.read_launch(owned_log_dir, task_id)["state"] == state
+    assert task_supervision.reservations(owned_log_dir)[0]["task_id"] == task_id
 
 
-def test_direct_task_launch_read_remains_strict_for_terminal_device_drift(owned_log_dir):
+def test_direct_task_launch_read_accepts_legacy_terminal_device_drift(owned_log_dir):
     task_id = "d" * 32
     _write_receipt(owned_log_dir, task_id, "settled")
 
-    with pytest.raises(store.TaskDocumentError, match="Incompatible task launch reservation"):
-        task_supervision.read_launch(owned_log_dir, task_id)
+    assert task_supervision.read_launch(owned_log_dir, task_id)["state"] == "settled"
 
 
 def test_exact_identity_terminal_receipt_remains_accepted(owned_log_dir):
@@ -105,7 +104,7 @@ def test_exact_identity_terminal_receipt_remains_accepted(owned_log_dir):
     assert task_supervision.reservations(owned_log_dir)[0]["task_id"] == task_id
 
 
-def test_historical_terminal_receipt_must_keep_exact_root_and_inode(owned_log_dir):
+def test_launch_scan_isolates_root_and_inode_mismatches(owned_log_dir):
     info = owned_log_dir.stat()
     invalid = [
         {"root": str(owned_log_dir.parent / "elsewhere")},
@@ -114,19 +113,22 @@ def test_historical_terminal_receipt_must_keep_exact_root_and_inode(owned_log_di
     for index, changes in enumerate(invalid):
         task_id = f"e{index}".ljust(32, "e")
         _write_receipt(owned_log_dir, task_id, "settled", **changes)
-        with pytest.raises(store.TaskDocumentError, match="Incompatible task launch reservation"):
-            task_supervision.reservations(owned_log_dir)
+        scan = task_supervision.scan_launches(owned_log_dir)
+        assert scan.entries == []
+        assert task_id in scan.refusals
+        assert scan.refusals[task_id].code in {"root_mismatch", "identity_mismatch"}
         (owned_log_dir / f"{task_id}.launch.json").unlink()
 
 
 @pytest.mark.parametrize("identity", [lambda dev, ino: [True, ino], lambda dev, ino: [dev + 1.0, ino], lambda dev, ino: [dev + 1]])
-def test_historical_terminal_receipt_requires_two_exact_integer_identity_fields(owned_log_dir, identity):
+def test_launch_scan_reports_malformed_legacy_directory_identity(owned_log_dir, identity):
     info = owned_log_dir.stat()
     task_id = "f" * 32
     _write_receipt(owned_log_dir, task_id, "not_started", directory_identity=identity(info.st_dev, info.st_ino))
 
-    with pytest.raises(store.TaskDocumentError, match="Incompatible task launch reservation"):
-        task_supervision.reservations(owned_log_dir)
+    scan = task_supervision.scan_launches(owned_log_dir)
+    assert scan.entries == []
+    assert scan.refusals[task_id].code == "field_shape"
 
 
 @pytest.mark.parametrize("changes", [
@@ -135,12 +137,13 @@ def test_historical_terminal_receipt_requires_two_exact_integer_identity_fields(
     {"backend": 7},
     {"followups": {"task_id": "bad", "ids": "not-a-list"}},
 ])
-def test_historical_terminal_receipt_still_qualifies_all_other_fields(owned_log_dir, changes):
+def test_launch_scan_reports_other_schema_errors(owned_log_dir, changes):
     task_id = "g" * 32
     _write_receipt(owned_log_dir, task_id, "settled", **changes)
 
-    with pytest.raises(store.TaskDocumentError, match="Incompatible task launch reservation"):
-        task_supervision.reservations(owned_log_dir)
+    scan = task_supervision.scan_launches(owned_log_dir)
+    assert scan.entries == []
+    assert scan.refusals[task_id].code in {"generation", "field_shape"}
 
 
 def test_terminal_successor_remains_visible_and_seals_queued_followup(owned_log_dir):
@@ -180,7 +183,7 @@ def test_drifted_not_started_launch_with_unknown_followup_delivery_is_not_releas
 
     assert rows[0]["state"] == "not_started"
     assert rows[0]["followups_delivery_unknown"] is True
-    assert followups._launch_verdict(owned_log_dir, task_id) is False
+    assert followups._launch_verdict(owned_log_dir, task_id) == followups.DELIVERY_UNKNOWN
     assert followups._reserved_verdict(owned_log_dir, item) == followups.DELIVERY_UNKNOWN
 
 
@@ -229,7 +232,7 @@ async def test_list_tasks_renders_not_started_historical_resource_and_worktree_r
 
 
 @pytest.mark.asyncio
-async def test_public_list_tasks_fails_closed_on_unresolved_device_drift(owned_log_dir, monkeypatch):
+async def test_public_list_tasks_continues_on_unresolved_device_drift(owned_log_dir, monkeypatch):
     task_id = "t" * 32
     _write_receipt(owned_log_dir, task_id, "waiting_for_resources",
                    resources={"names": ["checkout:repo"], "reservation_id": "u" * 32})
@@ -239,12 +242,12 @@ async def test_public_list_tasks_fails_closed_on_unresolved_device_drift(owned_l
         return None
 
     monkeypatch.setattr(server, "_managed_workflow_reader", human_reader)
-    with pytest.raises(MCPError, match="Incompatible task launch reservation"):
-        await server.list_tasks()
+    result = await server.list_tasks()
+    assert isinstance(result, list)
 
 
 @pytest.mark.asyncio
-async def test_per_id_pending_status_stays_strict_for_stale_terminal_receipt(owned_log_dir, monkeypatch):
+async def test_per_id_pending_status_accepts_stale_terminal_device(owned_log_dir, monkeypatch):
     task_id = "n" * 32
     _write_receipt(owned_log_dir, task_id, "not_started", resources={"names": ["checkout:repo"]})
     monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=owned_log_dir))
@@ -253,5 +256,5 @@ async def test_per_id_pending_status_stays_strict_for_stale_terminal_receipt(own
         return id_resolution.Resolution(_task_id, None)
     monkeypatch.setattr(server, "_guard_task_read", human_reader)
 
-    with pytest.raises(MCPError, match="Incompatible task launch reservation"):
-        await server.get_task_status(task_id)
+    status = await server.get_task_status(task_id)
+    assert status["task_id"] == task_id

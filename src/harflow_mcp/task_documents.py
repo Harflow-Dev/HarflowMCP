@@ -82,6 +82,9 @@ def _nested(record: Any) -> None:
     if record.failure_diagnostic is not None:
         _shape(record.failure_diagnostic, {"category": str, "reason": str, "source": str, "reset_at": str | int | float,
                                           "http_status": int, "provider_code": str}, "failure_diagnostic")
+    interruption = getattr(record, "interruption", None)
+    if interruption is not None:
+        _shape(interruption, {"reason": str, "source": str, "recorded_at": str, "evidence": dict[str, Any]}, "interruption")
     outcome = record.outcome
     if outcome is None:
         return

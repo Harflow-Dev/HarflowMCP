@@ -66,7 +66,7 @@ work after it is gone. `Inspection.installed is None` means "could not tell", ne
 
 ## Invariants — break these and the design stops holding
 
-1. **Only `_monitor` publishes a terminal status and sets `Task.done`**, after process exit *and*
+1. **Only `_monitor` publishes observed terminal settlement and sets `Task.done`**, after process exit *and*
    pipe drain. Cancellation sets `cancel_requested` and lets the monitor decide. The one status it
    must *not* publish is one for a process still alive: on its own `CancelledError` the server is
    being torn down, not the run, so it leaves the task `running` and re-raises — unless a
@@ -301,9 +301,10 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   on the ledger). `record.repo_path` is the worktree; retention keeps a task whose worktree exists.
 - **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
   takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation
-  with borrowers is flagged and goes with its last borrower), `launch-settle` settles a recordless
-  `granted` launch whose owner is confirmed dead (reservations, session claim, worktree usage and
-  follow-ups, from the launch receipt alone), and `resources` is the ungated read the Monitor uses.
+  with borrowers is flagged and goes with its last borrower). `launch-settle` uses the same locked,
+  generation-qualified recovery primitive as maintenance and session admission. Only explicit human
+  recovery may bypass a persistent tasks-directory binding mismatch; missing, live or undecidable
+  owner/agent identity still refuses. `resources` is the ungated read the Monitor uses.
   Every verdict that frees something after an owner-liveness probe re-reads the receipt and record
   afterwards (`task_resources.owner_confirmed_gone`): a probe can be slow, and an owner that granted,
   spawned and died meanwhile left an agent.
@@ -523,3 +524,30 @@ hints, while root grant acquisition explicitly selects its original lender.
 Lookup receipts remain after removal; no automatic pruning or repair is part of G04. Corrupt
 engine-owned lookup metadata refuses lookup. Slot-wait disclosure observations and writes are
 best effort; they cannot replace the tree's actual liveness checks or alter dispatch outcomes.
+
+
+### Abandoned task settlement
+
+`task_recovery.recover` is the narrow exception to monitor-only terminal publication: it may
+compare-and-swap an unchanged `running`, exit-unobserved record to `failed` after both durable
+owner and agent process generations are confirmed dead. The separate `interruption` records the
+reason, source, time and identity evidence. It does not certify an observed exit or complete drainage,
+set an in-memory done event, publish completion events, notify, or schedule a continuation. Existing
+observed outcomes stand; successful backend stream reconstruction may coexist with this historical
+diagnostic. Missing continuation scheduling evidence never authorizes a successor.
+
+Lock order is session (or continuation chain), nonblocking launch lock, task lock, follow-up lock,
+then the leaf resource transaction. The parent and detached owner retain their existing launch
+lock scopes. Recovery skips a held launch lock before any process probe. Admission reuses only the
+exact session lock it already holds. Receipt and task identity are re-read after death probes.
+A durable generation-bound recovery intent preserves unknown follow-up delivery before the record
+write; that write must succeed before the receipt becomes settled with reconciliation pending.
+Follow-ups and resource claims reconcile idempotently before pending is cleared last. Pending
+receipts and their records remain protected from retention, scratch and worktree cleanup.
+
+Launch scans isolate each refused source. Qualified entries alone grant authority; bounded partial
+claims and qualified record fallbacks may only deny reuse or deletion. Opaque launch associations
+block session reuse and destructive cleanup while leaving fresh launch discovery available. New
+receipts retain legacy `[device, inode]` identity and add canonical path/inode binding; legacy
+receipts with the exact root and inode tolerate device drift in every state without read-time
+rewrites. Runtime descriptor, in-flight, artifact and state-recovery identities remain strict.

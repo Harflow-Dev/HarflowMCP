@@ -119,6 +119,7 @@ class TaskRecord:
     stderr_tail: list[str] = field(default_factory=list)
     accounting: dict[str, Any] | None = None
     failure_diagnostic: dict[str, Any] | None = None
+    interruption: dict[str, Any] | None = None
     workflow_builder: bool = False
     prompt: str = ""
     prompt_source: str | None = None
@@ -224,7 +225,7 @@ def write(log_dir: Path, record: TaskRecord) -> None:
 
 
 @task_operation
-def write_landed(log_dir: Path, record: TaskRecord) -> bool:
+def write_landed(log_dir: Path, record: TaskRecord, *, expected_record: TaskRecord | None = None) -> bool:
     _write_error.set(None)
     from .catalog import catalog_lock
     import sqlite3
@@ -235,6 +236,10 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
         return False
     try:
         with catalog_lock(log_dir, layout=task_layout(log_dir)):
+            if expected_record is not None:
+                current = _read(log_dir, record.task_id)
+                if current is None or asdict(current) != asdict(expected_record):
+                    return False
             return _write_landed_locked(log_dir, record)
     except (OSError, sqlite3.Error) as exc:
         _write_error.set(TaskDocumentError(record.task_id, str(exc), code="task_unavailable"))
@@ -263,6 +268,8 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         _write_error.set(exc)
         log.warning("task document persistence refused for %s", record.task_id, exc_info=True)
         return False
+    if existing is not None and existing.interruption is not None and record.interruption is None:
+        record = replace(record, interruption=existing.interruption)
     expected_source = getattr(existing, "_source_identity", None)
     if (
         existing is not None
@@ -1142,6 +1149,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
     supervision_fields = supervision_reader(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), **observer_options)
     approved_writes, write_notice = approvals.backend_approved_writes(log_dir, record.task_id, get_backend(record.backend)) if record.caller_write_approvals else ([], None)
     denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
+    launch_fields = _launch_refusal_fields(log_dir, record.task_id)
     return {
         "caller_approvals": record.caller_approvals,
         "caller_write_approvals": record.caller_write_approvals,
@@ -1183,6 +1191,8 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "recovery_activity": recovery_activity.page(log_dir, record, supervision_evidence=supervision_fields['supervision']),
         "summary": state.summary,
         "failure_diagnostic": state.failure_diagnostic,
+        **({"interruption": record.interruption} if record.interruption is not None else {}),
+        **launch_fields,
         "is_error": state.is_error,
         "total_cost_usd": state.total_cost_usd,
         "num_turns": state.num_turns,
@@ -1198,7 +1208,8 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "mcp_servers": state.mcp_servers,
         "available_tool_count": state.available_tool_count,
         "usage": state.usage,
-        "notices": [*_notices(record, state), *([write_notice] if write_notice else [])],
+        "notices": [*_notices(record, state), *([write_notice] if write_notice else []),
+                    *([launch_fields["next_step"]] if launch_fields else [])],
         # The enforcement actually captured at spawn, not re-derived from today's code — see
         # `_enforcement`.
         "enforcement": _enforcement(record),
@@ -1233,6 +1244,7 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None, ctl_obse
     record = fresh
     from . import followups, approvals
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
+    launch_fields = _launch_refusal_fields(log_dir, record.task_id)
     return {
         "caller_approvals": record.caller_approvals,
         "caller_write_approvals": record.caller_write_approvals,
@@ -1265,9 +1277,11 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None, ctl_obse
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "background_idle_seconds": background_idle.resolve(inherited=record.background_idle_seconds),
-        "notices": list(record.bridge_notices),
+        "notices": [*record.bridge_notices, *([launch_fields["next_step"]] if launch_fields else [])],
         "queued_followup_count": followups.outstanding_count(log_dir, record.task_id),
         "failure_diagnostic": state.failure_diagnostic or record.failure_diagnostic,
+        **({"interruption": record.interruption} if record.interruption is not None else {}),
+        **launch_fields,
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
         "metadata_persisted": True,
@@ -1365,9 +1379,20 @@ def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> 
     for record in records:
         if record.task_id != task_id and record.task_id not in ancestors and record.session_id == session_id:
             descendants.add(record.task_id)
-    from .task_supervision import reservations
-    for launch in reservations(log_dir):
+    from .task_supervision import scan_launches
+    launch_scan = scan_launches(log_dir)
+    if launch_scan.opaque:
+        raise next(launch_scan.refusals[task_id] for task_id in sorted(launch_scan.opaque))
+    for launch in [*launch_scan.entries, *launch_scan.claims]:
         if launch["task_id"] != task_id and launch["task_id"] not in ancestors and (launch.get("session_id") == session_id or launch.get("parent_task_id") in lineage | descendants):
             if launch["state"] != "not_started":
                 descendants.add(launch["task_id"])
     return descendants
+
+
+def _launch_refusal_fields(log_dir, task_id):
+    from .task_supervision import launch_refusal
+    refusal = launch_refusal(log_dir, task_id)
+    return {"launch_refusal": refusal, "next_step": ("Launch evidence could not be qualified; execution and session claims remain uncertain. "
+            "Inspect launch_refusal.path and launch_refusal.check. Restore the selected state directory or use human launch-settle "
+            "only when durable owner and agent death can be verified; do not remove reservation files.")} if refusal is not None else {}

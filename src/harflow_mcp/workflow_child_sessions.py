@@ -5,6 +5,7 @@ binding is not a worker session and is never copied into the new session map.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -128,6 +129,30 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
         return refuse("Latest child session cannot be validated: " + str(exc)[:500])
 
 
+def _recover_selection_session(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_execution_id: str) -> None:
+    """Mutation-only admission hook; eligibility offers remain pure observations."""
+    from . import control
+    from .task_recovery import recover_abandoned
+    prior = []
+    for activation in run.get("activations", []):
+        if activation.get("id") == exclude_execution_id:
+            break
+        if activation.get("node_id") == node["id"] and activation.get("invocation"):
+            prior.append(activation)
+    if not prior:
+        return
+    child = store.get_run(prior[-1]["invocation"]["child_workflow_run_id"])
+    session_id = (child.get("sessions", {}).get("orchestrator") or {}).get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    try:
+        with control.session_lock_sync(store.root / "tasks", session_id, timeout=0):
+            recover_abandoned(store.root / "tasks", held_session=session_id)
+    except control.LockTimeout:
+        # The ordinary offer reports the busy conversation; never join another admission.
+        return
+
+
 def select(store: Any, run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], token: dict[str, Any]) -> dict[str, Any]:
     """Choose once; a persisted choice must still match fresh eligibility."""
     from .workflows import WorkflowError
@@ -147,6 +172,7 @@ def select(store: Any, run: dict[str, Any], node: dict[str, Any], activation: di
         if token.get("child_session_ref"):
             raise WorkflowError("Fresh child selection cannot select a session reference")
         return saved or {"requested_policy": requested, "selected_mode": mode, "reason": reason}
+    _recover_selection_session(store, run, node, activation["id"])
     offered = offer(store, run, node, activation["id"])
     if not offered["eligible_sessions"]:
         raise WorkflowError("Child Resume unavailable: " + offered["unavailable_reason"])
@@ -208,6 +234,8 @@ async def _recover_first_turn(supervisor: Any) -> None:
         return
     sid = inherited["source_session_id"]
     async with control.session_lock(supervisor.store.root / "tasks", sid, timeout=10):
+        from .task_recovery import recover_abandoned
+        await asyncio.to_thread(recover_abandoned, supervisor.store.root / "tasks", held_session=sid)
         record = tasks.read(supervisor.store.root / "tasks", attempt["task_id"])
         if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or record.parent_task_id != attempt.get("resume_task_id") or record.session_id != sid:
             return

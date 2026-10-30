@@ -17,6 +17,7 @@ import sys
 import stat
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import identity, store
@@ -63,59 +64,91 @@ def read_launch(log_dir: Path, task_id: str):
     return _read_launch(log_dir, task_id)
 
 
-def _read_launch(log_dir: Path, task_id: str, *, allow_terminal_device_drift: bool = False):
-    """Qualify before the history-only terminal device exception is considered."""
-    assert_task_owned(log_dir)
-    store.validate_task_id(task_id)
+class LaunchDocumentError(store.TaskDocumentError):
+    """A launch refusal with a stable qualification check and source path."""
+
+    def __init__(self, log_dir, task_id, check, reason, *, unavailable=False):
+        super().__init__(task_id, reason, code='task_unavailable' if unavailable else check)
+        self.check, self.path = check, str(log_dir / f'{task_id}.launch.json')
+        self.args = (f'{self.path} [{self.check}]: {self.reason}',)
+
+    def as_dict(self):
+        return super().as_dict() | {'path': self.path, 'check': self.check}
+
+
+def _launch_source(log_dir, task_id):
     path = log_dir / f'{task_id}.launch.json'
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise LaunchDocumentError(log_dir, task_id, 'not_regular', str(exc)) from exc
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
-            raise store.TaskDocumentError(task_id, 'Task launch source is not a regular file')
+            raise LaunchDocumentError(log_dir, task_id, 'not_regular', 'Task launch source is not a regular file')
         with os.fdopen(descriptor, 'rb', closefd=False) as handle:
             raw = handle.read(65537)
         try:
             after = path.lstat()
         except FileNotFoundError as exc:
-            raise store.TaskDocumentError(task_id, 'Task launch source disappeared while reading', code='task_unavailable') from exc
+            raise LaunchDocumentError(log_dir, task_id, 'source_changed', 'Task launch disappeared while reading', unavailable=True) from exc
         if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size):
-            error = store.TaskDocumentError(task_id, 'Task launch source changed while reading', code='task_unavailable')
+            error = LaunchDocumentError(log_dir, task_id, 'source_changed', 'Task launch changed while reading', unavailable=True)
             error._source_changed_during_read = True
             raise error
     finally:
         os.close(descriptor)
+    if len(raw) > 65536:
+        raise LaunchDocumentError(log_dir, task_id, 'oversize', 'Task launch exceeds 65536 bytes')
     try:
         value = json.loads(raw)
-        if (len(raw) > 65536 or not isinstance(value, dict) or value.get('format') != FORMAT
-                or value.get('product') != PRODUCT or type(value.get('v')) is not int or value.get('v') != 1
-                or not persisted_compatible(value.get('product_version'), FORMAT)
-                or value.get('task_id') != task_id or value.get('root') != str(log_dir.parent)
-                or not isinstance(value.get('generation'), str) or re.fullmatch('[a-f0-9]{32}', value['generation']) is None
+    except (ValueError, TypeError) as exc:
+        raise LaunchDocumentError(log_dir, task_id, 'format', 'Task launch is not a JSON object') from exc
+    if not isinstance(value, dict):
+        raise LaunchDocumentError(log_dir, task_id, 'format', 'Task launch is not a JSON object')
+    return value
+
+
+def _read_launch(log_dir: Path, task_id: str, *, allow_terminal_device_drift=False, allow_binding_mismatch=False):
+    """Qualify persistent path/inode binding; device IDs remain runtime-only evidence."""
+    assert_task_owned(log_dir)
+    store.validate_task_id(task_id)
+    value = _launch_source(log_dir, task_id)
+    if value is None:
+        return None
+    def require(condition, check, reason):
+        if not condition:
+            raise LaunchDocumentError(log_dir, task_id, check, reason)
+    require(isinstance(value, dict) and value.get('format') == FORMAT and value.get('product') == PRODUCT, 'format', 'Incompatible task launch format')
+    require(type(value.get('v')) is int and value['v'] == 1 and persisted_compatible(value.get('product_version'), FORMAT), 'version', 'Incompatible task launch version')
+    require(value.get('root') == str(log_dir.parent), 'root_mismatch', 'Task launch root differs from selected root')
+    require(value.get('task_id') == task_id, 'task_id_mismatch', 'Task launch task ID differs from source name')
+    require(isinstance(value.get('generation'), str) and re.fullmatch('[a-f0-9]{32}', value['generation']) is not None, 'generation', 'Invalid launch generation')
+    owner = value.get('owner')
+    require(owner is None or (isinstance(owner, dict) and type(owner.get('pid')) is int and owner['pid'] > 0 and (owner.get('start_time') is None or isinstance(owner['start_time'], str)) and isinstance(owner.get('markers'), list) and all(isinstance(marker, str) for marker in owner['markers'])), 'owner_shape', 'Malformed launch owner identity')
+    if (False
                 or not isinstance(value.get('request_sha256'), str) or re.fullmatch('[a-f0-9]{64}', value['request_sha256']) is None
                 or not isinstance(value.get('backend'), str)
                 or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('session_id', 'parent_task_id', 'chain_root_task_id', 'scratch_chain_id'))
-                or value.get('owner') is not None and (not isinstance(value['owner'], dict) or type(value['owner'].get('pid')) is not int or value['owner']['pid'] <= 0 or value['owner'].get('start_time') is not None and not isinstance(value['owner']['start_time'], str) or not isinstance(value['owner'].get('markers'), list) or any(not isinstance(marker, str) for marker in value['owner']['markers']))
-                or value.get('state') not in STATES
+                or not isinstance(value.get('state'), str) or value['state'] not in STATES
                 or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('spawned_by', 'root_task_id', 'repo_path', 'freedom', 'title', 'group', 'created_at', 'not_started_reason'))
-                or value.get('resources') is not None and (not isinstance(value['resources'], dict) or not isinstance(value['resources'].get('names'), list))
+                or value.get('resources') is not None and (not isinstance(value['resources'], dict) or not isinstance(value['resources'].get('names'), list) or any(not isinstance(name, str) for name in value['resources']['names']))
                 or value.get('worktree') is not None and (not isinstance(value['worktree'], dict) or not isinstance(value['worktree'].get('path'), str))
-                or value.get('followups') is not None and (not isinstance(value['followups'], dict) or not isinstance(value['followups'].get('task_id'), str) or not isinstance(value['followups'].get('ids'), list))):
-            raise ValueError('Incompatible task launch reservation')
-        directory = value.get('directory_identity')
-        if type(directory) is not list or len(directory) != 2 or any(type(part) is not int for part in directory):
-            raise ValueError('Incompatible task launch reservation')
-        current = _root_identity(log_dir)
-        historical_terminal = (allow_terminal_device_drift and value['state'] in {'settled', 'not_started'}
-                               and directory[1] == current[1])
-        if directory != current and not historical_terminal:
-            raise ValueError('Incompatible task launch reservation')
-        return value
-    except (ValueError, TypeError) as exc:
-        raise store.TaskDocumentError(task_id, str(exc)) from exc
+                or value.get('followups') is not None and (not isinstance(value['followups'], dict) or not isinstance(value['followups'].get('task_id'), str) or not isinstance(value['followups'].get('ids'), list) or any(not isinstance(item, str) for item in value['followups']['ids']))):
+        raise LaunchDocumentError(log_dir, task_id, 'field_shape', 'Malformed task launch field')
+    directory = value.get('directory_identity')
+    require(type(directory) is list and len(directory) == 2 and all(type(part) is int for part in directory), 'field_shape', 'Malformed legacy directory identity')
+    current = _root_identity(log_dir)
+    binding = value.get('directory_binding')
+    if binding is not None:
+        require(isinstance(binding, dict) and isinstance(binding.get('path'), str) and Path(binding['path']).is_absolute() and os.path.normpath(binding['path']) == binding['path'] and type(binding.get('inode')) is int and binding['inode'] >= 0, 'field_shape', 'Malformed directory binding')
+        matches = binding['path'] == str(log_dir.resolve()) and binding['inode'] == current[1]
+    else:
+        matches = directory[1] == current[1]
+    require(matches or allow_binding_mismatch, 'identity_mismatch', 'Task launch directory binding differs from selected tasks directory')
+    return value
 
 
 @task_operation
@@ -141,16 +174,75 @@ def read_task_records(log_dir: Path):
             return result.require_complete()
 
 
+@dataclass
+class LaunchScan:
+    entries: list[dict] = field(default_factory=list)
+    refusals: dict[str, LaunchDocumentError] = field(default_factory=dict)
+    claims: list[dict] = field(default_factory=list)
+    opaque: set[str] = field(default_factory=set)
+
+    def require_complete(self):
+        if self.refusals:
+            raise next(iter(self.refusals.values()))
+        return self.entries
+
+
+@task_operation
+def scan_launches(log_dir: Path):
+    """Isolate damaged sources; partial claims deny actions and never grant authority."""
+    result = LaunchScan()
+    for path in sorted(log_dir.glob('*.launch.json')):
+        task_id = path.name.removesuffix('.launch.json')
+        try:
+            value = _read_launch(log_dir, task_id)
+            if value is not None:
+                result.entries.append(value)
+        except (store.TaskDocumentError, store.InvalidTaskId, OSError) as exc:
+            refusal = exc if isinstance(exc, LaunchDocumentError) else LaunchDocumentError(log_dir, task_id, 'field_shape', str(exc))
+            result.refusals[task_id] = refusal
+            claim = None
+            malformed_associations = False
+            try:
+                value = _launch_source(log_dir, task_id)
+                if (isinstance(value, dict) and value.get('format') == FORMAT and value.get('product') == PRODUCT
+                        and value.get('root') == str(log_dir.parent) and value.get('task_id') == task_id):
+                    claim = {'task_id': task_id, 'state': 'refused', 'deny_only': True}
+                    malformed_associations = any(value.get(key) is not None and not isinstance(value[key], str)
+                                                 for key in ('session_id', 'parent_task_id', 'chain_root_task_id', 'scratch_chain_id'))
+                    for key in ('session_id', 'parent_task_id', 'chain_root_task_id', 'scratch_chain_id', 'repo_path'):
+                        if isinstance(value.get(key), str):
+                            claim[key] = value[key]
+                    worktree = value.get('worktree')
+                    if isinstance(worktree, dict) and isinstance(worktree.get('path'), str):
+                        claim['worktree'] = {'path': worktree['path']}
+            except (store.TaskDocumentError, OSError):
+                pass
+            try:
+                record = read_task_record(log_dir, task_id, include_prompt=False)
+            except (store.TaskDocumentError, ValueError, OSError):
+                record = None
+            if claim is not None:
+                result.claims.append(claim)
+            if record is not None:
+                record_claim = {key: getattr(record, key) for key in ('task_id', 'session_id', 'parent_task_id', 'chain_root_task_id', 'scratch_chain_id', 'repo_path', 'worktree')}
+                record_claim.update(state='refused', deny_only=True)
+                # Independent deny claims are a union: conflicting receipt evidence cannot erase
+                # the qualified record's session/path, nor can the record erase the receipt claim.
+                if record_claim != claim:
+                    result.claims.append(record_claim)
+            elif claim is None or malformed_associations:
+                result.opaque.add(task_id)
+    return result
+
+
 @task_operation
 def reservations(log_dir: Path):
-    """Qualified history; only terminal rows may retain an earlier device ID."""
-    return [value for path in log_dir.glob('*.launch.json')
-            if (value := _read_launch(log_dir, path.name.removesuffix('.launch.json'), allow_terminal_device_drift=True)) is not None]
+    return scan_launches(log_dir).entries
 
 
 @task_operation
 def unresolved(log_dir: Path):
-    return [value for value in reservations(log_dir) if value['state'] not in {'settled', 'not_started'}]
+    return [value for value in reservations(log_dir) if value['state'] not in {'settled', 'not_started'} or value.get('reconciliation_pending')]
 
 
 @task_operation
@@ -161,32 +253,19 @@ def session_reservations(log_dir: Path):
     with both owner and agent confirmed dead, releases its busy-session claim. This does not
     authorize replaying the original launch or fabricate an exit receipt.
     """
-    from . import task_resources
+    scan = scan_launches(log_dir)
+    if scan.opaque:
+        raise LaunchDocumentError(log_dir, sorted(scan.opaque)[0], 'associations_incomplete', 'Unreadable launch associations prevent safe session reuse')
     busy = []
-    for launch in unresolved(log_dir):
-        record = read_task_record(log_dir, launch['task_id'], include_prompt=False)
-        # A dead owner is confirmed first and the receipt and record are read again afterwards: the
-        # probe can be slow, and an owner that granted, spawned and died meanwhile left an agent.
-        if (launch['state'] == 'waiting_for_resources' and record is None and launch.get('owner') is not None
-                and task_resources.owner_confirmed_gone(log_dir, launch) is not None):
-            # Spawn requires `granted` first, so a dead owner that was still waiting never started.
+    for value in scan.entries:
+        if value['state'] in {'settled', 'not_started'} and not value.get('reconciliation_pending'):
             continue
-        if (launch['state'] == 'granted' and record is None and launch.get('owner') is not None
-                and (launch.get('worktree') or {}).get('state') in {'planned', 'creating'}
-                and (fresh := task_resources.owner_confirmed_gone(log_dir, launch, ('granted',))) is not None
-                and (fresh.get('worktree') or {}).get('state') in {'planned', 'creating'}):
-            # Spawn follows `created`, so an owner that died while the worktree was still being
-            # planned or made never started the agent.
-            continue
-        if (launch['state'] in {'claimed', 'granted', 'spawned'} and record is not None
-                and launch.get('owner') is not None and record.owner == launch['owner']
-                and record.session_id == launch.get('session_id') and record.pid is not None
-                and identity.identity_check(record.owner) == 'dead'
-                and identity.identity_check(identity.task_identity(record.pid, record.start_time, record.markers)) == 'dead'):
-            # `granted` belongs here too: the record is written before the receipt moves to `spawned`.
-            continue
-        busy.append(launch)
-    return busy
+        if value.get('session_id') is None:
+            record = read_task_record(log_dir, value['task_id'], include_prompt=False)
+            if record is not None and record.owner == value.get('owner'):
+                value = value | {'session_id': record.session_id}
+        busy.append(value)
+    return busy + scan.claims
 
 
 @task_operation
@@ -302,7 +381,8 @@ async def launch(registry, invocation, kwargs):
             raise ValueError(f'task_id already reserved: {task_id}')
         value = {'format': FORMAT, 'product': PRODUCT, 'product_version': PRODUCT_VERSION, 'v': 1,
                  'task_id': task_id, 'generation': generation, 'root': str(log_dir.parent),
-                 'directory_identity': _root_identity(log_dir), 'state': 'reserved',
+                 'directory_identity': _root_identity(log_dir),
+                 'directory_binding': {'path': str(log_dir.resolve()), 'inode': log_dir.stat().st_ino}, 'state': 'reserved',
                  'request_sha256': hashlib.sha256(raw).hexdigest(), 'configuration_sha256': configuration_hash, 'backend': backend.name,
                  'session_id': kwargs.get('session_id'), 'parent_task_id': kwargs.get('parent_task_id'),
                  'chain_root_task_id': kwargs.get('chain_root_task_id'), 'scratch_chain_id': kwargs.get('scratch_chain_id'), 'owner': None,
@@ -407,7 +487,10 @@ def owner_holds_unsettled(log_dir: Path, record):
     """A qualified detached owner may still be draining after its agent process exits."""
     if not store.outcome_unobserved(record):
         return False
-    launch = read_launch(log_dir, record.task_id)
+    try:
+        launch = read_launch(log_dir, record.task_id)
+    except store.TaskDocumentError:
+        return True  # Refused launch evidence cannot prove settlement.
     return bool(launch and launch['state'] in {'claimed', 'spawned'}
                 and launch.get('owner') == record.owner
                 and identity.identity_check(record.owner) == 'alive')
@@ -423,3 +506,13 @@ def attachable(log_dir: Path, task_id: str):
     launch = read_launch(log_dir, task_id)
     return bool(launch and launch['state'] in {'claimed', 'spawned'} and launch.get('owner') == record.owner
                 and identity.identity_check(record.owner) == 'alive')
+
+
+@task_operation
+def launch_refusal(log_dir: Path, task_id: str):
+    """Optional per-task diagnostic; observing a refusal grants no mutation authority."""
+    try:
+        read_launch(log_dir, task_id)
+    except LaunchDocumentError as exc:
+        return exc.as_dict()
+    return None

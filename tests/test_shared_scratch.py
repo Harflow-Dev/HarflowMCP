@@ -1140,8 +1140,15 @@ def test_the_sweep_recheck_sees_a_launch_receipt_that_appeared_after_the_snapsho
     backdate(log_dir, "chain", "c1", 90)
     receipt = {"task_id": "waiting", "state": "waiting_for_resources", "group": None, "scratch_chain_id": "c1", "chain_root_task_id": None}
     armed = []
-    real_receipts = task_supervision.reservations
-    monkeypatch.setattr(task_supervision, "reservations", lambda directory: real_receipts(directory) + ([receipt] if armed else []))
+    real_scan = task_supervision.scan_launches
+
+    def scan_with_late_receipt(directory):
+        scan = real_scan(directory)
+        if armed:
+            scan.entries.append(receipt)
+        return scan
+
+    monkeypatch.setattr(task_supervision, "scan_launches", scan_with_late_receipt)
     real = shared_scratch.locked
 
     @contextmanager

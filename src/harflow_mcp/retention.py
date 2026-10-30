@@ -182,9 +182,13 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     # Preserve the full same-session history and resume lineage while any such
     # checkpoint is pinned; otherwise pruning only the external successor would
     # make the old checkpoint appear unchanged again.
-    from .task_supervision import unresolved
-    launches = unresolved(log_dir)
-    protected = set(pinned)
+    from .task_supervision import scan_launches
+    launch_scan = scan_launches(log_dir)
+    launches = [r for r in launch_scan.entries if r["state"] not in ("settled", "not_started") or r.get("reconciliation_pending")] + launch_scan.claims
+    protected = set(pinned) | set(launch_scan.refusals)
+    if launch_scan.opaque:
+        # Unknown associations cannot authorize pruning a conversation or continuation family.
+        protected.update(record.task_id for record in records if record.session_id or record.chain_root_task_id or record.parent_task_id)
     protected.update(value for launch in launches for value in (launch["task_id"], launch.get("parent_task_id"), launch.get("chain_root_task_id")) if value)
     protected.update(record.task_id for record in records if record.session_id and any(launch.get("session_id") == record.session_id for launch in launches))
     from .notifications import pinned_tasks

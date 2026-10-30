@@ -314,6 +314,15 @@ def _fail(log_dir: Path, task_id: str, n: int, reason: str) -> None:
         log.warning("takeover of %s: could not record attempt %d as failed", task_id, n, exc_info=True)
 
 
+@contextlib.contextmanager
+def _recover_held_session(log_dir: Path, session_id: str | None):
+    """Mutation gate only: reconcile before taking any task-record lock."""
+    if session_id:
+        from .task_recovery import recover_abandoned
+        recover_abandoned(log_dir, held_session=session_id)
+    yield
+
+
 def _session_lock(log_dir: Path, session_id: str | None):
     if not session_id:
         return contextlib.nullcontext()
@@ -350,6 +359,9 @@ async def take_over(
     try:
         try:
             async with _session_lock(log_dir, record.session_id):
+                from .task_recovery import recover_abandoned
+                if record.session_id:
+                    await asyncio.to_thread(recover_abandoned, log_dir, held_session=record.session_id)
                 n, record = await asyncio.to_thread(
                     _open_attempt, log_dir, task_id, controller, record.session_id
                 )
@@ -375,6 +387,8 @@ async def take_over(
 
         try:
             async with _session_lock(log_dir, record.session_id):
+                if record.session_id:
+                    await asyncio.to_thread(recover_abandoned, log_dir, held_session=record.session_id)
                 holders = await asyncio.to_thread(
                     other_session_holders, log_dir, task_id, record.session_id
                 )
@@ -467,7 +481,7 @@ def attach(
     try:
         with control.session_lock_sync(
             log_dir, record.session_id, SESSION_LOCK_TIMEOUT_SECONDS
-        ), control.record_lock_sync(log_dir, task_id):
+        ), _recover_held_session(log_dir, record.session_id), control.record_lock_sync(log_dir, task_id):
             attempt = control.takeover_attempt(log_dir, task_id)
             if attempt is None or attempt.ready is None:
                 raise control.TakeoverRefused(

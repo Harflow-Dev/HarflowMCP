@@ -407,7 +407,8 @@ def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
     settled run, or a launch that provably never started, stops being a user.
     """
     from . import retention, store
-    from .task_supervision import reservations
+    from .task_supervision import scan_launches
+    scan = scan_launches(log_dir)
     found: list[dict[str, Any]] = []
     seen: set[str] = set()
     for record in store.read_all(log_dir):
@@ -417,7 +418,12 @@ def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
         seen.add(record.task_id)
         if not retention._conclusively_settled(record, status):
             found.append({"task_id": record.task_id, "kind": "task", "status": status})
-    for receipt in reservations(log_dir):
+    for task_id in scan.refusals:
+        found.append({"task_id": task_id, "kind": "unreadable_launch", "status": "unknown"})
+    for receipt in scan.entries:
+        if receipt.get("reconciliation_pending") and (_inside(receipt.get("repo_path"), path) or _inside((receipt.get("worktree") or {}).get("path"), path)):
+            found.append({"task_id": receipt["task_id"], "kind": "recovery_pending", "status": "unknown"})
+            continue
         if receipt["task_id"] in seen or not _inside(receipt.get("repo_path"), path):
             continue
         if receipt["state"] not in ("settled", "not_started"):
@@ -438,9 +444,10 @@ def _workflow_runs(log_dir: Path) -> list[dict[str, Any]]:
 
 def recorded_paths(log_dir: Path) -> list[Path]:
     """Canonical paths of every worktree Harflow recorded (receipts and records), without inspecting them."""
-    from .task_supervision import read_task_records, reservations
+    from .task_supervision import read_task_records, scan_launches
+    scan = scan_launches(log_dir)
     found: set[str] = set()
-    for receipt in reservations(log_dir):
+    for receipt in [*scan.entries, *scan.claims]:
         info = receipt.get("worktree")
         if isinstance(info, dict) and isinstance(info.get("path"), str):
             found.add(str(_canonical(Path(info["path"]))))
@@ -462,11 +469,11 @@ def containing_worktree(log_dir: Path, repo_path: Path) -> Path | None:
 def containing_worktree_for_publication(log_dir: Path, repo_path: Path) -> Path | None:
     """Locate a launch lock without scanning full task or workflow history."""
     from . import store
-    from .task_supervision import reservations, read_task_record
+    from .task_supervision import scan_launches, read_task_record
     from .workflow_worktree_receipts import paths as workflow_paths
     target = _canonical(Path(repo_path))
     found = {str(_canonical(path)) for path in workflow_paths(log_dir)}
-    for receipt in reservations(log_dir):
+    for receipt in (lambda scan: [*scan.entries, *scan.claims])(scan_launches(log_dir)):
         info = receipt.get("worktree")
         if isinstance(info, dict) and isinstance(info.get("path"), str):
             found.add(str(_canonical(Path(info["path"]))))

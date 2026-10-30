@@ -334,7 +334,11 @@ def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
         receipt = read_launch(log_dir, successor)
     except (store.TaskDocumentError, OSError):
         return False
-    if receipt is None or not (isinstance(receipt.get("resources"), dict) or isinstance(receipt.get("worktree"), dict)):
+    if receipt is None:
+        return False
+    if receipt.get("followups_delivery_unknown") and (receipt["state"] in ("settled", "not_started") or receipt.get("recovery_intent")):
+        return DELIVERY_UNKNOWN
+    if not (isinstance(receipt.get("resources"), dict) or isinstance(receipt.get("worktree"), dict)):
         return False
     state = receipt["state"]
     if state == "not_started":
@@ -369,6 +373,9 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
     assert_task_owned(log_dir)
     successor = item.get("successor_task_id")
     if not isinstance(successor, str):
+        return DELIVERY_UNKNOWN
+    launch_verdict = _launch_verdict(log_dir, successor)
+    if launch_verdict == DELIVERY_UNKNOWN:
         return DELIVERY_UNKNOWN
     try:
         landed = store.read(log_dir, successor, include_prompt=False) is not None

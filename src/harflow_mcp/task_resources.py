@@ -193,14 +193,23 @@ def clear_cancel(log_dir: Path, task_id: str) -> None:
     cancel_path(log_dir, task_id).unlink(missing_ok=True)
 
 
+class PendingDescendants(list):
+    """Compatible ID list carrying refusal evidence for cancellation's partial result."""
+
+    def __init__(self, identifiers, refusals):
+        super().__init__(identifiers)
+        self.refusals = refusals
+
+
 def pending_descendants(log_dir: Path, root_id: str, seeds: Iterable[str] = ()) -> list[str]:
     """Launches with no record yet that descend from `root_id` by `spawned_by` or `root_task_id`.
 
     `seeds` are recorded descendants already known to belong to `root_id` (the cascade's own targets):
     a pending launch under one of them descends from `root_id` even though no pending receipt links them.
     """
-    from .task_supervision import reservations
-    pending = {r["task_id"]: r for r in reservations(log_dir)
+    from .task_supervision import scan_launches
+    launch_scan = scan_launches(log_dir)
+    pending = {r["task_id"]: r for r in launch_scan.entries
                if is_pending_kind(r) and r["state"] in (*PENDING_STATES, "reserved", "claimed")
                and pending_receipt(log_dir, r["task_id"]) is not None}
     found: set[str] = set()
@@ -214,7 +223,7 @@ def pending_descendants(log_dir: Path, root_id: str, seeds: Iterable[str] = ()) 
             if receipt.get("spawned_by") in found | known or receipt.get("root_task_id") == root_id:
                 found.add(task_id)
                 changed = True
-    return sorted(found)
+    return PendingDescendants(sorted(found), {key: error.as_dict() for key, error in launch_scan.refusals.items()})
 
 
 def settle_cancelled(log_dir: Path, receipt: dict[str, Any]) -> None:
@@ -241,7 +250,8 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
     from .task_supervision import read_launch, read_task_record
     if authorized is not True:
         raise PermissionError("cancel_launch requires an authorized caller; use TaskRegistry.cancel_pending")
-    targets = [task_id, *pending_descendants(log_dir, task_id)]
+    descendants = pending_descendants(log_dir, task_id)
+    targets = [task_id, *descendants]
     requested, settled = [], []
     for target in targets:
         receipt = pending_receipt(log_dir, target)
@@ -257,7 +267,8 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
                 settle_cancelled(log_dir, fresh)
                 settled.append(target)
     spawned = read_task_record(log_dir, task_id, include_prompt=False) is not None
-    return {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled}}
+    return {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled,
+            **({"launch_refusals": list(descendants.refusals.values()), "history_incomplete": True, "cascade_incomplete": True} if descendants.refusals else {})}}
 
 
 # ---- the pending view --------------------------------------------------------------------------
@@ -370,8 +381,8 @@ def view(log_dir: Path, receipt: dict[str, Any], *, check_owner: bool = False) -
             if state == "granted" and worktree_state not in ("planned", "creating"):
                 payload["launch_state"] = "uncertain"
                 payload["notices"].append("The launch owner is gone after the launch was granted and before a task record "
-                                          "appeared, so whether the agent started is unknown; its resources are kept. A person who has "
-                                          f"checked can settle it with `harflow-ctl launch-settle --task-id {receipt['task_id']} --confirm-uncertain`.")
+                                          "appeared, so whether the agent started is unknown; its resources are kept. Settlement requires durable "
+                                          "agent identity and confirmed death; a human assertion alone cannot release this launch.")
             else:
                 payload.update(status="failed", not_started=True, not_started_reason="owner_died")
         if payload["status"] == "running":
@@ -399,9 +410,12 @@ def pending_view(log_dir: Path, task_id: str, *, check_owner: bool = True) -> di
 
 
 def pending_views(log_dir: Path, *, check_owner: bool = False) -> list[dict[str, Any]]:
-    from .task_supervision import reservations, read_task_record
-    found = []
-    for receipt in reservations(log_dir):
+    from .task_supervision import scan_launches, read_task_record
+    scan = scan_launches(log_dir)
+    found = [{"task_id": task_id, "status": "running", "pending_launch": True, "launch_state": "refused",
+              "launch_refusal": error.as_dict(), "notices": [error.reason]}
+             for task_id, error in scan.refusals.items()]
+    for receipt in scan.entries:
         if is_pending_kind(receipt) and receipt["state"] not in ("spawned", "settled"):
             # Terminal listing consumes already-qualified history without turning
             # it into live launch authority through a second, strict launch read.
@@ -511,6 +525,9 @@ def task_resolver(log_dir: Path):
         task_id = entry.owner.task_id
         if not task_id:
             return KEEP
+        receipt = read_launch(log_dir, task_id)
+        if receipt is not None and (receipt.get("reconciliation_pending") or receipt.get("recovery_intent") and receipt["state"] not in ("settled", "not_started")):
+            return KEEP
         record = read_task_record(log_dir, task_id, include_prompt=False)
         if record is not None:
             status = store.resolve_status(log_dir, record, detail=False)[0]
@@ -570,56 +587,12 @@ class LaunchSettleRefused(ValueError):
 
 
 def settle_uncertain(log_dir: Path, task_id: str) -> dict[str, Any]:
-    """Settle a launch with no record whose owner is gone after it was granted. Blocking; humans only.
-
-    Whether the agent started is unknowable here, so a person decides. The caller (the ctl command)
-    has already applied the humans-only gate. Only a `granted` launch with no record and a confirmed
-    dead owner is touched. It releases every ledger entry the task owns, its session claim and its
-    worktree usage (all by settling the receipt `not_started`), and finalizes the follow-ups it was
-    handed: back to the queue only when the agent provably never started (the owner died while the
-    worktree was still being planned or made), otherwise `delivery_unknown`. It works from the receipt
-    alone, so a reservation that was released earlier with `resources-release` does not get in its way.
-    """
-    from . import followups
-    from .task_supervision import mark, read_launch, read_task_record
-    receipt = read_launch(log_dir, task_id)
-    if receipt is None:
-        raise LaunchSettleRefused("unknown_launch", f"no launch is recorded for task {task_id}")
-    if read_task_record(log_dir, task_id, include_prompt=False) is not None:
-        raise LaunchSettleRefused("launch_has_record", f"task {task_id} has a task record; stop or inspect that task instead")
-    if receipt["state"] != "granted":
-        raise LaunchSettleRefused("launch_not_uncertain", f"launch {task_id} is {receipt['state']}, not an uncertain granted launch")
-    fresh = owner_confirmed_gone(log_dir, receipt, ("granted",))
-    if fresh is None:
-        raise LaunchSettleRefused("launch_owner_not_dead", f"the owner of launch {task_id} is not confirmed dead, or the launch changed; try again later")
-    worktree = dict(fresh.get("worktree") or {})
-    provably_not_started = worktree.get("state") in ("planned", "creating")
-    released = []
-    ledger = ledger_for(log_dir)
-    wanted = {(fresh.get("resources") or {}).get("reservation_id")}
-    wanted |= {e.reservation_id for e in ledger.entries() if e.owner.task_id == task_id}
-    for reservation_id in sorted(r for r in wanted if r):
-        if ledger.release(reservation_id) != "absent":
-            released.append(reservation_id)
-    handed = fresh.get("followups")
-    outcome = None
-    changes: dict[str, Any] = {"state": "not_started", "not_started_reason": "settled_by_person",
-                               "error": "settled with harflow-ctl launch-settle"}
-    if worktree.get("state") == "creating":
-        changes["worktree"] = worktree | {"state": "unknown"}
-    if handed:
-        outcome = "released" if provably_not_started else "delivery_unknown"
-        if not provably_not_started:
-            # Recorded in the receipt before the ledger is written: if that write fails, or this process
-            # stops between the two, reconciliation still reads the uncertainty from the receipt.
-            changes[UNCERTAIN_FOLLOWUPS_KEY] = True
-    mark(log_dir, task_id, fresh["generation"], **changes)
-    clear_cancel(log_dir, task_id)
-    if handed:
-        followups.finish(log_dir, handed["task_id"], task_id, handed["ids"], outcome,
-                         None if provably_not_started else "the launch owner stopped after the launch was granted; a person settled it")
-    return {"task_id": task_id, "outcome": "never_started" if provably_not_started else "uncertain",
-            "released_reservations": released, "followups": outcome}
+    """Human-only entry to the same process-generation-qualified recovery primitive."""
+    from .task_recovery import recover, RecoveryRefused
+    try:
+        return recover(log_dir, task_id, human=True)
+    except RecoveryRefused as exc:
+        raise LaunchSettleRefused(exc.code, str(exc)) from exc
 
 
 def _held_task_spec(task_id: str, held: dict[str, Any]) -> dict[str, Any]:
@@ -641,7 +614,8 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
     a dead one never started). Pure reads; nothing here takes the ledger lock.
     """
     from . import retention
-    from .task_supervision import reservations
+    from .task_supervision import read_task_records, scan_launches
+    launches = scan_launches(log_dir).require_complete()
     roots: dict[str, dict[str, Any]] = {}
     borrowers: list[dict[str, Any]] = []
     by_reservation: dict[str, tuple[str, dict[str, Any]]] = {}
@@ -661,8 +635,8 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
     # Receipts are read before records. A launch that spawns in between has a record by the time the
     # records are read, so it is found there; one that spawns later is still `granted` with no record
     # in what was read first. Reading records first would let that launch fall between the two.
-    snapshot = reservations(log_dir)
-    records = list(store.read_all(log_dir))
+    snapshot = launches
+    records = read_task_records(log_dir)
     recorded_ids = {record.task_id for record in records}
     for record in records:
         held = getattr(record, "resources", None)

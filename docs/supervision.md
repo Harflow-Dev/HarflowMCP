@@ -28,7 +28,7 @@ Malformed metadata and other failures are not retried. If the bounded reads stil
 the observation retains uncertainty and refuses the dependent action. This retries only
 the metadata read, never execution, message appends, reservations or recovery itself.
 
-Only the task owner's monitor publishes terminal settlement, after observing
+The task owner's monitor publishes observed terminal settlement, after observing
 process exit and completing bounded drainage and input reconciliation. An
 observed exit and an inferred process death are different evidence. Drain failure
 can produce terminal history without certifying that all output was captured;
@@ -103,16 +103,43 @@ files the application reads or writes.
 
 ## Dead executions and disk capacity
 
-A crash can leave a claimed or spawned launch reservation without a terminal receipt. Resume
-rechecks the saved owner and agent identities. A matching launch/task owner and session, with both
-processes confirmed dead, no longer holds the conversation busy. This also applies to task handles
-already attached in the observing server. The original reservation is retained; this is a new
-resume using the recorded session ID, not replay of the original execution and not an observed
-success or exit code. Live or indeterminate identities remain busy. Missing records, mismatched
-owner/session identity, and ambiguous pre-execution reservations remain reserved. Restore process
-inspection access, wait for a live run or close an active takeover before retrying; never delete
-reservation, lock or store files to bypass refusal. Context is recoverable only if the backend
-persisted a resumable session and its history remains available.
+A crash can leave a claimed, granted or spawned reservation. Background maintenance and resume
+admission may settle its unchanged generation only after durable owner and agent identities,
+including nonempty process start times, both prove dead. A launch lock held by its owner is skipped
+without waiting or probing. No process is signalled. Recovery preserves observed outcomes and records
+an additive `interruption` diagnostic; an unchanged running task becomes failed with no invented
+exit code or drainage receipt. Captured successful output may still reconstruct a terminal result.
+Recovery never schedules a continuation, emits a completion notification or replays a launch.
+
+Recovery first writes a durable identity-bound intent with unknown message delivery, then requires
+its interrupted task record to land, then settles the receipt with reconciliation pending. Follow-up
+and resource reconciliation is idempotent; pending clears last. A crash retries that same generation.
+Retention and scratch/worktree cleanup protect pending evidence. Unobserved follow-ups remain
+`delivery_unknown`; only a proven pre-spawn failure returns messages to the queue.
+
+Launch scans return qualified entries and per-task refusals, so one damaged receipt cannot abort
+unrelated discovery. Refusals include `path`, `task_id`, `code`, `check` and `reason`. Partial session,
+lineage and path claims only block unsafe reuse or cleanup; they never release resources. An opaque
+receipt without a qualified record blocks actions requiring complete associations, including resume,
+while fresh launches without a session remain discoverable. New receipts bind the canonical tasks
+path and inode. Legacy exact-root, same-inode receipts accept device changes without rewriting;
+runtime process/descriptor and separate artifact/state-recovery identities keep their strict checks.
+
+`harflow-ctl launch-settle --task-id ID --confirm-uncertain` is human-only and uses the same primitive.
+It can explicitly repair only a tasks-directory binding mismatch after death verification. It cannot
+bypass missing, live or unknown agent identity: a potentially spawned granted launch without a task
+record reports `agent_identity_unavailable`. A waiting-for-resources launch with no task record and a verified dead owner is also proven pre-spawn.
+A proven pre-spawn worktree failure remains settleable. An existing pending recovery intent can
+repair its binding on a human retry after the same death checks. A fully terminal launch with a
+matching terminal task record can return `binding_repaired`: only the directory binding changes,
+with receipt state, outcomes and claims preserved. Terminal launches without a durable task/agent
+identity cannot use binding-only repair. Takeover preparation/attachment and child Resume selection
+perform scoped recovery under the session lock; read-only child-session offers and busy-session
+observations never mutate receipts. A read may retain a stale busy claim until an admission or
+maintenance pass performs recovery.
+`resources-release` is a separate manual resource/session-claim judgment; it does not prove task
+settlement, output capture or safe automatic continuation. Restore process inspection, wait for live
+execution or close an active takeover before retrying; never delete lock or reservation files.
 
 Before creating a launch reservation, and again before executing in the owner, Harflow checks for
 at least **256 MiB (268435456 bytes)** free on each distinct filesystem used for task state/output,

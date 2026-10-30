@@ -2963,7 +2963,7 @@ class WorkflowSupervisor:
             from .workflow_child_sessions import validate_inherited
             try:
                 if not recovered_inherited_turn:
-                    validate_inherited(self.store, run)
+                    await asyncio.to_thread(validate_inherited, self.store, run)
             except (WorkflowError, OSError, ValueError, KeyError, TypeError) as exc:
                 child_resume_refused("Child Resume refused: " + str(exc))
                 return None

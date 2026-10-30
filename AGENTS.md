@@ -172,12 +172,16 @@ change needs a re-measurement recorded there. The code rules embedded in those f
 Break these and the design stops holding. Full narrative in
 [docs/architecture.md](docs/architecture.md).
 
-1. **Only `_monitor` publishes a terminal status and sets `Task.done`**, after process exit and
+1. **Only `_monitor` publishes observed terminal settlement and sets `Task.done`**, after process exit and
    pipe drain. Cancellation sets `cancel_requested` and lets the monitor decide. The one status it
    must not publish is one for a process still alive: on its own `CancelledError` the server is
    being torn down, not the run, so it leaves the task `running` and re-raises, unless a
    cancellation is already in flight (`abandoned = not task.cancel_requested`), whose intent
    nothing on disk could reconstruct.
+   The narrow exception is `task_recovery.recover`: after durable matching owner and agent generations
+   are confirmed dead under session/launch/task locks, it may CAS an unchanged running record to
+   failed with an unobserved outcome and separate `interruption` evidence. It never sets `Task.done`,
+   invents exit/drain evidence, emits completion notifications or schedules continuation.
 2. **Bookkeeping must never change an outcome.** A stale attribute in a log line once turned a
    successful run into `failed`; log calls and probes are individually guarded.
 3. **Signal `Task.pgid` captured at spawn**, never `os.getpgid`, because pids get reused.
@@ -214,7 +218,7 @@ Server restarts and recovered runs are explained in "When the client restarts th
   touches the inbox, its flock or the close protocol. Follow-ups are consumed only via the
   explicit `consume_followups` flag, never inferred from `task_id`; automatic continuations and
   workflow resumes never consume.
-- Lock order: session lock (or the `continuation-<root>` chain lock), then `<id>.lock` and
+- Lock order: session lock (or the `continuation-<root>` chain lock), then the nonblocking `<id>.launch.lock`, `<id>.lock` and
   `<id>.followups.lock`; never the reverse. A deadlock-free order is the only thing keeping
   takeover, resume and retention from stalling each other.
 - The resource ledger (`resources.py`) lock is a leaf: taken last, held for one bounded read-modify-write,

@@ -208,9 +208,13 @@ def test_granted_launch_with_a_matching_dead_record_frees_the_session(tmp_path, 
     write_receipt(tmp_path, "a" * 32, "granted", owner=OWNER, session_id="s-1", resources={"names": ["sim"], "state": "granted"})
     store.write(log_dir, store.TaskRecord(task_id="a" * 32, backend="claude", session_id="s-1", repo_path="/x", started_at="2026-01-01T00:00:00+00:00",
                                           status="running", pid=777, start_time="Mon Jan  1 00:00:00 2001", markers=["x"], owner=OWNER))
-    assert "a" * 32 not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
-    identities.alive(777)  # the agent survives: the claim stays
+    # Observations stay read-only; explicit maintenance recovery performs the settlement.
     assert "a" * 32 in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    from harflow_mcp.task_recovery import recover_abandoned
+    assert recover_abandoned(log_dir)["recovered"][0]["outcome"] == "interrupted"
+    assert "a" * 32 not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    identities.alive(777)  # the pid now names another process; the recovered receipt stays settled.
+    assert "a" * 32 not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     identities.dead(777)
     write_receipt(tmp_path, "a" * 32, "granted", owner=OWNER, session_id="other", resources={"names": ["sim"], "state": "granted"})
     assert "a" * 32 in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}  # identity must match
@@ -287,6 +291,12 @@ def settle(tmp_path, task_id: str):
     return task_resources.settle_uncertain(tasks_dir(tmp_path), task_id)
 
 
+def dead_agent_record(task_id: str, session_id: str, repo_path: str, *, owner=OWNER, pid=777):
+    return store.TaskRecord(task_id=task_id, backend="claude", session_id=session_id, repo_path=repo_path,
+                            started_at="2026-01-01T00:00:00+00:00", status="running", pid=pid,
+                            start_time="Tue Jan  2 00:00:00 2001", markers=["claude-agent-marker"], owner=owner)
+
+
 def test_settle_refuses_anything_but_a_granted_recordless_launch_with_a_dead_owner(tmp_path, identities, owned):
     log_dir = owned.tasks_directory
     with pytest.raises(task_resources.LaunchSettleRefused) as refused:
@@ -295,20 +305,20 @@ def test_settle_refuses_anything_but_a_granted_recordless_launch_with_a_dead_own
     write_receipt(tmp_path, "a" * 32, "waiting_for_resources", owner=OWNER, resources={"names": ["sim"], "state": "waiting"})
     with pytest.raises(task_resources.LaunchSettleRefused) as refused:
         settle(tmp_path, "a" * 32)
-    assert refused.value.code == "launch_not_uncertain"
+    assert refused.value.code == "owner_not_dead"
     write_receipt(tmp_path, "b" * 32, "granted", owner=OWNER, resources={"names": ["sim"], "state": "granted"})
     identities.alive(OWNER["pid"])
     with pytest.raises(task_resources.LaunchSettleRefused) as refused:
         settle(tmp_path, "b" * 32)
-    assert refused.value.code == "launch_owner_not_dead" and launch_state(tmp_path, "b" * 32) == "granted"
+    assert refused.value.code == "agent_identity_unavailable" and launch_state(tmp_path, "b" * 32) == "granted"
     identities.dead(OWNER["pid"])
     store.write(log_dir, record_for("b" * 32, "/x"))
     with pytest.raises(task_resources.LaunchSettleRefused) as refused:
         settle(tmp_path, "b" * 32)
-    assert refused.value.code == "launch_has_record"
+    assert refused.value.code == "identity_mismatch"
 
 
-def test_settle_releases_the_reservation_session_and_worktree_usage_after_a_resource_only_release(tmp_path, source, identities, owned):
+def test_settle_refuses_granted_launch_with_created_worktree_and_no_agent_identity(tmp_path, source, identities, owned):
     log_dir = owned.tasks_directory
     identities.dead(OWNER["pid"])
     made = worktrees.create(worktrees.plan("a" * 32, source, {}, log_dir))
@@ -317,14 +327,14 @@ def test_settle_releases_the_reservation_session_and_worktree_usage_after_a_reso
                   resources={"names": ["sim"], "state": "granted", "reservation_id": entry.reservation_id})
     assert "a" * 32 in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     assert [u["task_id"] for u in worktrees.users(log_dir, Path(made["path"]))] == ["a" * 32]
-    # Releasing the reservation alone leaves the evidence this needs.
+    # A human confirmation cannot prove whether a spawned agent remains live.
     assert ledger(tmp_path).release(entry.reservation_id) == "released"
-    result = settle(tmp_path, "a" * 32)
-    assert result["outcome"] == "uncertain"
-    receipt = task_supervision.read_launch(log_dir, "a" * 32)
-    assert receipt["state"] == "not_started" and receipt["not_started_reason"] == "settled_by_person"
-    assert "a" * 32 not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
-    assert worktrees.users(log_dir, Path(made["path"])) == []
+    with pytest.raises(task_resources.LaunchSettleRefused) as refused:
+        settle(tmp_path, "a" * 32)
+    assert refused.value.code == "agent_identity_unavailable"
+    assert launch_state(tmp_path, "a" * 32) == "granted"
+    assert "a" * 32 in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    assert [u["task_id"] for u in worktrees.users(log_dir, Path(made["path"]))] == ["a" * 32]
     assert Path(made["path"]).is_dir()  # nothing is removed
 
 
@@ -342,11 +352,16 @@ async def test_settle_finalizes_followups_by_what_is_provable(tmp_path, source, 
         write_receipt(tmp_path, successor, "granted", owner=OWNER, repo_path=str(tmp_path / worktree_state),
                       worktree={"path": str(tmp_path / worktree_state), "state": worktree_state, "source_repo_path": str(source)},
                       followups={"task_id": previous.task_id, "ids": attempt.ids})
+        if worktree_state == "created":
+            identities.dead(777)
+            store.write(log_dir, dead_agent_record(successor, f"session-{successor[:4]}", str(tmp_path / worktree_state)))
         outcomes[successor] = settle(tmp_path, successor)
         statuses = [item["status"] for item in json.loads((log_dir / f"{previous.task_id}{followups.STATE_SUFFIX}").read_text())["ledger"]["items"]]
         assert statuses[-1] == ("queued" if worktree_state == "creating" else "delivery_unknown")
-    assert outcomes["b" * 32]["outcome"] == "never_started" and outcomes["c" * 32]["outcome"] == "uncertain"
-    assert task_supervision.read_launch(log_dir, "b" * 32)["worktree"]["state"] == "unknown"
+    assert outcomes["b" * 32]["outcome"] == "never_started" and outcomes["c" * 32]["outcome"] == "interrupted"
+    settled_pre_spawn = task_supervision.read_launch(log_dir, "b" * 32)
+    assert settled_pre_spawn["state"] == "not_started"
+    assert settled_pre_spawn["reconciliation_pending"] is False
 
 
 def test_ctl_launch_settle_is_humans_only(tmp_path, monkeypatch, identities, capsys):
@@ -365,11 +380,11 @@ def test_ctl_launch_settle_is_humans_only(tmp_path, monkeypatch, identities, cap
         ctl.main(["launch-settle", "--task-id", "a" * 32, "--json"])  # --confirm-uncertain is required
     capsys.readouterr()
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None))
-    assert ctl.main(["launch-settle", "--task-id", "a" * 32, "--confirm-uncertain", "--json"]) == 0
-    result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
-    assert result["outcome"] == "uncertain" and launch_state(tmp_path, "a" * 32) == "not_started"
     assert ctl.main(["launch-settle", "--task-id", "a" * 32, "--confirm-uncertain", "--json"]) == 1
-    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "launch_not_uncertain"
+    error = json.loads(capsys.readouterr().out.splitlines()[-1])["error"]
+    assert error["code"] == "agent_identity_unavailable" and launch_state(tmp_path, "a" * 32) == "granted"
+    assert ctl.main(["launch-settle", "--task-id", "a" * 32, "--confirm-uncertain", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "agent_identity_unavailable"
 
 
 # ---- item 17: a caller that really goes away -----------------------------------------------------
@@ -445,6 +460,8 @@ async def test_an_unfinalized_followup_settlement_is_never_requeued(tmp_path, so
     write_receipt(tmp_path, "c" * 32, "granted", owner=OWNER, repo_path=str(tmp_path / "wt"),
                   worktree={"path": str(tmp_path / "wt"), "state": "created", "source_repo_path": str(source)},
                   followups={"task_id": previous.task_id, "ids": attempt.ids})
+    identities.dead(777)
+    store.write(log_dir, dead_agent_record("c" * 32, f"session-{'c' * 4}", str(tmp_path / "wt")))
 
     def broken(*args, **kwargs):
         if failure == "raises":
@@ -457,9 +474,18 @@ async def test_an_unfinalized_followup_settlement_is_never_requeued(tmp_path, so
             with pytest.raises(RuntimeError):
                 settle(tmp_path, "c" * 32)
         else:
-            settle(tmp_path, "c" * 32)
-    assert launch_state(tmp_path, "c" * 32) == "not_started"
+            with pytest.raises(task_resources.LaunchSettleRefused) as refused:
+                settle(tmp_path, "c" * 32)
+            assert refused.value.code == "followup_write_failed"
+    receipt = task_supervision.read_launch(log_dir, "c" * 32)
+    assert receipt["state"] == "settled" and receipt["reconciliation_pending"] is True
     followups._INFLIGHT.clear()  # a fresh process knows nothing of this attempt: only the receipt speaks
+    assert item_statuses(log_dir, previous.task_id) == ["delivery_unknown"]
+    with monkeypatch.context() as patched:
+        patched.setattr(followups, "finish", lambda *args, **kwargs: True)
+        from harflow_mcp.task_recovery import recover_abandoned
+        result = recover_abandoned(log_dir)
+    assert result["recovered"] and task_supervision.read_launch(log_dir, "c" * 32)["reconciliation_pending"] is False
     assert item_statuses(log_dir, previous.task_id) == ["delivery_unknown"]
 
 
@@ -471,12 +497,15 @@ def test_ctl_launch_settle_reports_a_corrupt_ledger_instead_of_failing(tmp_path,
     capsys.readouterr()
     identities.dead(OWNER["pid"])
     write_receipt(tmp_path, "a" * 32, "granted", owner=OWNER, resources={"names": ["sim"], "state": "granted"})
+    identities.dead(777)
+    store.write(tasks_dir(tmp_path), dead_agent_record("a" * 32, f"session-{'a' * 4}", str(tmp_path)))
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None))
     ledger(tmp_path).directory.mkdir(parents=True, exist_ok=True)
     ledger(tmp_path).path.write_text("garbage")
     assert ctl.main(["launch-settle", "--task-id", "a" * 32, "--confirm-uncertain", "--json"]) == 1
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "resource_ledger_corrupt"
-    assert launch_state(tmp_path, "a" * 32) == "granted"
+    assert launch_state(tmp_path, "a" * 32) == "settled"
+    assert task_supervision.read_launch(tasks_dir(tmp_path), "a" * 32)["reconciliation_pending"] is True
 
 
 @pytest.mark.asyncio
@@ -501,15 +530,19 @@ async def test_owner_killed_while_the_worktree_is_being_created_is_never_started
     await wait_for(lambda: (signal_dir / "reached").exists())
     receipt = task_supervision.read_launch(log_dir, started.task_id)
     assert receipt["state"] == "granted" and receipt["worktree"]["state"] == "creating"
+    # The child owner uses the real PID, while its start-time probe may be unavailable in a
+    # sandbox. Persist a nonempty generation token before simulating its death.
+    receipt["owner"] = receipt["owner"] | {"start_time": "owner-generation-before-worktree"}
+    task_supervision._write(log_dir / f"{started.task_id}.launch.json", receipt)
     os.kill(receipt["owner"]["pid"], signal.SIGKILL)
     identities.dead(receipt["owner"]["pid"])
-    view = task_resources.pending_view(log_dir, started.task_id)
-    assert view["status"] == "failed" and view["not_started_reason"] == "owner_died" and view["worktree"]["state"] == "unknown"
+    from harflow_mcp.task_recovery import recover_abandoned
+    recovery = recover_abandoned(log_dir)
+    assert any(item["task_id"] == started.task_id and item["outcome"] == "never_started"
+               for item in recovery["recovered"])
     assert started.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
-    # Spawn follows `created`, so the reaper frees the name; the person can still settle the receipt.
     task_resources.reap(log_dir)
     assert all(entry.owner.task_id != started.task_id for entry in ledger(tmp_path).entries())
-    assert settle(tmp_path, started.task_id)["outcome"] == "never_started"
     settled = task_supervision.read_launch(log_dir, started.task_id)
     assert settled["state"] == "not_started" and settled["worktree"]["state"] == "unknown"
     assert not Path(receipt["worktree"]["path"]).exists() and spawn_log(tmp_path) == []

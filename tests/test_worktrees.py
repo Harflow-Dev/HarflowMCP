@@ -363,6 +363,11 @@ def test_pending_worktree_launch_reports_worktree_and_unknown_after_owner_death(
     identities.dead(OWNER["pid"])
     view = task_resources.pending_view(log_dir, "e" * 32)
     assert view["worktree"]["state"] == "unknown" and view["status"] == "failed" and view["not_started_reason"] == "owner_died"
+    assert "e" * 32 in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    from harflow_mcp.task_recovery import recover_abandoned
+    recovered = recover_abandoned(log_dir)
+    assert any(item["task_id"] == "e" * 32 and item["outcome"] == "never_started"
+               for item in recovered["recovered"])
     assert "e" * 32 not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     write_receipt(tmp_path, "f" * 32, "granted", owner=OWNER, repo_path=str(tmp_path / "w2"),
                   worktree={"path": str(tmp_path / "w2"), "state": "created", "source_repo_path": str(source)})

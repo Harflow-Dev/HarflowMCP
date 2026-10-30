@@ -346,11 +346,19 @@ async def test_owner_killed_while_waiting_never_started_and_session_is_freed(tmp
     waiter = await reg.start("reply two", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
     receipt = task_supervision.read_launch(log_dir, waiter.task_id)
     assert waiter.task_id in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    receipt["owner"] = receipt["owner"] | {"start_time": "owner-generation-before-wait"}
+    task_supervision._write(log_dir / f"{waiter.task_id}.launch.json", receipt)
     os.kill(receipt["owner"]["pid"], signal.SIGKILL)
     identities.dead(receipt["owner"]["pid"])
-    await wait_for(lambda: waiter.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)})
+    # Reservation reads stay observational. Explicit maintenance performs the recovery and release.
+    assert waiter.task_id in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    from harflow_mcp.task_recovery import recover_abandoned
+    result = recover_abandoned(log_dir)
+    assert any(item["task_id"] == waiter.task_id and item["outcome"] == "never_started"
+               for item in result["recovered"])
+    assert waiter.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     view = task_resources.pending_view(log_dir, waiter.task_id)
-    assert view["status"] == "failed" and view["not_started_reason"] == "owner_died"
+    assert view["status"] == "failed" and view["not_started_reason"] == "owner_died_before_spawn"
     report = task_resources.reap(log_dir)
     assert all(entry.owner.task_id != waiter.task_id for entry in ledger(tmp_path).entries())
     assert report.errors == {}

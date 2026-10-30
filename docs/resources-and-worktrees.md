@@ -117,15 +117,19 @@ state. Monitor snapshots expose these fields; a native Mac UI for them is separa
 - `harflow-ctl resources-release --reservation-id ID --confirm-uncertain [--also-release-session]`
   is the person's decision for an entry the reaper cannot settle. `--also-release-session` also
   settles the launch of a `granted` task that has no record, so its session is free to resume.
-- `harflow-ctl launch-settle --task-id ID --confirm-uncertain` is the person's decision for a launch
-  that was granted, has no task record and whose owner is confirmed dead, so nobody can tell whether
-  the agent started (the usual cause is a launch that waited or made a worktree, then lost its owner
-  before the record appeared). It releases the launch's reservations, its session claim and its
-  worktree usage, and finalizes the queued follow-ups it was handed: back in the queue only if the
-  agent provably never started (the owner died while the worktree was still being planned or made),
-  otherwise `delivery_unknown`. Check that no agent for the task is running first. It works from the
-  launch receipt, so it still works after `resources-release` removed the reservation.
-  The recovery commands refuse any detected agent caller and fail closed when that cannot be decided.
+- `harflow-ctl launch-settle --task-id ID --confirm-uncertain` uses the same dead-generation
+  recovery as maintenance. Both saved owner and agent identities must prove dead; a missing agent
+  record for a potentially spawned launch reports `agent_identity_unavailable`. Human confirmation
+  bypasses only a tasks-directory binding mismatch. Proven pre-spawn worktree failures may settle
+  without an agent record, as may a waiting-for-resources owner confirmed dead. A fully terminal
+  receipt with matching terminal task/agent evidence can repair directory binding only, returning
+  `binding_repaired` while preserving state, outcomes and claims. Terminal receipts without that
+  evidence remain refused. Follow-ups stay `delivery_unknown` unless execution provably never began.
+  Recovery writes interruption evidence before releasing claims and retains pending reconciliation
+  across crashes. It never signals a process or invents an exit/drain receipt.
+  `resources-release` remains a separate manual resource/session-claim judgment, not proof of task
+  settlement or permission for automatic continuation. Recovery commands refuse agent callers and
+  fail closed when caller identity cannot be decided.
 - A corrupt ledger makes every resource operation refuse. `harflow-ctl resources-repair` keeps it as
   `ledger.corrupt-<timestamp>.json` and closes the ledger (every operation reports
   `resource_ledger_repairing`) while it collects the holders it can prove from durable state
@@ -214,7 +218,7 @@ Limits: Git LFS and other filter drivers; Codex gains nothing from a worktree at
 `publish` (its sandbox denies Git directory writes there as in a normal checkout; see
 [backend CLI facts](backend-cli-facts.md#codex-and-linked-worktrees-codex-cli-0163-0-2026-10-27)); a
 worktree-only launch whose owner dies after the worktree is `created` keeps its session claim until a
-person settles it with `launch-settle`; workflow worktrees follow the same Git and permission limitations; `notify` is not supported with `worktree`.
+qualified dead-generation recovery settles it; workflow worktrees follow the same Git and permission limitations; `notify` is not supported with `worktree`.
 
 
 ### One worktree per workflow
