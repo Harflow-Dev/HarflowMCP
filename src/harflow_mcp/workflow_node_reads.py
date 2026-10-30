@@ -60,7 +60,12 @@ def inspect_node(
     # The same pre-flight the MCP tool applies, so a bad request is refused before any role check.
     if view == "result" and (before_seq is not None or after_seq is not None):
         raise ValueError("Result view uses cursor, not event sequence cursors")
+    from . import id_resolution
+    resolution = id_resolution.resolve_run(root, run_id, managed=managed)
+    run_id = resolution.id
     _guard_inspect(managed, run_id)
+    selected = id_resolution.resolve_run_task(root, run_id, task_id) if task_id is not None else None
+    task_id = selected.id if selected is not None else None
     from .workflow_inspection import inspect_request
     from .workflows import WorkflowStore
     store_ = WorkflowStore(root)
@@ -74,7 +79,7 @@ def inspect_node(
         "before_seq": before_seq,
         "after_seq": after_seq,
     }
-    return inspect_request(run, store_.root, request)
+    return id_resolution.echo(inspect_request(run, store_.root, request), primary=resolution, task_id=selected)
 
 
 def assigned_input_node(
@@ -89,18 +94,21 @@ def assigned_input_node(
     root: Any = None,
 ) -> dict[str, Any]:
     """One digest-bound immutable input page, for a verified managed worker on either transport."""
+    from . import id_resolution
     from .workflow_inspection import assigned_input_page
     from .workflows import WorkflowStore
-    return assigned_input_page(
+    resolutions = id_resolution.resolve_assigned_input(managed, run_id, execution_id, source_run_id, task_id)
+    page = assigned_input_page(
         managed,
         WorkflowStore(root).root,
-        run_id,
+        resolutions["workflow_run_id"].id,
         execution_id,
-        source_run_id=source_run_id,
-        task_id=task_id,
+        source_run_id=resolutions["source_run_id"].id if resolutions["source_run_id"] is not None else None,
+        task_id=resolutions["task_id"].id if resolutions["task_id"] is not None else None,
         cursor=cursor,
         limit=limit,
     )
+    return id_resolution.echo(page, primary=resolutions["workflow_run_id"], source_run_id=resolutions["source_run_id"], task_id=resolutions["task_id"])
 
 
 def workflow_artifacts_page(
@@ -120,12 +128,23 @@ def workflow_artifacts_page(
     descendants of it. Worker nodes and native transports read only their own task through
     ``get_task_artifacts``; standalone task callers, builders and other managed callers are refused.
     """
-    from . import artifacts
+    from . import artifacts, id_resolution
+    from .workflow_run_documents import WorkflowRunDocumentError
+    if not human and (managed is None or managed[0].get("role") != "orchestrator"):
+        raise ValueError("Run-level artifact reads are available to a human caller or the run's orchestrator")
+    resolution = id_resolution.resolve_run(log_dir.parent, run_id, managed=None if human else managed, scope="tree")
+    run_id = resolution.id
     if not human:
-        if managed is None or managed[0].get("role") != "orchestrator":
-            raise ValueError("Run-level artifact reads are available to a human caller or the run's orchestrator")
         _, owned_run = managed
         if run_id != owned_run["workflow_run_id"]:
             from .workflow_inspection import _authorized_linked_run
             _authorized_linked_run(owned_run, log_dir.parent, run_id)
-    return artifacts.workflow_page(log_dir, run_id, cursor=cursor, limit=limit, execution_id=execution_id, task_id=task_id)
+    selected = None
+    if task_id is not None:
+        try:
+            selected = id_resolution.resolve_run_task(log_dir.parent, run_id, task_id)
+        except (OSError, ValueError, WorkflowRunDocumentError):
+            # An unreadable or oversized run is reported by the page as its `run_unavailable` owner.
+            selected = None
+    page = artifacts.workflow_page(log_dir, run_id, cursor=cursor, limit=limit, execution_id=execution_id, task_id=selected.id if selected is not None else task_id)
+    return id_resolution.echo(page, primary=resolution, task_id=selected)

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import ctl, server, state_ownership
+from harflow_mcp import ctl, id_resolution, server, state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
 
@@ -24,6 +24,7 @@ async def test_continue_tool_passes_exact_text_and_notes(monkeypatch):
 
     async def guard(task_id):
         observed.append(("guard", task_id))
+        return id_resolution.Resolution(task_id, None)
 
     async def continue_task(task_id, extra_prompt, notes_path, *, consume_followups=False, background_idle_seconds=None):
         assert consume_followups is True  # a caller-initiated continuation consumes queued follow-ups
@@ -54,11 +55,13 @@ def test_continue_cli_file_preserves_prose(tmp_path, monkeypatch):
         observed.append((task_id, extra_prompt, notes_path))
         return "task"
 
-    def detached(args, action):
+    def detached(args, action, resolution=None):
         import asyncio
         assert asyncio.run(action(SimpleNamespace(continue_task=continue_task))) == "task"
         return 0
 
     monkeypatch.setattr(ctl, "_cmd_detached", detached)
+    # The task is a stub; prefix resolution has its own tests.
+    monkeypatch.setattr(id_resolution, "resolve_task", lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
     assert ctl.main(["continue", "old", "--extra-prompt-file", str(path), "--notes-path", "/tmp/notes"]) == 0
     assert observed == [("old", text, "/tmp/notes")]

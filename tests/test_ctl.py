@@ -162,7 +162,9 @@ def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc["v"] == 1
-    assert doc["error"] == {"code": "unknown_task", "message": "unknown task_id: no-such-task"}
+    assert doc["error"]["code"] == "unknown_task"
+    assert doc["error"]["message"].startswith("unknown task_id: no-such-task")
+    assert doc["error"]["data"]["code"] == "unknown_task"
     assert "no-such-task" in captured.err
 
 

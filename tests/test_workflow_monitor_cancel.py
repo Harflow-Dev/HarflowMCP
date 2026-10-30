@@ -19,6 +19,8 @@ def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 from harflow_mcp import workflows as w
 from harflow_mcp.workflow_cancellation import eligibility
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 def persist_run(store, run):
     candidate = copy.deepcopy(run)

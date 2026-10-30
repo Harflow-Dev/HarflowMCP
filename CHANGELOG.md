@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Accept unique id prefixes of at least 8 characters for task ids and workflow run ids on every MCP tool and `harflow-ctl` command except `worktree-remove`. Replies add `resolved_from`; too-short, unmatched and ambiguous values report `unknown_task`/`unknown_workflow_run` (with `data.reason`) or `ambiguous_task_id`/`ambiguous_workflow_run_id` (with up to 5 `data.candidates`), and MCP errors gain `data.code`. Managed callers, explicit-id page lists, notification reads, approval commands and `task-artifacts` keep their existing handling of a missing exact id and report only ambiguity and genuine prefix failures. A `harflow-ctl` workflow command naming a run that does not exist now reports `unknown_workflow_run` instead of `workflow_error`. `status-batch` keeps one row per input and keys `errors` by the input (#80).
 - Record `resumed_at` on workflow runs when the caller answers a question, resumes, recovers, or restarts a builder with follow-up, and include it in run headers and detail; node activity and engine retries never change it (#68).
 - Report `enforcement.local_commit` as denied, allowed, or not enforced. On Claude Code, `write_in_repo` denies a direct `git commit` and `publish` is the level that allows committing (#91).
 - Accept exact `git commit --no-edit` and `git merge --continue` at `write_in_repo` only while `MERGE_HEAD` exists, and stop claiming the broad commit deny when that carve-out omits it (#87).

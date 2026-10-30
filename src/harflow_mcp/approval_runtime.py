@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import approval_paths, approvals, identity, store
+from . import approval_paths, approvals, id_resolution, identity, store
 from .approvals import ApprovalError
 from .backends.base import ApprovalRefused
 from .state_access import storage_operation, task_operation
@@ -167,8 +167,29 @@ def _reconcile(registry: Any, task_id: str) -> Any:
 @storage_operation
 async def get_request(registry: Any, task_id: str, request_id: str, *, interaction_owner: str = "caller") -> dict[str, Any]:
     await authorize(registry, interaction_owner=interaction_owner)
+    resolution = await _resolve_task(registry, task_id)
+    task_id = resolution.id
     await asyncio.to_thread(_reconcile, registry, task_id)
-    return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
+    return id_resolution.echo(await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id), primary=resolution)
+
+
+async def _resolve_task(registry: Any, task_id: str) -> id_resolution.Resolution:
+    """Approvals are direct-caller reads (workers are refused by `authorize`), so the namespace is the root's."""
+    try:
+        return await asyncio.to_thread(id_resolution.resolve_task, registry.log_dir, task_id, managed=None, in_memory=getattr(registry, "known_task_ids", None))
+    except id_resolution.IdResolutionError as exc:
+        if not id_resolution.is_missing_exact(exc):
+            raise
+        return id_resolution.Resolution(task_id, None)  # the approval ledger answers a missing id itself
+
+
+async def _resolve_run(registry: Any, run_id: str) -> id_resolution.Resolution:
+    try:
+        return await asyncio.to_thread(id_resolution.resolve_run, registry.log_dir.parent, run_id, managed=None)
+    except id_resolution.IdResolutionError as exc:
+        if not id_resolution.is_missing_exact(exc):
+            raise
+        return id_resolution.Resolution(run_id, None)
 
 
 def approval_order(row: dict[str, Any]) -> tuple[int, float, str]:
@@ -189,6 +210,10 @@ async def list_requests(registry: Any, task_id: str | None = None, workflow_run_
     if cursor is not None and (not isinstance(cursor, str) or not cursor.isdigit() or len(cursor) > 8):
         raise ValueError("Invalid approval cursor")
     offset = int(cursor or 0)
+    task_resolution = await _resolve_task(registry, task_id) if task_id is not None else None
+    run_resolution = await _resolve_run(registry, workflow_run_id) if workflow_run_id is not None else None
+    task_id = task_resolution.id if task_resolution is not None else None
+    workflow_run_id = run_resolution.id if run_resolution is not None else None
     def collect():
         ids = [task_id] if task_id else workflow_task_ids(registry.log_dir, workflow_run_id)
         result = []
@@ -205,7 +230,7 @@ async def list_requests(registry: Any, task_id: str | None = None, workflow_run_
             result.extend(approvals.metadata(r) for r in approvals.rows(registry.log_dir, identifier))
         result.sort(key=approval_order)
         return {"requests": result[offset:offset + limit], "total": len(result), "next_cursor": str(offset + limit) if offset + limit < len(result) else None}
-    return await run_owned_worker(registry.state_layout, collect)
+    return id_resolution.echo(await run_owned_worker(registry.state_layout, collect), primary=task_resolution or run_resolution)
 
 
 @task_operation
@@ -265,6 +290,8 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     # Parameter validation before any reconciliation; `reserve` repeats it (bool is not an integer revision here).
     if decision not in {"approve", "reject"} or type(owner_revision) is not int:
         raise ApprovalError("unsupported", "A decision must be approve or reject with an integer owner revision")
+    resolution = await _resolve_task(registry, task_id)
+    task_id = resolution.id
     record = await asyncio.to_thread(_record, registry, task_id)
     ctx = await asyncio.to_thread(context, registry.log_dir, task_id, record.interaction_owner)
     _authorize_owner(interaction_owner, ctx["interaction_owner"])
@@ -294,7 +321,7 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
         current.pump_wake.set()
     # The decision has landed. Answer with the reservation's own snapshot (the shape `approvals.get` returns, private fields
     # removed) instead of re-reading the ledger, so no read after the write can raise a pre-reservation reason.
-    return {**approvals.metadata(reserved), "action": reserved["action"], "complete": True}
+    return id_resolution.echo({**approvals.metadata(reserved), "action": reserved["action"], "complete": True}, primary=resolution)
 
 
 PATH_CHANGED = "path_changed_since_admission"

@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import backends, control, detached, followups, identity, inbox, store, takeover
+from . import backends, control, detached, followups, id_resolution, identity, inbox, store, takeover
 from . import tasks as tasks_module
 from .tasks import default_log_dir
 
@@ -83,6 +83,23 @@ class _ArgumentParser(argparse.ArgumentParser):
             print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "error": {"code": "usage", "message": message}})))
         print(f"{self.prog}: error: {message}", file=sys.stderr)
         raise SystemExit(2)
+
+
+# Arguments that accept a unique id prefix (see "Id prefixes" in docs/contracts.md). `worktree-remove`
+# is destructive and takes the full id, so it is not listed.
+_PREFIX_NOTE = "a unique prefix of at least 8 characters is accepted"
+_PREFIX_ARGUMENTS = {"task_id", "workflow_run_id", "--task-id", "--task-ids", "--workflow-run-id", "--source-run",
+                     "--related-run-id", "--run-ids"}
+
+
+def _document_id_prefixes(subparsers: Any) -> None:
+    for command, subparser in subparsers.choices.items():
+        if command == "worktree-remove":
+            continue
+        for action in subparser._actions:
+            label = next((option for option in action.option_strings if option.startswith("--")), action.dest)
+            if label in _PREFIX_ARGUMENTS:
+                action.help = f"{action.help}; {_PREFIX_NOTE}" if action.help else _PREFIX_NOTE
 
 
 def _build_parser() -> tuple[_ArgumentParser, ...]:
@@ -557,6 +574,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--additional-attempts", type=int, default=0)
         workflow_parsers.append(wp)
 
+    _document_id_prefixes(sub)
     return (
         parser,
         list_p,
@@ -725,6 +743,39 @@ class _StatusReadRefused(Exception):
         self.data = data
 
 
+def _resolve_task_arg(log_dir: Path, raw: str, *, guarded: bool = False) -> tuple[id_resolution.Resolution, Any]:
+    """Resolve a task id or unique prefix.
+
+    Returns the resolution and the verified managed view. Commands that apply the workflow read
+    guard (`guarded`) resolve within the managed caller's authorized ids and refuse an undecidable
+    caller with `workflow_read_refused`; commands that never read caller authority resolve against
+    the root's catalog, as their exact-id form always could. An invalid id keeps its
+    `invalid_task_id` error.
+    """
+    from .workflow_inspection import managed_reader
+    try:
+        store.validate_task_id(raw)
+    except store.InvalidTaskId:
+        raise _StatusReadRefused("invalid_task_id", f"not a valid task id: {raw!r}") from None
+    managed = None
+    if guarded:
+        try:
+            managed = managed_reader(log_dir)
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+            raise
+        except Exception as exc:
+            raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
+    return id_resolution.resolve_task(log_dir, raw, managed=managed), managed
+
+
+def _error_code(exc: BaseException, default: str) -> str:
+    """The stable `data.code` an MCP-shaped error carries, else its own code, else a default."""
+    data = getattr(getattr(exc, "error", None), "data", None)
+    if isinstance(data, dict) and isinstance(data.get("code"), str):
+        return data["code"]
+    return getattr(exc, "code", default)
+
+
 def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observer=None) -> dict[str, Any]:
     """One task's full snapshot — the shared body of `status` and `status-batch`.
 
@@ -766,19 +817,13 @@ def _status_observer_options(args):
 def _cmd_status(args: argparse.Namespace) -> int:
     log_dir = default_log_dir()
     try:
-        task_id = store.validate_task_id(args.task_id)
-    except store.InvalidTaskId:
-        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
+        resolution, managed = _resolve_task_arg(log_dir, args.task_id, guarded=True)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
+    task_id = resolution.id
 
     # Task qualification precedes workflow guards so direct errors retain their code.
     store.read(log_dir, task_id, include_prompt=False)
-    from .workflow_inspection import managed_reader
-    try:
-        managed = managed_reader(log_dir)
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
-        raise
-    except Exception as exc:
-        return _fail(args, "workflow_read_refused", str(exc))
 
     try:
         snapshot = _status_snapshot(log_dir, task_id, managed, **_status_observer_options(args))
@@ -790,6 +835,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         from .events import events_path, read_recent
         snapshot['recent_activity'] = read_recent(events_path(log_dir, task_id), limit=3, layout=task_layout(log_dir))
         snapshot = brief_status(snapshot)
+    snapshot = id_resolution.echo(snapshot, primary=resolution)
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task": snapshot})))
     else:
@@ -814,7 +860,7 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
         )
     # Invariant 8: every id is validated before any of them can become a path.
     valid: list[str] = []
-    errors: dict[str, dict[str, str]] = {}
+    errors: dict[str, dict[str, Any]] = {}
     for raw in ids:
         try:
             valid.append(store.validate_task_id(raw))
@@ -832,13 +878,19 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
 
     observer_options = _status_observer_options(args)
     tasks: list[dict[str, Any]] = []
-    for task_id in valid:
+    # One row per input: two prefixes naming one task give two rows. Errors stay keyed by the input.
+    for raw in valid:
         try:
-            tasks.append(_status_snapshot(log_dir, task_id, managed, **observer_options))
+            resolution = id_resolution.resolve_task(log_dir, raw, managed=managed)
+        except id_resolution.IdResolutionError as exc:
+            errors[raw] = {"code": exc.code, "message": str(exc), "data": exc.data}
+            continue
+        try:
+            tasks.append(id_resolution.echo(_status_snapshot(log_dir, resolution.id, managed, **observer_options), primary=resolution))
         except store.TaskDocumentError as exc:
-            errors[task_id] = {"code": exc.code, "message": str(exc)}
+            errors[raw] = {"code": exc.code, "message": str(exc)}
         except _StatusReadRefused as exc:
-            errors[task_id] = {"code": exc.code, "message": exc.message, **({"data": exc.data} if exc.data else {})}
+            errors[raw] = {"code": exc.code, "message": exc.message, **({"data": exc.data} if exc.data else {})}
 
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": tasks, "errors": errors})))
@@ -884,10 +936,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
             refusal = takeover.caller_refusal(default_log_dir())
             if refusal is not None:
                 raise inbox.SendRefused("Only a verified human may send as monitor: " + refusal[1], code="caller_refused")
+        # Resolved only after the caller checks above: a refused caller learns nothing about ids.
+        resolution = id_resolution.resolve_task(default_log_dir(), task_id, managed=None)
+        task_id = resolution.id
         registry = tasks_module.TaskRegistry(log_dir=default_log_dir(), open_monitor=False, execution_mode="supervised")
-        result = asyncio.run(messaging.send(registry, task_id, args.text, delivery=getattr(args, "delivery", "queue"), interaction_owner=owner))
+        result = id_resolution.echo(asyncio.run(messaging.send(registry, task_id, args.text, delivery=getattr(args, "delivery", "queue"), interaction_owner=owner)), primary=resolution)
     except inbox.SendRefused as exc:
         return fail(exc.code, str(exc))
+    except id_resolution.IdResolutionError as exc:
+        print(f"harflow-ctl: error: {exc}", file=sys.stderr)
+        if args.json:
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "error": {"code": exc.code, "message": str(exc), "data": exc.data}})))
+        return 1
     except ValueError as exc:
         return fail("invalid_params", str(exc))
 
@@ -914,11 +974,13 @@ def _fail(args: argparse.Namespace, code: str, message: str, data: Any = None) -
 
 
 def _cmd_cancel(args: argparse.Namespace) -> int:
-    try:
-        task_id = store.validate_task_id(args.task_id)
-    except store.InvalidTaskId:
-        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
     log_dir = default_log_dir()
+    try:
+        resolution, _ = _resolve_task_arg(log_dir, args.task_id)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
+    task_id = args.task_id = resolution.id
+    args.task_resolution = getattr(args, "task_resolution", None) or resolution
     if store.read(log_dir, task_id) is None:
         from . import task_resources
         pending = task_resources.pending_view(log_dir, task_id)
@@ -945,7 +1007,7 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
         )
     record = store.read(log_dir, task_id)
     status = store.brief(log_dir, record)["status"] if record is not None else None
-    result = {"task_id": task_id, "status": status, "cascade": cascade}
+    result = id_resolution.echo({"task_id": task_id, "status": status, "cascade": cascade}, primary=getattr(args, "task_resolution", None))
     if unrecorded:
         # Delivered, but the phase file saying so never landed before this process had to exit;
         # lease recovery may later record the attempt as failed.
@@ -976,7 +1038,7 @@ def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str) -> in
         return _cmd_cancel(args)  # it spawned while we asked: the ordinary cancel takes over
     view = task_resources.pending_view(log_dir, task_id)
     status = view["status"] if view is not None else "cancelled"
-    result = {"task_id": task_id, "status": status, "cascade": outcome["cascade"]}
+    result = id_resolution.echo({"task_id": task_id, "status": status, "cascade": outcome["cascade"]}, primary=getattr(args, "task_resolution", None))
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
@@ -987,10 +1049,19 @@ def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str) -> in
 def _cmd_takeover(args: argparse.Namespace) -> int:
     log_dir = default_log_dir()
     try:
+        # Humans only, decided before any id is looked up.
+        takeover._refuse_agents(log_dir, None)
+    except control.TakeoverRefused as exc:
+        return _fail(args, exc.code, str(exc))
+    try:
+        resolution, _ = _resolve_task_arg(log_dir, args.task_id)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
+    try:
         result = asyncio.run(
             takeover.take_over(
                 log_dir,
-                args.task_id,
+                resolution.id,
                 registry_factory=lambda: tasks_module.TaskRegistry(
                     log_dir=log_dir, open_monitor=False, execution_mode="supervised"
                 ),
@@ -998,6 +1069,7 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
         )
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
+    result = id_resolution.echo(result, primary=resolution)
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
@@ -1009,7 +1081,15 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
 
 def _cmd_takeover_attach(args: argparse.Namespace) -> int:
     try:
-        result = takeover.attach(default_log_dir(), args.task_id, args.pid)
+        takeover._refuse_agents(default_log_dir(), None)
+    except control.TakeoverRefused as exc:
+        return _fail(args, exc.code, str(exc))
+    try:
+        resolution, _ = _resolve_task_arg(default_log_dir(), args.task_id)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
+    try:
+        result = id_resolution.echo(takeover.attach(default_log_dir(), resolution.id, args.pid), primary=resolution)
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
     if args.json:
@@ -1125,10 +1205,11 @@ def _cmd_launch_settle(args: argparse.Namespace) -> int:
     if refused is not None:
         return refused
     try:
-        task_id = store.validate_task_id(args.task_id)
-        result = task_resources.settle_uncertain(default_log_dir(), task_id)
-    except store.InvalidTaskId:
-        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
+        resolution, _ = _resolve_task_arg(default_log_dir(), args.task_id)
+        task_id = resolution.id
+        result = id_resolution.echo(task_resources.settle_uncertain(default_log_dir(), task_id), primary=resolution)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
     except (task_resources.LaunchSettleRefused, resources.ResourceError) as exc:
         return _fail(args, exc.code, str(exc))  # a corrupt, repairing or locked ledger settles nothing
     if args.json:
@@ -1338,7 +1419,7 @@ def _continue_action(args: argparse.Namespace):
     return action
 
 
-def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
+def _cmd_detached(args: argparse.Namespace, action: Any, resolution: id_resolution.Resolution | None = None) -> int:
     log_dir = default_log_dir()
     outcome = detached.run_detached(
         action,
@@ -1349,7 +1430,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     )
     if outcome.kind == "task":
         if args.json:
-            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": outcome.payload})))
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": id_resolution.echo(outcome.payload, primary=resolution)})))
         else:
             print(outcome.payload["task_id"])
         return 0
@@ -1458,7 +1539,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             refusal = await asyncio.to_thread(caller_refusal, default_log_dir())
             if refusal is not None:
                 raise ValueError("Only a verified human may abandon an uncertain dispatch: " + refusal[1])
-            return await asyncio.to_thread(WorkflowStore(default_log_dir().parent).abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
+            run = await asyncio.to_thread(id_resolution.resolve_run, default_log_dir().parent, args.workflow_run_id, managed=None)
+            selected = await asyncio.to_thread(id_resolution.resolve_run_task, default_log_dir().parent, run.id, args.task_id) if args.task_id is not None else None
+            result = await asyncio.to_thread(WorkflowStore(default_log_dir().parent).abandon_dispatch, run.id, args.execution_id, selected.id if selected is not None else None, args.reason, args.confirm_no_process)
+            return id_resolution.echo(result, primary=run, task_id=selected)
         from . import server
         # Registry-backed helpers below get a registry without maintenance or notifications: ctl
         # has no MCP session, and its asyncio.run loop would cancel a notification worker anyway.
@@ -1535,10 +1619,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         result = asyncio.run(invoke())
     except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
+    except id_resolution.IdResolutionError as exc:
+        return _fail(args, exc.code, str(exc), exc.data)
     except Exception as exc:
         data = getattr(getattr(exc, "error", None), "data", None)
         code = data.get("code") if isinstance(data, dict) else None
-        if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable"}:
+        if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable", *id_resolution.CODES}:
             code = "workflow_error"
         return _fail(args, code, str(exc), data)
     from .read_metrics import span
@@ -1607,6 +1693,10 @@ def _main(argv: list[str] | None = None) -> int:
     except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
         data = exc.as_dict() if isinstance(exc, (StateOwnershipError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError)) else ({"published": True, "workflow_run_id": exc.workflow_run_id} if getattr(exc, "published", False) else None)
         return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), data)
+    except id_resolution.IdResolutionError as exc:
+        return _fail(args, exc.code, str(exc), exc.data)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message, exc.data)
 
 
 def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
@@ -1646,6 +1736,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             raise
         except approvals.ApprovalError as exc:
             return _fail(args, "approval_error", str(exc), {"reason": exc.reason})
+        except id_resolution.IdResolutionError as exc:
+            return _fail(args, exc.code, str(exc), exc.data)
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
@@ -1657,7 +1749,15 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         try:
             if caller_refusal(default_log_dir()) is not None:
                 raise ValueError('Workflow notifications require a direct caller')
-            result = status(default_log_dir(), args.workflow_run_id)
+            try:
+                resolution = id_resolution.resolve_run(default_log_dir().parent, args.workflow_run_id, managed=None)
+            except id_resolution.IdResolutionError as exc:
+                if not id_resolution.is_missing_exact(exc):
+                    raise
+                resolution = id_resolution.Resolution(args.workflow_run_id, None)  # an absent run has no subscriptions
+            result = id_resolution.echo(status(default_log_dir(), resolution.id), primary=resolution)
+        except id_resolution.IdResolutionError as exc:
+            return _fail(args, exc.code, str(exc), exc.data)
         except (OSError, ValueError) as exc:
             return _fail(args, 'notification_error', str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
@@ -1739,7 +1839,20 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 result = page_indexing_response(default_log_dir())
                 print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
                 return 0
-            result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=args.task_ids.split(',') if args.task_ids is not None else None)
+            listed = []
+            for raw in args.task_ids.split(',') if args.task_ids is not None else []:
+                try:
+                    store.validate_task_id(raw)
+                    listed.append(id_resolution.resolve_task(default_log_dir(), raw, managed=managed))
+                except id_resolution.IdResolutionError as exc:
+                    # A missing canonical id is dropped by the page, as it always was.
+                    if exc.code != 'unknown_task' or not id_resolution.is_canonical_uuid(raw):
+                        raise
+                    listed.append(id_resolution.Resolution(raw, None))
+                except store.InvalidTaskId:
+                    listed.append(id_resolution.Resolution(raw, None))
+            result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=[item.id for item in listed] if args.task_ids is not None else None)
+            result = id_resolution.echo(result, task_ids=listed)
             result['items'] = filter_task_reads(result['items'], managed)
             result['related_headers'] = filter_task_reads(result.get('related_headers', []), managed)
             if managed is not None:
@@ -1749,6 +1862,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 result.update(next_cursor=None, has_more=False)
             print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
             return 0
+        except id_resolution.IdResolutionError as exc:
+            return _fail(args, exc.code, str(exc), exc.data)
         except (ValueError, OSError) as exc:
             return _fail(args, 'invalid_params', str(exc))
     if args.command == "backends":
@@ -1763,7 +1878,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         try:
             result = asyncio.run(server.cancel_queued_message(args.task_id, args.message_id, "monitor" if args.monitor else "caller"))
         except Exception as exc:
-            return _fail(args, getattr(exc, "code", "invalid_params"), str(exc))
+            return _fail(args, _error_code(exc, "invalid_params"), str(exc), getattr(getattr(exc, "error", None), "data", None))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result))
         return 0
     if args.command == "worktree-list":
@@ -1814,23 +1929,31 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         if args.goal is not None or args.goal_file is not None:
             return _fail(args, "invalid_params", "--goal is available only with --workflow")
         return _cmd_detached(args, _run_action(args))
-    if args.command == "resume":
-        return _cmd_detached(args, _resume_action(args))
-    if args.command == "continue":
-        return _cmd_detached(args, _continue_action(args))
+    if args.command in {"resume", "continue"}:
+        # Resolved in the parent so the forked owner only ever sees the full id.
+        try:
+            resolution, _ = _resolve_task_arg(default_log_dir(), args.task_id)
+        except _StatusReadRefused as exc:
+            return _fail(args, exc.code, exc.message, exc.data)
+        except id_resolution.IdResolutionError as exc:
+            # An unknown id keeps the code these commands always reported; `data.code` is specific.
+            return _fail(args, "invalid_params" if exc.code == "unknown_task" else exc.code, str(exc), exc.data)
+        args.task_id = resolution.id
+        return _cmd_detached(args, _resume_action(args) if args.command == "resume" else _continue_action(args), resolution)
     if args.command == "recovery-activity":
         from .recovery_activity import page
         log_dir = default_log_dir()
         from .workflow_inspection import managed_reader, guard_task_read
         try:
-            task_id = store.validate_task_id(args.task_id)
+            resolution, managed = _resolve_task_arg(log_dir, args.task_id, guarded=True)
+            task_id = resolution.id
             # Qualify only bounded metadata: this display page never needs the caller's
             # assignment, raw-stream replay, resolved outcome, or full status snapshot.
             from .catalog import METADATA_BYTES, current_metadata_budget
             record = store.read(log_dir, task_id, include_prompt=False,
                                 metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
             try:
-                guard_task_read(task_id, managed_reader(log_dir))
+                guard_task_read(task_id, managed)
             except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                 raise
             except Exception as exc:
@@ -1842,7 +1965,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, exc.code, exc.message)
         except ValueError as exc:
             return _fail(args, "invalid_params", str(exc))
-        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task_id": task_id, "recovery_activity": result})))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task_id": task_id, "recovery_activity": result, **({"resolved_from": resolution.resolved_from} if resolution.resolved_from else {})})))
         return 0
     if args.command == "status-batch":
         return _cmd_status_batch(args)

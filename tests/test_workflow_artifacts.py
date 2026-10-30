@@ -11,6 +11,8 @@ from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 @pytest.fixture
 def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:

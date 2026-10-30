@@ -8,6 +8,8 @@ from harflow_mcp import approval_runtime, approvals, store
 from test_caller_write_approvals import CONTEXT, task_stub, tmp_path  # noqa: F401
 from test_approval_expiry_and_workflows import bash
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 def select(monkeypatch, ids):
     monkeypatch.setattr(approval_runtime, "workflow_task_ids", lambda *_: ids)

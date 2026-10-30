@@ -154,7 +154,8 @@ def test_workflow_and_permission_commands_never_start_maintenance_or_retention(
     monkeypatch.setattr(server, "_validate_repo_path", validate)
 
     assert ctl.main(["workflow-inspect", "no-such-run", "no-such-execution", "--json"]) == 1
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "workflow_error"
+    # A missing run is `unknown_workflow_run`; other workflow failures keep `workflow_error`.
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "unknown_workflow_run"
     assert ctl.main(["workflow-delete", "no-such-workflow", "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "workflow_error"
     assert ctl.main(["permission-preview", "--repo", str(home), "--backend", "claude", "--json"]) == 0

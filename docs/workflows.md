@@ -871,6 +871,14 @@ candidate list also requires attention.
 
 ## Control and recovery
 
+Every tool and `harflow-ctl workflow-*` command that takes a run id (and the run-local `task_id` of
+message, inspection and artifact reads) accepts a unique prefix of at least 8 characters; replies
+carry `resolved_from`. Managed workflow callers resolve only within their own run (including for
+`inspect_workflow_node`), their own assigned inputs, and, for run-level artifact reads only, the
+verified tree of child runs. An ambiguous prefix is
+refused with up to 5 candidates, and `worktree-remove` still requires the full id. The rules are in
+"Id prefixes" in `contracts.md`.
+
 The detached supervisor continues when the Monitor closes or an MCP client disconnects. Pause
 stops scheduling and lets active steps finish. Cancel stops the workflow's associated tasks and
 their descendants. Taking over a managed task pauses workflow scheduling before handing the

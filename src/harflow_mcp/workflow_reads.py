@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from . import id_resolution
 from .catalog import bounded_request
 from .read_metrics import span
 
@@ -90,6 +91,40 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
                 return pending
         else:
             managed = await reader()
+    resolved = await _resolve_run_arguments(action, directory, managed, kwargs)
+    return id_resolution.echo(await _perform(action, directory, managed, kwargs), **resolved)
+
+
+async def _resolve_run_arguments(action: str, directory: Path, managed: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Resolve run id prefixes once, in place; the reads below only ever see full ids."""
+    root = directory.parent
+    resolved: dict[str, Any] = {}
+    async def one(value: str, **options: Any):
+        return await asyncio.to_thread(id_resolution.resolve_run, root, value, managed=managed, **options)
+    async def leniently(value: str):
+        try:
+            return await one(value)
+        except id_resolution.IdResolutionError as exc:
+            # A listed id that does not exist is dropped by the page, as it always was.
+            if exc.code != "unknown_workflow_run" or not id_resolution.is_canonical_uuid(value):
+                raise
+            return id_resolution.Resolution(value, None)
+    if action in {"status", "detail", "get_run_header"}:
+        resolved["primary"] = await one(kwargs["run_id"])
+        kwargs["run_id"] = resolved["primary"].id
+    elif action == "list_run_page":
+        if kwargs.get("related_run_id") is not None:
+            resolved["related_run_id"] = await leniently(kwargs["related_run_id"])
+            kwargs["related_run_id"] = resolved["related_run_id"].id
+        if kwargs.get("run_ids") is not None:
+            resolved["run_ids"] = [await leniently(value) for value in kwargs["run_ids"]]
+            kwargs["run_ids"] = [item.id for item in resolved["run_ids"]]
+    return resolved
+
+
+async def _perform(action: str, directory: Path, managed: Any, kwargs: dict[str, Any]) -> Any:
+    with span("import"):
+        from . import workflows
     if managed is not None:
         association, owned_run = managed
         owned_run = await _read(on_demand_projection, workflows.WorkflowStore(directory.parent), owned_run)
@@ -198,10 +233,12 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
             from .workflow_responses import monitor_detail
             if await bounded_caller(directory) is not None:
                 raise ValueError("Monitor detail snapshots are only available to the local Monitor")
-            run = None if args.cursor else await read("status", run_id=args.workflow_run_id, _bounded_read=True)
+            # Only the verified local Monitor reaches here, so the run resolves as a direct caller.
+            resolution = await asyncio.to_thread(id_resolution.resolve_run, directory.parent, args.workflow_run_id, managed=None)
+            run = None if args.cursor else await read("status", run_id=resolution.id, _bounded_read=True)
             if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
                 return run
-            return _project(monitor_detail, run, args.workflow_run_id, args.view, directory.parent / "monitor_snapshots", args.cursor)
+            return id_resolution.echo(_project(monitor_detail, run, resolution.id, args.view, directory.parent / "monitor_snapshots", args.cursor), primary=resolution)
         return await read("detail", run_id=args.workflow_run_id, view=args.view, cursor=args.cursor)
     if action == "status" and args.monitor_view:
         from .workflow_responses import monitor, monitor_snapshot
@@ -210,12 +247,13 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
         if args.snapshot:
             if await bounded_caller(directory) is not None:
                 raise ValueError("Monitor snapshots are only available to the local Monitor")
-            run = None if args.cursor else await read("status", run_id=args.workflow_run_id, _bounded_read=True)
+            resolution = await asyncio.to_thread(id_resolution.resolve_run, directory.parent, args.workflow_run_id, managed=None)
+            run = None if args.cursor else await read("status", run_id=resolution.id, _bounded_read=True)
             if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
                 return run
             if run is not None:
                 run = await asyncio.to_thread(_project, monitor_projection, WorkflowStore(directory.parent), run)
-            return _project(monitor_snapshot, run, args.workflow_run_id, directory.parent / "monitor_snapshots", args.cursor)
+            return id_resolution.echo(_project(monitor_snapshot, run, resolution.id, directory.parent / "monitor_snapshots", args.cursor), primary=resolution)
         run = await read("status", run_id=args.workflow_run_id, _bounded_read=True)
         if run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
             return run

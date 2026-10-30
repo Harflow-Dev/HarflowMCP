@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import catalog, ctl, lineage, server, store, task_documents, workflow_run_documents, workflows
+from harflow_mcp import catalog, ctl, id_resolution, lineage, server, store, task_documents, workflow_run_documents, workflows
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import managed_page_reader
@@ -726,6 +726,7 @@ async def test_selected_workflow_polling_never_scans_retained_task_history(tmp_p
     storage = workflows.WorkflowStore(root=tmp_path)
     monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     monkeypatch.setattr(storage, 'get_run', lambda identifier, **kwargs: {'workflow_run_id': identifier, 'status': 'completed', 'definition': {}})
+    monkeypatch.setattr(id_resolution, 'resolve_run', lambda root, value, **kw: id_resolution.Resolution(value, None))
     for _ in range(3):
         pending = await server._workflow_call('status', run_id='selected', _bounded_read=True)
         assert pending['catalog_state']['status'] == 'preparing'

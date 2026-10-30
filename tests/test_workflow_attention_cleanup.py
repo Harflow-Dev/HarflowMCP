@@ -8,6 +8,8 @@ from test_workflow_delegation import Registry, graph, run_flow, storage  # noqa:
 from test_workflow_optional_refusal import ANSWER, suspended
 from test_workflow_run_node_recovery import finished_child, seed_parent, store, write_run  # noqa: F401
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 FIELDS = dict(attention_reason='Old permission refusal', attention_source={'workflow_run_id': 'old'},
               input_question='Allow retry?', input_question_items=['yes'], input_decision_id='old',
               input_source={'workflow_run_id': 'old'}, optional_review_skip_available=True)

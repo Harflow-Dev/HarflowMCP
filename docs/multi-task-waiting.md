@@ -56,6 +56,11 @@ Every response carries the same additive fields: `requested_timeout_seconds` (nu
 
 ### Tasks
 
+Task ids may be given as unique prefixes of at least 8 characters (see "Id prefixes" in
+`contracts.md`). `wait_for_tasks` resolves every id first and checks uniqueness on the resolved ids,
+so two prefixes naming one task are refused as duplicates; the reply lists the prefix inputs in
+`resolved_from_task_ids`. `wait_for_workflow` resolves its run id before it watches the run file.
+
 `wait_for_task` on a task from an earlier server process polls its recorded process and decides
 settlement through the same status resolution as `get_task_status`, never the record's own
 status. A record that cannot be re-read for 3 consecutive rounds stops an `until="terminal"` wait

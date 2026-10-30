@@ -14,6 +14,7 @@ import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from . import control, identity, lineage, store
 from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
@@ -750,11 +751,29 @@ def _availability(log_dir, record, item):
 @metadata_request()
 @task_operation
 def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20) -> dict:
-    """Read a bounded reference page and observe target metadata without reading contents."""
+    """Read a bounded reference page and observe target metadata without reading contents.
+
+    A task caller may name only itself, so a prefix resolves within that single id; a human caller
+    resolves against the current root's catalog.
+    """
+    from . import id_resolution
     store.validate_task_id(task_id)
+    caller = _caller(log_dir)
+    if caller is not None:
+        resolution = id_resolution.resolve_in_set(id_resolution.TASK, task_id, {caller.task_id})
+    else:
+        try:
+            resolution = id_resolution.resolve_task(log_dir, task_id, managed=None)
+        except id_resolution.IdResolutionError as exc:
+            if not id_resolution.is_missing_exact(exc):
+                raise
+            resolution = id_resolution.Resolution(task_id, None)  # reported below as before
+    return id_resolution.echo(_get_page(log_dir, resolution.id, cursor, limit, caller), primary=resolution)
+
+
+def _get_page(log_dir: Path, task_id: str, cursor: str | None, limit: int, caller: Any) -> dict:
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError('Artifact limit must be between 1 and 50')
-    caller = _caller(log_dir)
     if caller is not None and caller.task_id != task_id:
         raise ValueError('Task callers may read only their own artifacts')
     record = _read_owner(log_dir, task_id)

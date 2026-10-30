@@ -198,7 +198,10 @@ def test_resume_errors_come_back_as_json() -> None:
     code, out, _ = drive("ctl", "resume", "nope", "go on", "--json")
 
     assert code == 1
-    assert _one(out)["error"] == {"code": "invalid_params", "message": "unknown task_id: nope"}
+    error = _one(out)["error"]
+    assert error["code"] == "invalid_params"
+    assert error["message"].startswith("unknown task_id: nope")
+    assert error["data"]["code"] == "unknown_task"
 
 
 def test_a_silent_child_is_reported_unknown_terminated_and_reaped() -> None:

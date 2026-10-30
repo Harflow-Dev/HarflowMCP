@@ -249,7 +249,8 @@ async def test_per_id_pending_status_stays_strict_for_stale_terminal_receipt(own
     _write_receipt(owned_log_dir, task_id, "not_started", resources={"names": ["checkout:repo"]})
     monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=owned_log_dir))
     async def human_reader(_task_id):
-        return None
+        from harflow_mcp import id_resolution
+        return id_resolution.Resolution(_task_id, None)
     monkeypatch.setattr(server, "_guard_task_read", human_reader)
 
     with pytest.raises(MCPError, match="Incompatible task launch reservation"):

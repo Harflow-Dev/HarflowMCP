@@ -14,6 +14,8 @@ from harflow_mcp import workflow_run_documents as documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 @pytest.fixture
 def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -34,6 +36,7 @@ def test_cli_reads_never_initialize_server_or_registry(tmp_path, command):
     code = '''
 import sys
 from harflow_mcp import ctl, tasks
+
 class ForbiddenRegistry:
     def __init__(self, *args, **kwargs):
         raise AssertionError("read constructed TaskRegistry")

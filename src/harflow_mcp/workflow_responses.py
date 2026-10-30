@@ -153,6 +153,9 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     if "monitor_controls" in run:
         result["monitor_controls"] = copy.deepcopy(run["monitor_controls"])
+    if isinstance(run.get("resolved_from"), dict):
+        # Added by the transport when the caller named the run by a unique id prefix.
+        result["resolved_from"] = dict(run["resolved_from"])
     if "messages" in run:
         pending_messages = [m for m in run["messages"] if m["status"] in {"queued", "delivering"}]
         final_messages = [m for m in run["messages"] if m["status"] not in {"queued", "delivering"}][-8:]

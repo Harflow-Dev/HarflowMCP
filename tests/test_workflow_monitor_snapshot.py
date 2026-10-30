@@ -10,6 +10,8 @@ from harflow_mcp import ctl
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 @pytest.fixture
 def tmp_path(tmp_path_factory: pytest.TempPathFactory):

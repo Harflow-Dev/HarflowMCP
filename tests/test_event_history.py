@@ -230,6 +230,8 @@ async def test_server_page_reads_exact_task_without_legacy_scan(tmp_path, monkey
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
     monkeypatch.setattr(store, 'read', lambda *a, **k: object())
     monkeypatch.setattr(server, '_guard_task_read', lambda *a: pytest.fail('legacy authority scan'))
+    from harflow_mcp import id_resolution
+    monkeypatch.setattr(id_resolution, 'resolve_task', lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
     registry = server._reg()
     monkeypatch.setattr(registry, '_log_dir', tmp_path / 'tasks')
     registry.state_layout = resolve_layout(log_dir=tmp_path / 'tasks')
@@ -293,6 +295,8 @@ async def test_server_event_page_caps_direct_metadata_read(tmp_path, monkeypatch
         seen.append(kwargs)
         return object()
     monkeypatch.setattr(store, 'read', bounded)
+    from harflow_mcp import id_resolution
+    monkeypatch.setattr(id_resolution, 'resolve_task', lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
     await server.get_task_event_page('task-1')
     assert len(seen) == 1
     assert seen[0]['include_prompt'] is False and seen[0]['metadata_byte_limit'] == METADATA_BYTES

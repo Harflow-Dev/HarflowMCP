@@ -7,9 +7,15 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import server, store, task_waiting, wait_policy
+from harflow_mcp import id_resolution, server, store, task_waiting, wait_policy
 from harflow_mcp.tasks import Task
 from harflow_mcp.backends.codex import CodexBackend
+
+
+@pytest.fixture(autouse=True)
+def exact_task_ids(monkeypatch):
+    """These tests stub task existence below the resolver; prefix resolution is in test_id_resolution."""
+    monkeypatch.setattr(id_resolution, "resolve_task", lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
 
 
 def add_task(task_id, tmp_path, status="running"):

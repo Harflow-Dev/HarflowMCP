@@ -3446,6 +3446,10 @@ class TaskRegistry:
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id) or self._attached.get(task_id)
 
+    def known_task_ids(self) -> list[str]:
+        """Ids this process holds in memory, for resolving a unique id prefix."""
+        return [*self._tasks, *self._attached]
+
     @layout_operation
     def attach(self, task_id: str):
         from .task_attachment import AttachedTask

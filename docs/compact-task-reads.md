@@ -92,6 +92,11 @@ through the usual bounded bootstrap; retry while `bootstrap_pending` is true.
 
 ## Batched full status reads
 
+`--task-ids` entries may be unique id prefixes of at least 8 characters. The reply keeps one row per
+input, each row from a prefix carries `resolved_from`, and `errors` stays keyed by the input you sent
+(`unknown_task` with `data.reason`, or `ambiguous_task_id` with `data.candidates`; see "Id prefixes"
+in `contracts.md`).
+
 `harflow-ctl status-batch --task-ids TASK1,TASK2 --json` returns several full
 snapshots in one document and one process:
 `{"v": 11, "tasks": [<snapshot>...], "errors": {"<id>": {"code", "message"}}}`.

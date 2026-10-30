@@ -881,6 +881,81 @@ existing `{at, previous_server, current_server}` shape. Nothing writes ownership
 or task state; older consumers can ignore these optional v1 fields.
 
 
+### Id prefixes
+
+Every MCP tool and `harflow-ctl` command that takes a task id or a workflow run id also accepts a
+unique prefix of at least 8 characters (`id_resolution.MIN_PREFIX_LENGTH`). The id is resolved at
+the boundary and the full id is what the operation uses; a value that is already a full id is an
+exact hit if it is resolved again further in. The one command that never takes a prefix is `worktree-remove`,
+which requires the full id because it is destructive and accepts a task or a run id in one namespace.
+`start_workflow` does not resolve anything: it creates a run.
+
+Resolution order:
+
+1. Authority first. A managed workflow caller resolves only within the ids its existing guards allow
+   for that operation (task reads: its own execution or run; run reads: its own run; linked
+   child runs: the persisted parent chain; assigned inputs: the `authorized_input_refs` of its own
+   activation for that execution). A value outside that namespace is passed on unchanged, so the
+   existing refusal answers identically for a missing and for an unauthorized id, and an
+   unauthorized id is never counted as a candidate. Direct callers resolve against the current state
+   root's catalog.
+2. An exact id always wins and is returned unchanged. A value in canonical UUID form (36-character
+   hyphenated or 32 hex digits) is never a prefix: if it does not exist it is unknown.
+3. A value shorter than 8 characters that is not an exact id is `unknown_task` /
+   `unknown_workflow_run` with `data.reason: "prefix_too_short"` and `data.min_prefix_length: 8`.
+4. Otherwise the listing catalog's completed discovery generation is searched with a primary-key
+   range query. Discovery is retried once; if it still cannot complete, the result is `unknown_*`
+   with `data.reason: "prefix_index_unavailable"` and no id is guessed. Pending launches that have no
+   record yet match by exact id only. The record file is checked again after a match; one that
+   vanished is `unknown_*`. No match is `unknown_*` with `data.reason: "no_prefix_match"`.
+5. More than one match is `ambiguous_task_id` / `ambiguous_workflow_run_id` with `data.candidates`
+   (at most 5 of `{task_id|workflow_run_id, title|name, status, created_at}`, from catalog headers;
+   fields are `null` while a header is not built) and `data.truncated`.
+
+Surfaces that already answer a missing exact id in their own way keep doing so: approval list, get
+and respond, `get_task_artifacts` / `task-artifacts`, the notification reads and `unsubscribe`
+calls, and the explicit-id lists below pass a missing exact or canonical id through unchanged
+(an empty approval page, `approval_error` with reason `not_current`, `artifact_error`, an empty
+subscription list). They report only `ambiguous_*` and real prefix failures (a non-canonical value of
+at least 8 characters with no match, or an index that is unavailable). Catalog read failures are
+reported as `prefix_index_unavailable`; ownership and compatibility errors still propagate.
+On the approval and artifact surfaces only a canonical (UUID) id or a value shorter than 8 characters keeps the passthrough; a non-canonical value of at least 8 characters that matches nothing, such as a custom id, is `unknown_*` with `reason: "no_prefix_match"`.
+`inspect_workflow_node` resolves within the caller's own run; only run-level artifact reads
+(`get_workflow_artifacts`) and linked-child inspection use the verified tree of a managed
+orchestrator, and a tree larger than the bounded listing is never resolved against.
+
+Matching is case-sensitive and uses the id's own character set (task ids `[A-Za-z0-9_-]`, run ids
+also `.`); any other character keeps the existing invalid-id error. Run-local task ids
+(`task_id` on workflow messages, node inspection and run artifacts) resolve against that run's
+`activations[].tasks[].task_id`; `read_workflow_assigned_input` resolves `workflow_run_id` against the
+caller's own run first, then `source_run_id` and `task_id` jointly against the caller activation's
+assigned inputs, never mixing references from other activations or executions.
+
+Errors: MCP errors carry `data.code` (`unknown_task`, `ambiguous_task_id`, `unknown_workflow_run`,
+`ambiguous_workflow_run_id`) plus `data.input`; the ctl `error` object uses the same `code` and puts
+the same fields in `error.data`. `harflow-ctl resume` and `continue` keep reporting `invalid_params`
+for an unknown id (the specific code is in `error.data.code`). **Code change:** a workflow ctl
+command naming a run that does not exist now answers `unknown_workflow_run` where it used to answer
+the generic `workflow_error`.
+
+Replies: when the input was a prefix, the reply gains `resolved_from: {input, task_id}` or
+`{input, workflow_run_id}` (the resolved id; a continuation's own `task_id` keeps its meaning).
+Further id arguments add `resolved_from_<argument>` (`resolved_from_task_id`,
+`resolved_from_source_run_id`, `resolved_from_related_run_id`, `resolved_from_predecessor_task_id`),
+and list arguments add arrays (`resolved_from_task_ids`, `resolved_from_run_ids`) holding only the
+entries that were prefixes. A reply that is a bare list (`get_task_notifications`, `unsubscribe`)
+carries `resolved_from` on every row. `status` puts it in the `task` object. `status-batch` keeps one
+row in `tasks` per input (identical raw inputs are still collapsed; two different prefixes naming one
+task give two rows), each row with `resolved_from` when its input was a prefix, and `errors` stays
+keyed by the raw input. Pages that list explicit ids (`task-list-page --task-ids`, `task_ids`,
+`run_ids`) still drop a missing canonical id silently; a missing non-canonical value is reported.
+`wait_for_tasks` decides uniqueness on the resolved ids, so two prefixes naming one task are refused
+as duplicates.
+
+The new fields, `data` members and error codes are additive; unknown optional fields are ignored, and
+the `ctl-batch.json` fixture shows a prefix row. The exception is the documented ctl code change:
+`unknown_workflow_run` replaces `workflow_error` for a missing run.
+
 ## Provider failure diagnostics
 
 Task status and persisted task records carry additive `failure_diagnostic` metadata with

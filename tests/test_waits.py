@@ -11,13 +11,20 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy, workflow_run_documents
+from harflow_mcp import ctl, id_resolution, identity, server, state_ownership, store, task_waiting, wait_policy, workflow_run_documents
 from harflow_mcp.backends.codex import CodexBackend
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
 from execution_helper import run_bounded
 
 SCALE = 1000.0
+
+
+@pytest.fixture(autouse=True)
+def exact_ids(monkeypatch):
+    """These tests stub tasks and runs below the resolver; prefix resolution is in test_id_resolution."""
+    monkeypatch.setattr(id_resolution, "resolve_task", lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
+    monkeypatch.setattr(id_resolution, "resolve_run", lambda root, value, **kw: id_resolution.Resolution(value, None))
 
 
 @pytest.fixture

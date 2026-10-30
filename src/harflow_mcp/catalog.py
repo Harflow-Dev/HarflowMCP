@@ -727,6 +727,40 @@ class Catalog:
         db.execute('DELETE FROM pending WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
         db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
 
+    @layout_operation
+    def prefix_names(self, prefix: str, limit: int) -> dict[str, Any] | None:
+        """Names of the completed current discovery generation that start with ``prefix``.
+
+        Discovery must complete; it is retried once when concurrent churn clears the completion
+        mark, and ``None`` means it still did not complete, so uniqueness cannot be decided.
+        Uniqueness comes only from ``seen`` rows of the current scan generation, matched by a
+        primary-key range. Stale ``entries`` are used only for candidate display metadata.
+        """
+        if not prefix:
+            raise ValueError('prefix must be nonempty')
+        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+        with self.connect() as db:
+            for _ in range(2):
+                self._discover(db)
+                values = dict(db.execute('SELECT key,value FROM state'))
+                if values.get('complete') == '1' and values.get('directory_mtime') == str(self.directory.stat().st_mtime_ns):
+                    break
+            else:
+                return None
+            generation = int(values.get('scan_generation', '0'))
+            names = [row[0] for row in db.execute('SELECT id FROM seen WHERE generation=? AND id>=? AND id<? ORDER BY id LIMIT ?', (generation, prefix, upper, limit))]
+            headers: dict[str, dict[str, Any]] = {}
+            for identifier in names:
+                row = db.execute('SELECT stamp,payload FROM entries WHERE id=?', (identifier,)).fetchone()
+                if row is not None:
+                    try:
+                        header = json.loads(row[1])
+                    except ValueError:
+                        continue
+                    if isinstance(header, dict):
+                        headers[identifier] = {**header, '_stamp': row[0]}
+            return {'names': names, 'headers': headers}
+
     @span("catalog")
     def bootstrap(self, db: sqlite3.Connection, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> bool:
         self._discover(db)

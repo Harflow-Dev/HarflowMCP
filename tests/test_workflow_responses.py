@@ -5,6 +5,8 @@ from harflow_mcp import server
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 @pytest.fixture
 def owned_state(tmp_path):

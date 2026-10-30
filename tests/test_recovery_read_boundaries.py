@@ -44,7 +44,10 @@ async def test_get_task_events_runs_recovery_reader_off_event_loop(tmp_path, mon
         store.write(log_dir, record)
 
         monkeypatch.setattr(server, "_registry", registry)
-        monkeypatch.setattr(server, "_guard_task_read", lambda *_: asyncio.sleep(0))
+        async def guard(task_id, **_):
+            from harflow_mcp import id_resolution
+            return id_resolution.Resolution(task_id, None)
+        monkeypatch.setattr(server, "_guard_task_read", guard)
         monkeypatch.setattr(server, "read_page", lambda *args, **kwargs: type("Page", (), {
             "events": [], "has_more": False, "next_before_seq": None,
             "next_after_seq": None, "skipped_oversized": 0,

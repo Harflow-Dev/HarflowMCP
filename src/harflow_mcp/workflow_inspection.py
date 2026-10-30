@@ -376,9 +376,8 @@ def guard_task_read(task_id: str, managed: tuple[dict[str, Any], dict[str, Any]]
         execution(run, activation["id"])
 
 
-def filter_task_reads(entries: list[dict[str, Any]], managed: tuple[dict[str, Any], dict[str, Any]] | None) -> list[dict[str, Any]]:
-    if managed is None:
-        return entries
+def allowed_task_ids(managed: tuple[dict[str, Any], dict[str, Any]]) -> set[str]:
+    """Task ids a managed caller may read: the set `guard_task_read` accepts."""
     allowed = set()
     for activation in managed[1].get("activations", []):
         for task in activation.get("tasks", []):
@@ -387,6 +386,13 @@ def filter_task_reads(entries: list[dict[str, Any]], managed: tuple[dict[str, An
                 allowed.add(task["task_id"])
             except ValueError:
                 pass
+    return allowed
+
+
+def filter_task_reads(entries: list[dict[str, Any]], managed: tuple[dict[str, Any], dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if managed is None:
+        return entries
+    allowed = allowed_task_ids(managed)
     return [entry for entry in entries if entry["task_id"] in allowed]
 
 

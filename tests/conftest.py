@@ -20,6 +20,19 @@ def isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "_registry", None)
 
 
+@pytest.fixture
+def exact_ids(monkeypatch: pytest.MonkeyPatch):
+    """For tests that stub tasks or runs below the resolver (no files on disk).
+
+    Prefix resolution itself is covered by tests/test_id_resolution.py.
+    """
+    from harflow_mcp import id_resolution
+
+    monkeypatch.setattr(id_resolution, "resolve_task", lambda log_dir, value, **kw: id_resolution.Resolution(value, None))
+    monkeypatch.setattr(id_resolution, "resolve_run", lambda root, value, **kw: id_resolution.Resolution(value, None))
+    monkeypatch.setattr(id_resolution, "resolve_run_task", lambda root, run_id, value: id_resolution.Resolution(value, None))
+
+
 @pytest.fixture(autouse=True)
 def no_monitor_app(monkeypatch: pytest.MonkeyPatch):
     """`HARFLOW_OPEN_MONITOR=0`: a root task must never open the real Monitor app from a test (A4.3).

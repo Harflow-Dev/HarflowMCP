@@ -13,6 +13,10 @@ returns names, descriptions, revisions and IDs by default; `get_workflow(name)` 
 graph. Prefer wait holds of 50 seconds or less on remote MCP connections. See the
 [waiting and polling guide](docs/multi-task-waiting.md).
 
+Task ids and workflow run ids may be passed as unique prefixes of at least 8 characters; replies echo the
+resolved id in `resolved_from`, and an ambiguous prefix lists its candidates. See
+[id prefixes](docs/contracts.md#id-prefixes).
+
 After a dispatch server restart, surviving execution is reported as a quiet observation change;
 lost or uncertain owner/capture evidence remains visible. Full diagnostics retain the original
 dispatcher identity. See [supervision](docs/supervision.md#dispatch-origin-owner-and-responding-server).

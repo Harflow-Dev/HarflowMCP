@@ -78,6 +78,7 @@ def test_batch_qualifies_parent_once_and_shares_context(monkeypatch, capsys):
     captures, seen = [], []
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: Path('unused'))
     monkeypatch.setattr(workflow_inspection, 'managed_reader', lambda path: None)
+    monkeypatch.setattr(ctl.id_resolution, 'resolve_task', lambda log_dir, value, **kw: ctl.id_resolution.Resolution(value, None))
     monkeypatch.setattr(supervision, 'capture_parent_observer', lambda: captures.append(True) or context)
     monkeypatch.setattr(ctl, '_status_snapshot', lambda path, task, managed, **kw: seen.append(kw['parent_observer']) or {'task_id': task})
     args = SimpleNamespace(task_ids='a'*32+','+'b'*32, json=True, observer_parent=True)

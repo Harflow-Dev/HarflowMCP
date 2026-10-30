@@ -31,7 +31,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from . import resources as resource_ledger
 from . import task_resources
-from . import backends, control, followups, identity, inbox, store, wait_policy
+from . import backends, control, followups, id_resolution, identity, inbox, store, wait_policy
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .catalog import bounded_request
 from .events import EVENT_KINDS, events_path, read_page, read_recent
@@ -119,6 +119,8 @@ def _task_document_errors(function):
             return await function(*args, **kwargs)
         except (store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
             raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
+        except id_resolution.IdResolutionError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc), data=exc.data) from None
         except StateOwnershipError as exc:
             if getattr(exc, "published", False) is not True:
                 raise
@@ -156,7 +158,11 @@ mcp = MCPServer(
         "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
         "Codex, opencode, vibe and Antigravity (binary `agy`). start_task returns immediately with "
         "a task_id; poll it with get_task_status or await it with wait_for_task, then continue the "
-        "same session with resume_task.\n\n"
+        "same session with resume_task. Anywhere a task id or workflow run id is accepted, a unique "
+        "prefix of at least 8 characters also works: the reply carries resolved_from, and a prefix "
+        "that is too short, unmatched or ambiguous is refused with data.code (unknown_task, "
+        "ambiguous_task_id, unknown_workflow_run, ambiguous_workflow_run_id), up to 5 candidates "
+        "when ambiguous. See docs/contracts.md, Id prefixes.\n\n"
         "Call list_backends first if you are unsure which to use: it reports what is installed and "
         "what each one can actually do. Backends differ in ways that matter — Claude and vibe "
         "support a turn cap (though a breach on vibe reads as a plain failure, not a distinct "
@@ -997,6 +1003,13 @@ async def preview_task_permissions(
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _echo_each(rows: list[dict[str, Any]], resolution: id_resolution.Resolution) -> list[dict[str, Any]]:
+    """A list reply has no top-level object, so a prefix resolution is echoed on every row."""
+    if resolution.resolved_from is None:
+        return rows
+    return [{**row, "resolved_from": resolution.resolved_from} for row in rows]
+
+
 @mcp.tool()
 @_task_document_errors
 async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
@@ -1011,7 +1024,8 @@ async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
     from .caller_policy import require_mutation
     await _guard_mutation()
     await _notification_authority()
-    await _guard_task_read(task_id)
+    resolution = await _guard_task_read(task_id)
+    task_id = resolution.id
     from . import notifications
     try:
         record = await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False, metadata_byte_limit=262144)
@@ -1019,7 +1033,7 @@ async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
             raise ValueError('Unknown or unavailable task record')
         result = await asyncio.to_thread(notifications.subscribe, _reg().log_dir, task_id, notify)
         _start_notification_worker(_reg())
-        return result
+        return id_resolution.echo(result, primary=resolution)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -1030,8 +1044,9 @@ async def get_task_notifications(task_id: str) -> list[dict[str, Any]]:
     """Read bounded subscription delivery states; this never establishes task success."""
     await _notification_authority()
     from .notifications import status
+    resolution = await _resolve_task_id_or_raw(task_id)
     try:
-        return await asyncio.to_thread(status, _reg().log_dir, task_id)
+        return _echo_each(await asyncio.to_thread(status, _reg().log_dir, resolution.id), resolution)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -1044,8 +1059,9 @@ async def unsubscribe(task_id: str, notify: str | None = None) -> list[dict[str,
     await _guard_mutation()
     await _notification_authority()
     from .notifications import unsubscribe as remove
+    resolution = await _resolve_task_id_or_raw(task_id)
     try:
-        return await asyncio.to_thread(remove, _reg().log_dir, task_id, notify)
+        return _echo_each(await asyncio.to_thread(remove, _reg().log_dir, resolution.id, notify), resolution)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -1062,7 +1078,8 @@ async def get_task_status(
     """Report a dispatched task's current state without blocking.
 
     Args:
-        task_id: Identifier returned by start_task or resume_task.
+        task_id: Identifier returned by start_task or resume_task, or a unique prefix of at
+            least 8 characters; a prefix reply carries resolved_from.
         include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
             if False (default), the tail is omitted for running/completed tasks and shortened
             to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
@@ -1130,9 +1147,11 @@ async def get_task_status(
     if brief:
         detail = "compact"
     from .mcp_projections import task_status as compact_status
+    resolution = None
     def project(payload):
-        return compact_status(payload) if detail == "compact" else payload
-    await _guard_task_read(task_id)
+        return id_resolution.echo(compact_status(payload) if detail == "compact" else payload, primary=resolution)
+    resolution = await _guard_task_read(task_id)
+    task_id = resolution.id
     task = _reg().get(task_id)
     if task is not None:
         snapshot = task.snapshot()
@@ -1427,10 +1446,12 @@ async def wait_for_task(
     if detail not in ("compact", "full"):
         raise MCPError(INVALID_PARAMS, "detail must be compact or full")
     from .mcp_projections import task_status as compact_status
+    resolution = None
     def project(payload):
-        return compact_status(payload) if detail == "compact" else payload
+        return id_resolution.echo(compact_status(payload) if detail == "compact" else payload, primary=resolution)
     plan = _wait_plan(timeout_seconds, until, DEFAULT_WAIT_SECONDS)
-    await _guard_task_read(task_id)
+    resolution = await _guard_task_read(task_id)
+    task_id = resolution.id
 
     clock = plan.begin()
     outcome_observed = True
@@ -1576,13 +1597,16 @@ async def wait_for_tasks(
     from . import task_waiting
     try:
         task_waiting.validate(task_ids, mode, timeout_seconds, until)
-        for task_id in task_ids:
-            await _guard_task_read(task_id, qualify_source=False)
-        return await task_waiting.wait_for_tasks(
+        resolutions = [await _guard_task_read(task_id, qualify_source=False) for task_id in task_ids]
+        # Two prefixes can name one task: uniqueness is decided on the resolved ids.
+        task_ids = [resolution.id for resolution in resolutions]
+        task_waiting.validate(task_ids, mode, timeout_seconds, until)
+        result = await task_waiting.wait_for_tasks(
             _reg(), task_ids, mode, timeout_seconds,
             ctx.report_progress if ctx is not None else None,
             until,
         )
+        return id_resolution.echo(result, task_ids=resolutions)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -1621,7 +1645,8 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
-    await _guard_task_read(task_id)
+    resolution = await _guard_task_read(task_id)
+    task_id = resolution.id
     if allowed_commands is not None:
         source = await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False)
         if source is not None:
@@ -1630,7 +1655,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
         task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    return task.brief() | {"enforcement": task.enforcement}
+    return id_resolution.echo(task.brief() | {"enforcement": task.enforcement}, primary=resolution)
 
 
 @mcp.tool()
@@ -1704,6 +1729,8 @@ async def resume_task(
             f"network must be a boolean (true/false) or omitted, got {network!r}",
         )
 
+    resolution = await _resolve_task_id(task_id)
+    task_id = resolution.id
     parent = _reg().get(task_id)
     try:
         from .task_attachment import AttachedTask
@@ -1757,7 +1784,7 @@ async def resume_task(
         if getattr(exc, 'harflow_not_started', False) is not True:
             raise
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    return task.brief() | {"enforcement": task.enforcement}
+    return id_resolution.echo(task.brief() | {"enforcement": task.enforcement}, primary=resolution)
 
 
 @mcp.tool()
@@ -1858,15 +1885,27 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
     predecessor_task_id selects direct resumes and continuations of that task, for following
     successor links without scanning all retained history. Combine it with the returned cursor.
     """
+    predecessor = None
     try:
         if predecessor_task_id is not None:
-            await _guard_task_read(predecessor_task_id)
             if task_ids is not None:
                 raise ValueError('predecessor_task_id cannot be combined with task_ids')
+            from .workflow_inspection import guard_task_read
+            caller_view = await _managed_workflow_reader()
+            predecessor = (await _resolve_task_ids_leniently([predecessor_task_id], caller_view))[0]
+            await asyncio.to_thread(store.read, _reg().log_dir, predecessor.id, include_prompt=False)
+            guard_task_read(predecessor.id, caller_view)
+            predecessor_task_id = predecessor.id
         from .workflow_inspection import managed_page_reader, page_indexing_response
         ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
         if not ready:
             return page_indexing_response(_reg().log_dir)
+        listed = None
+        if task_ids is not None:
+            if not isinstance(task_ids, list) or not all(isinstance(item, str) for item in task_ids):
+                raise ValueError('task_ids must be a list of task id strings')
+            listed = await _resolve_task_ids_leniently(task_ids, managed)
+            task_ids = [item.id for item in listed]
         page = await asyncio.to_thread(store.list_page, _reg().log_dir, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, task_ids=task_ids, filters={'predecessor_task_id': predecessor_task_id} if predecessor_task_id is not None else None)
         from .workflow_inspection import filter_task_reads
         visible = filter_task_reads(page['items'], managed)
@@ -1879,7 +1918,7 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
             page.update(next_cursor=None, has_more=False)
         page['items'] = visible
         page['related_headers'] = filter_task_reads(page.get('related_headers', []), managed)
-        return page
+        return id_resolution.echo(page, predecessor_task_id=predecessor, task_ids=listed or [])
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -1935,13 +1974,15 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     """
     from .caller_policy import require_mutation
     await _guard_mutation()
+    resolution = await _resolve_task_id(task_id)
+    task_id = resolution.id
     if _reg().get(task_id) is None and _reg().recover(task_id) is None:
         try:
             cancelled = await _cancel_pending(task_id)
         except backends.UnsupportedCapability as exc:
             raise MCPError(INVALID_PARAMS, str(exc)) from None
         if cancelled is not None:
-            return cancelled
+            return id_resolution.echo(cancelled, primary=resolution)
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
 
     try:
@@ -1968,7 +2009,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
         _status_payload, snapshot, include_tail=False, log_dir=_reg().log_dir, task_id=task_id
     )
     response["cascade"] = cascade
-    return response
+    return id_resolution.echo(response, primary=resolution)
 
 
 @mcp.tool()
@@ -2016,12 +2057,6 @@ async def get_task_events(
     Default (no before_seq/after_seq): newest page — the most recent events.
     Both cursors cannot be used at once. kinds=[] or an unknown kind raises INVALID_PARAMS.
     """
-    await _guard_task_read(task_id)
-    try:
-        store.validate_task_id(task_id)
-    except store.InvalidTaskId as exc:
-        raise MCPError(INVALID_PARAMS, str(exc)) from None
-
     if limit < 1 or limit > 200:
         raise MCPError(INVALID_PARAMS, f"limit must be between 1 and 200, got {limit}")
 
@@ -2040,6 +2075,8 @@ async def get_task_events(
                     f"unknown kind {kind!r}; must be one of {sorted(EVENT_KINDS)}",
                 )
 
+    resolution = await _guard_task_read(task_id)
+    task_id = resolution.id
     task = _reg().get(task_id)
     from .catalog import METADATA_BYTES, current_metadata_budget
     record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
@@ -2062,7 +2099,7 @@ async def get_task_events(
     from . import recovery_activity
     recovered_page = await asyncio.to_thread(recovery_activity.page, _reg().log_dir,
         record, cursor=recovery_cursor) if record is not None else None
-    return {
+    return id_resolution.echo({
         "task_id": task_id,
         "recovery_activity": recovered_page,
         "events": page_result.events,
@@ -2070,7 +2107,7 @@ async def get_task_events(
         "next_before_seq": page_result.next_before_seq,
         "next_after_seq": page_result.next_after_seq,
         "skipped_oversized": page_result.skipped_oversized,
-    }
+    }, primary=resolution)
 
 
 @mcp.tool()
@@ -2106,6 +2143,8 @@ async def get_task_event_page(
             return {"task_id": task_id, "events": [], "has_more": False,
                     "next_cursor": None, "indexing": pending["bootstrap_pending"],
                     **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note", "catalog_state") if key in pending}}
+        resolution = await _resolve_task_id(task_id, managed)
+        task_id = resolution.id
         workflow_inspection.guard_task_read(task_id, managed)
         from .catalog import METADATA_BYTES, Catalog
         budget = Catalog(_reg().log_dir, store.RECORD_SUFFIX)
@@ -2117,10 +2156,10 @@ async def get_task_event_page(
                                        limit=limit, cursor=cursor, kinds=kinds, layout=_reg().state_layout)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    return {"task_id": task_id, "events": page.events, "has_more": page.has_more,
+    return id_resolution.echo({"task_id": task_id, "events": page.events, "has_more": page.has_more,
             "next_cursor": page.next_cursor, "snapshot_end": page.snapshot_end,
             "live_offset": page.live_offset, "bytes_read": page.bytes_read,
-            "decoded_records": page.decoded_records, "indexing": False}
+            "decoded_records": page.decoded_records, "indexing": False}, primary=resolution)
 
 
 @mcp.tool()
@@ -2143,8 +2182,11 @@ async def send_message(task_id: str, text: str, delivery: str = "queue", interac
     try:
         store.validate_task_id(task_id)
         await _guard_message_sender(interaction_owner)
+        from .workflow_messages import validate_text
+        validate_text(text)
+        resolution = await _resolve_task_id(task_id)
         from . import messaging
-        return await messaging.send(_reg(), task_id, text, delivery=delivery, interaction_owner=interaction_owner)
+        return id_resolution.echo(await messaging.send(_reg(), resolution.id, text, delivery=delivery, interaction_owner=interaction_owner), primary=resolution)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (ValueError, store.InvalidTaskId) as exc:
@@ -2173,8 +2215,9 @@ async def cancel_queued_message(task_id: str, message_id: str, interaction_owner
     try:
         store.validate_task_id(task_id)
         await _guard_message_sender(interaction_owner)
+        resolution = await _resolve_task_id(task_id)
         from . import messaging
-        return await messaging.cancel_message(_reg(), task_id, message_id, interaction_owner=interaction_owner)
+        return id_resolution.echo(await messaging.cancel_message(_reg(), resolution.id, message_id, interaction_owner=interaction_owner), primary=resolution)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except ValueError as exc:
@@ -2197,8 +2240,11 @@ async def send_workflow_message(run_id: str, text: str, task_id: str | None = No
         from .workflow_messages import send, deliver_now
         from .workflows import WorkflowStore
         storage = WorkflowStore(_reg().log_dir.parent)
-        result = await asyncio.to_thread(send, storage, run_id, text, task_id=task_id, delivery=delivery, interaction_owner=interaction_owner)
-        return await deliver_now(storage, result, interaction_owner=interaction_owner)
+        # Message callers are direct callers (`_guard_message_sender` refuses managed ones).
+        run = await _resolve_run_id(run_id)
+        selected = await asyncio.to_thread(id_resolution.resolve_run_task, storage.root, run.id, task_id) if task_id is not None else None
+        result = await asyncio.to_thread(send, storage, run.id, text, task_id=selected.id if selected is not None else None, delivery=delivery, interaction_owner=interaction_owner)
+        return id_resolution.echo(await deliver_now(storage, result, interaction_owner=interaction_owner), primary=run, task_id=selected)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except ValueError as exc:
@@ -2214,7 +2260,8 @@ async def cancel_workflow_message(run_id: str, message_id: str, interaction_owne
         await _guard_message_sender(interaction_owner)
         from .workflow_messages import cancel
         from .workflows import WorkflowStore
-        return await asyncio.to_thread(cancel, WorkflowStore(_reg().log_dir.parent), run_id, message_id, interaction_owner=interaction_owner)
+        run = await _resolve_run_id(run_id)
+        return id_resolution.echo(await asyncio.to_thread(cancel, WorkflowStore(_reg().log_dir.parent), run.id, message_id, interaction_owner=interaction_owner), primary=run)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except ValueError as exc:
@@ -2285,18 +2332,77 @@ def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return managed_run_summary(run)
 
 
-async def _guard_task_read(task_id: str, *, qualify_source: bool = True) -> None:
+async def _resolve_task_id(task_id: str, managed: Any = None) -> id_resolution.Resolution:
+    """Resolve a task id or unique prefix once.
+
+    Reads pass the verified `managed` view, which limits the namespace to what the caller may read.
+    Mutations and notification reads pass none: they never read caller authority for an exact id
+    either, and their own checks refuse a caller that may not act.
+    """
     try:
         store.validate_task_id(task_id)
     except store.InvalidTaskId as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    if qualify_source:
-        await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False)
-    from .workflow_inspection import guard_task_read
+    return await asyncio.to_thread(id_resolution.resolve_task, _reg().log_dir, task_id, managed=managed, in_memory=getattr(_reg(), "known_task_ids", None))
+
+
+async def _resolve_task_id_or_raw(task_id: str) -> id_resolution.Resolution:
+    """Resolve for a read of persisted side state (subscriptions) that outlives the task record."""
     try:
-        guard_task_read(task_id, await _managed_workflow_reader())
+        return await _resolve_task_id(task_id, None)
+    except id_resolution.IdResolutionError as exc:
+        if exc.code != "unknown_task":
+            raise
+        return id_resolution.Resolution(task_id, None)
+
+
+async def _resolve_run_id_or_raw(run_id: str) -> id_resolution.Resolution:
+    try:
+        return await _resolve_run_id(run_id)
+    except id_resolution.IdResolutionError as exc:
+        if exc.code != "unknown_workflow_run":
+            raise
+        return id_resolution.Resolution(run_id, None)
+
+
+async def _resolve_run_id(run_id: str, managed: Any = None) -> id_resolution.Resolution:
+    """Resolve a workflow run id or prefix for a direct caller (the default) or a given managed view."""
+    try:
+        return await asyncio.to_thread(id_resolution.resolve_run, _reg().log_dir.parent, run_id, managed=managed)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _resolve_task_ids_leniently(task_ids: list[str], managed: Any) -> list[id_resolution.Resolution]:
+    """Resolve listed ids for a page request: a missing canonical id is dropped by the page, as before."""
+    resolved = []
+    for task_id in task_ids:
+        try:
+            resolved.append(await _resolve_task_id(task_id, managed))
+        except MCPError:
+            raise
+        except id_resolution.IdResolutionError as exc:
+            if exc.code != "unknown_task" or not id_resolution.is_canonical_uuid(task_id):
+                raise
+            resolved.append(id_resolution.Resolution(task_id, None))
+    return resolved
+
+
+async def _guard_task_read(task_id: str, *, qualify_source: bool = True) -> id_resolution.Resolution:
+    """Resolve, qualify and authorize one task read; returns the resolved id and its prefix echo."""
+    from .workflow_inspection import guard_task_read
+    try:
+        managed = await _managed_workflow_reader()
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    resolution = await _resolve_task_id(task_id, managed)
+    if qualify_source:
+        await asyncio.to_thread(store.read, _reg().log_dir, resolution.id, include_prompt=False)
+    try:
+        guard_task_read(resolution.id, managed)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return resolution
 
 
 def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
@@ -2306,6 +2412,35 @@ def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> 
 
 @bounded_request
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
+    """Resolve the run id prefix once, then dispatch with the full id and echo the resolution."""
+    from .workflow_reads import BOUNDED_READ_ACTIONS
+    resolution = None
+    # Bounded reads resolve inside `workflow_reads.call`; assigned inputs resolve jointly in
+    # `workflow_node_reads`; creation has no run to resolve.
+    if kwargs.get("run_id") is not None and action not in BOUNDED_READ_ACTIONS and action != "assigned_input":
+        from .workflow_reads import READ_ACTIONS
+        if action not in READ_ACTIONS:
+            # Authority first: a caller that may not mutate learns nothing about which runs exist.
+            if action in {"resume", "recover", "cancel", "builder_followup"}:
+                _guard_launch_layout()
+            await _guard_mutation()
+            caller = await _verified_workflow_caller()
+            if caller is not None:
+                from .workflow_hooks import refuse_managed
+                try:
+                    refuse_managed(_reg().log_dir, caller.record.task_id)
+                except ValueError as exc:
+                    raise MCPError(INVALID_PARAMS, str(exc)) from None
+        try:
+            managed = await _managed_workflow_reader()
+            resolution = await asyncio.to_thread(id_resolution.resolve_run, _reg().log_dir.parent, kwargs["run_id"], managed=managed)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        kwargs["run_id"] = resolution.id
+    return id_resolution.echo(await _workflow_dispatch(action, **kwargs), primary=resolution)
+
+
+async def _workflow_dispatch(action: str, **kwargs: Any) -> Any:
     if action in {"start", "build", "builder_followup", "resume", "recover", "cancel", "abandon_dispatch"}:
         _guard_launch_layout()
     from .caller_policy import require_mutation
@@ -2748,12 +2883,13 @@ async def subscribe_workflow(workflow_run_id: str, notify: str, events: list[str
     await _guard_mutation()
     await _notification_authority()
     from . import workflow_notifications
+    resolution = await _resolve_run_id(workflow_run_id)
     try:
-        result = await _notification_io(workflow_notifications.subscribe, _reg().log_dir, workflow_run_id, notify, events)
+        result = await _notification_io(workflow_notifications.subscribe, _reg().log_dir, resolution.id, notify, events)
     except (ValueError, OSError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     _start_notification_worker(_reg())
-    return result
+    return id_resolution.echo(result, primary=resolution)
 
 
 @mcp.tool()
@@ -2764,8 +2900,9 @@ async def unsubscribe_workflow(workflow_run_id: str, notify: str | None = None) 
     await _guard_mutation()
     await _notification_authority()
     from .workflow_notifications import unsubscribe
+    resolution = await _resolve_run_id_or_raw(workflow_run_id)
     try:
-        return await _notification_io(unsubscribe, _reg().log_dir, workflow_run_id, notify)
+        return id_resolution.echo(await _notification_io(unsubscribe, _reg().log_dir, resolution.id, notify), primary=resolution)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -2776,8 +2913,9 @@ async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
     """Read root workflow subscriptions and at most 50 recent delivery states; direct callers only."""
     await _notification_authority()
     from .workflow_notifications import status
+    resolution = await _resolve_run_id_or_raw(workflow_run_id)
     try:
-        return await asyncio.to_thread(status, _reg().log_dir, workflow_run_id)
+        return id_resolution.echo(await asyncio.to_thread(status, _reg().log_dir, resolution.id), primary=resolution)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -2858,6 +2996,15 @@ async def _wait_workflow_full(
 ) -> dict[str, Any]:
     plan = _wait_plan(timeout_seconds, until, 30)
     clock = plan.begin()
+    # Resolve before the watched file path and the approval queries are built from the id.
+    try:
+        if (_reg().log_dir.parent / "workflow-runs" / (workflow_run_id + ".json")).exists():
+            resolution = id_resolution.Resolution(workflow_run_id, None)  # exact: no authority lookup needed
+        else:
+            resolution = await _resolve_run_id(workflow_run_id, await _managed_workflow_reader())
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    workflow_run_id = resolution.id
     result = await _workflow_call("status", run_id=workflow_run_id)
     # The same root retention uses for run files, not the home directory.
     path = _reg().log_dir.parent / "workflow-runs" / (workflow_run_id + ".json")
@@ -2871,8 +3018,8 @@ async def _wait_workflow_full(
         except OSError:
             return None
     def finish(stop_reason: str) -> dict[str, Any]:
-        return {**result, **wait_policy.result_fields(
-            plan, stop_reason, clock.elapsed(), "wait_for_workflow", "get_workflow_status")}
+        return id_resolution.echo({**result, **wait_policy.result_fields(
+            plan, stop_reason, clock.elapsed(), "wait_for_workflow", "get_workflow_status")}, primary=resolution)
     # First poll refreshes after the initial read, avoiding a read/stat race.
     previous_revision = None
     last_seen_revision = revision()

@@ -11,6 +11,8 @@ from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import execution, result_page
 from workflow_receipt_fixtures import persist_receipt
 
+pytestmark = pytest.mark.usefixtures("exact_ids")
+
 
 @pytest.fixture
 def owned_state(tmp_path):
