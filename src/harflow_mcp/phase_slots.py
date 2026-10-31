@@ -46,6 +46,10 @@ class SlotRefused(InvalidResourceRequest):
     code = "slot_refused"
 
 
+class SlotNotEnabled(SlotRefused):
+    code = "phase_slots_not_enabled"
+
+
 class SlotSourceChanged(SlotRefused):
     code = "slot_source_changed"
 
@@ -143,7 +147,7 @@ def lifecycle_lock(log_dir: Path, task_id: str):
 
 def _enabled(root: Path):
     if (_read_marker(root) or {}).get("layout_version") != 2:
-        raise SlotRefused("phase slots are disabled; a human must quiesce all owners and run harflow-ctl slot enable")
+        raise SlotNotEnabled("phase slots are disabled; a human must quiesce all owners and run harflow-ctl slot enable")
 
 
 def validate_configuration(value):

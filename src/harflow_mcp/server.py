@@ -3496,6 +3496,7 @@ async def acquire_slot(name: str, wait_seconds: StrictInt = 300) -> dict[str, An
     blocked; retry the same name every two seconds to observe a grant. Queue budget is 0..21600
     seconds, never a held-lease timeout. Release lease_id on every exit, including queued exits.
     Phase slots require human enable and a verified task caller; they never borrow ancestor holds.
+    Disabled layout returns error data.code phase_slots_not_enabled; other refusals remain distinct.
     """
     from .phase_slots import acquire
     try:
@@ -3512,6 +3513,7 @@ async def release_slot(lease_id: str) -> dict[str, Any]:
     """Release this execution's lease or cancel its queued request. Cleanup remains capacity
     consuming until successful; failed/uncertain cleanup requires human inspection and resolve.
     Stop all owned heavy descendants before release. Client interruption alone never releases.
+    Disabled layout returns error data.code phase_slots_not_enabled; other refusals remain distinct.
     """
     from .phase_slots import release
     try:
@@ -3527,6 +3529,7 @@ async def release_slot(lease_id: str) -> dict[str, Any]:
 async def slot_status(name: str | None = None) -> dict[str, Any]:
     """Read bounded phase holders, queue positions, capacity, cleanup blockers and timestamp events.
     This read never performs cleanup or changes the ledger.
+    Disabled layout returns error data.code phase_slots_not_enabled; other refusals remain distinct.
     """
     from .phase_slots import status
     try:

@@ -1300,6 +1300,44 @@ includes running tasks queued for that phase name. Task waits preserve these pro
 reads never mutate slot state. Slot lifecycle events live in the resource ledger, with
 at most 256 timestamped entries, and introduce no task event kinds.
 
+The shared disabled-layout check returns the additive stable error code
+`phase_slots_not_enabled` on all ctl and MCP phase-slot surfaces that reach it,
+including status, acquisition, release, configuration and service operations.
+The diagnostic still directs a human to quiesce owners and explicitly enable the
+layout. This code changes no authority, locking, storage or enable behavior;
+earlier authority/validation failures retain their own codes. Other generic phase
+refusals remain `slot_refused` (specialized refusal codes also remain unchanged).
+Older engines advertising `phase-slots.v1` may return `slot_refused` for a disabled
+layout; clients must treat that as an unavailable diagnostic rather than infer
+disabled state from prose.
+
+`harflow-ctl slot status --json` returns `result` with `leases` (at most 256),
+`truncated`, `configuration` (`epoch` and at most 256 configured `names`), `service`
+and `events` (at most 256). The lease array is not a FIFO queue; retained expired
+receipts may appear, and `truncated` qualifies the lease projection. Service state
+describes the cleanup supervisor independently of reservation occupancy. Events
+are bounded history, not occupancy or queue evidence. `blocked_by` and `blockers`
+share a maximum of 100 entries; reaching that bound does not establish completeness
+or prove additional blockers exist.
+
+`harflow-ctl resources --json` exposes the current shared inventory in top-level
+`resources`, sorted by name, with `capacity`, `holders` and FIFO `queue` per name.
+The resource ledger holds at most 4096 reservations, including whole-task,
+workflow and phase reservations. Borrowed holders (`borrows_from`) consume no
+additional capacity; retained `release_requested` and cleanup holds still consume
+capacity. Inventory omits idle names; clients may union its names with configured
+names from slot status. Unconfigured names have capacity one. These are separate
+reads, not an atomic snapshot: join a phase `lease_id` only to an inventory
+`reservation_id`, retain each read's provenance, and never derive current occupancy
+or queue order from phase history.
+
+Canonical aggregate examples are generated from actual ctl reads against isolated,
+validated synthetic storage by `scripts/generate-resource-slot-fixtures.py`.
+Use `--check` to verify canonical bytes without writing, `--output DIRECTORY` for
+a complete temporary bundle, and `--provenance FILE` for controlled-fact evidence.
+The generator owns only its seven aggregate/refusal examples and their manifest
+entries; existing phase examples and all unrelated fixture bytes remain unchanged.
+
 Acquire returns queued immediately and is idempotent for one execution/name. Its queue
 budget is durable, bounded 0..21600 seconds and never revokes a held lease. Expiry is
 idempotent until explicit release acknowledges the expired lease; polling cannot renew

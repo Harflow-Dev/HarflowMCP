@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -130,6 +131,99 @@ def test_manifest_cases_reach_the_wire_validator():
                     assert "document version" in reason.lower()
 
 
+def test_resource_slot_contract_fixtures_cover_aggregate_semantics():
+    root = Path(__file__).parents[1] / "contracts" / "v1"
+
+    def document(name):
+        return json.loads((root / name).read_text())
+
+    empty = document("ctl-phase-slot-status-empty.json")["result"]
+    configured = document("ctl-phase-slot-status-configured-idle.json")["result"]
+    assert empty["configuration"]["names"] == {}
+    assert empty["leases"] == [] and empty["service"]["state"] == "missing"
+    assert configured["leases"] == []
+    assert configured["configuration"]["names"] == {
+        "build": {"capacity": 2}, "simulator": {"capacity": 1}}
+
+    populated = document("ctl-phase-slot-status-populated.json")["result"]
+    leases = {lease["lease_id"]: lease for lease in populated["leases"]}
+    assert leases["build-waiter-1"]["position"] == 1
+    assert leases["build-waiter-1"]["blocked_by"] == ["legacy-holder", "workflow-holder"]
+    assert leases["build-waiter-2"]["position"] == 2
+    assert leases["build-waiter-2"]["blocked_by"] == [
+        "legacy-holder", "workflow-holder", "build-waiter-1"]
+    assert leases["simulator-cleanup"]["state"] == "cleanup_uncertain"
+    assert leases["simulator-waiter"]["blocked_by"] == ["simulator-cleanup"]
+    assert leases["unconfigured-holder"]["capacity"] == 1
+
+    service_unknown = document("ctl-phase-slot-status-service-unavailable.json")["result"]
+    assert service_unknown["service"]["state"] == "unknown"
+    assert {k: v for k, v in service_unknown.items() if k != "service"} == {
+        k: v for k, v in populated.items() if k != "service"}
+
+    inventory = document("ctl-resources-mixed.json")["resources"]
+    by_name = {resource["name"]: resource for resource in inventory}
+    build = by_name["build"]
+    holders = {holder["reservation_id"]: holder for holder in build["holders"]}
+    assert build["capacity"] == 2
+    assert holders["workflow-holder"]["release_requested"] is True
+    assert holders["workflow-borrower"]["borrows_from"] == "workflow-holder"
+    assert [entry["lease_id"] for entry in build["queue"]] == [
+        "build-waiter-1", "build-waiter-2"]
+    assert by_name["simulator"]["holders"][0]["reservation_id"] == "simulator-cleanup"
+    assert by_name["unconfigured-device"]["capacity"] == 1
+
+    truncated = document("ctl-phase-slot-status-truncated.json")["result"]
+    assert truncated["truncated"] is True
+    assert len(truncated["leases"]) == 256
+    assert truncated["leases"][0]["lease_id"] == "lease-000"
+    assert truncated["leases"][-1]["lease_id"] == "lease-255"
+
+    disabled = document("ctl-phase-slot-not-enabled.json")["error"]
+    generic = document("ctl-phase-slot-refused.json")["error"]
+    assert disabled["code"] == "phase_slots_not_enabled"
+    assert generic["code"] == "slot_refused"
+
+
+def test_resource_slot_fixture_generation_matches_canonical_and_preserves_other_fixtures(tmp_path):
+    repository = Path(__file__).parents[1]
+    script = repository / "scripts" / "generate-resource-slot-fixtures.py"
+    spec = importlib.util.spec_from_file_location("resource_slot_fixture_generator", script)
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    generator.generate(first)
+    generator.generate(second)
+
+    manifest = json.loads((repository / "contracts" / "v1" / "manifest.json").read_text())
+    names = {
+        "ctl-phase-slot-not-enabled.json",
+        "ctl-phase-slot-status-configured-idle.json",
+        "ctl-phase-slot-status-empty.json",
+        "ctl-phase-slot-status-populated.json",
+        "ctl-phase-slot-status-service-unavailable.json",
+        "ctl-phase-slot-status-truncated.json",
+        "ctl-resources-mixed.json",
+    }
+    for name in names:
+        canonical = repository / "contracts" / "v1" / name
+        assert (first / name).read_bytes() == canonical.read_bytes()
+        assert (second / name).read_bytes() == canonical.read_bytes()
+        assert manifest["files"][name] == hashlib.sha256(canonical.read_bytes()).hexdigest()
+        assert name in manifest["cases"]
+
+    generated_manifest = json.loads((first / "manifest.json").read_text())
+    canonical_manifest = json.loads((repository / "contracts" / "v1" / "manifest.json").read_text())
+    for name in ("ctl-success.json", "ctl-phase-slot-refused.json"):
+        canonical = repository / "contracts" / "v1" / name
+        assert (first / name).read_bytes() == canonical.read_bytes()
+        assert generated_manifest["files"][name] == canonical_manifest["files"][name]
+        assert generated_manifest["cases"][name] == canonical_manifest["cases"][name]
+    assert (first / "manifest.json").read_bytes() == (second / "manifest.json").read_bytes()
+    assert (first / "manifest.sha256").read_bytes() == (second / "manifest.sha256").read_bytes()
 def test_event_validation_requires_current_identity_before_payload_interpretation():
     for wire_version in (True, 1.0):
         with pytest.raises(ValueError):

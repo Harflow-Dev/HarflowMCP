@@ -822,6 +822,52 @@ def test_slot_status_cli_and_mcp_return_the_same_read_only_projection(tmp_path, 
     assert cli["events"] == mcp["events"]
 
 
+def test_disabled_layout_refusal_has_distinct_code_at_ctl_and_mcp_boundaries(tmp_path, monkeypatch, capsys):
+    root = enabled_root(tmp_path / "state")
+    marker = state_ownership._read_marker(root)
+    marker["layout_version"] = 1
+    resources._atomic_write(root / state_ownership.MARKER_NAME, marker)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))
+
+    assert ctl.main(["slot", "status", "sim", "--json"]) == 1
+    status_error = json.loads(capsys.readouterr().out)["error"]
+    assert status_error["code"] == "phase_slots_not_enabled"
+    assert "phase slots are disabled" in status_error["message"]
+
+    assert ctl.main(["slot", "acquire", "sim", "--wait-seconds", "0", "--json"]) == 1
+    acquire_error = json.loads(capsys.readouterr().out)["error"]
+    assert acquire_error["code"] == "phase_slots_not_enabled"
+
+    monkeypatch.setattr(server, "_reg", lambda: SimpleNamespace(log_dir=root / "tasks"))
+    with pytest.raises(server.MCPError) as mcp_status:
+        asyncio.run(server.slot_status("sim"))
+    assert mcp_status.value.data == {"code": "phase_slots_not_enabled"}
+
+    with pytest.raises(server.MCPError) as mcp_acquire:
+        asyncio.run(server.acquire_slot("sim", wait_seconds=0))
+    assert mcp_acquire.value.data == {"code": "phase_slots_not_enabled"}
+
+
+def test_unrelated_phase_slot_refusals_keep_generic_code_at_public_boundaries(tmp_path, monkeypatch, capsys):
+    root = enabled_root(tmp_path / "state")
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))
+
+    def refuse(*_args, **_kwargs):
+        raise phase_slots.SlotRefused("fixture non-layout refusal")
+    monkeypatch.setattr(phase_slots, "status", refuse)
+    assert ctl.main(["slot", "status", "sim", "--json"]) == 1
+    ctl_error = json.loads(capsys.readouterr().out)["error"]
+    assert ctl_error["code"] == "slot_refused"
+    monkeypatch.undo()
+
+    from harflow_mcp import lineage
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *_args, **_kwargs: lineage.Detection(None))
+    monkeypatch.setattr(server, "_reg", lambda: SimpleNamespace(log_dir=root / "tasks"))
+    with pytest.raises(server.MCPError) as mcp_error:
+        asyncio.run(server.acquire_slot("sim", wait_seconds=0))
+    assert mcp_error.value.data == {"code": "slot_refused"}
+
+
 def test_slot_cli_keeps_resource_and_state_ownership_errors_structured(tmp_path, monkeypatch, capsys):
     root = enabled_root(tmp_path / "state")
     monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))

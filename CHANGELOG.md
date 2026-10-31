@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Distinguish disabled phase-slot layouts with `phase_slots_not_enabled` on ctl and MCP phase operations, retaining existing authority checks, human enable requirements and other refusal codes.
+
 - Qualify the GitHub transport notice and guidance for tools that drop injected Git configuration or use another SCM provider (#100).
 
 - Report bounded, partial candidate Claude inherited permission rules in previews and per-execution snapshots, and qualify approval refusals without attributing an unobserved source (#99).
