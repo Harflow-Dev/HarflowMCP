@@ -313,10 +313,10 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
 
 @task_operation(parameter="log_dir")
 def page_indexing_response(log_dir: Any) -> dict[str, Any]:
-    """No identifiers are exposed while bounded caller authority is incomplete."""
+    """Expose only neutral state while bounded caller authority is incomplete."""
     from .catalog import Catalog, get_authority_preparation
     from . import store
-    state = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).state()
+    state = dict(Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).state())
     if state['status'] == 'ready':
         saved = get_authority_preparation(log_dir)
         if saved:
@@ -324,10 +324,12 @@ def page_indexing_response(log_dir: Any) -> dict[str, Any]:
         else:
             state.update(status='preparing', source='caller_authority', reason='Validating workflow caller ownership after metadata indexing')
     incomplete = state['status'] == 'blocked'
+    # This pre-authority response must not disclose global progress or future catalog fields.
+    public_state = {key: state[key] for key in ('status', 'source', 'reason') if key in state}
     result = {'items': [], 'related_headers': [], 'next_cursor': None, 'has_more': False,
               'bootstrap_pending': state['status'] == 'preparing', 'history_incomplete': incomplete,
               'authority_incomplete': incomplete, 'counts_complete': False,
-              'catalog_state': state}
+              'catalog_state': public_state}
     if incomplete:
         result['note'] = state['reason']
     return result

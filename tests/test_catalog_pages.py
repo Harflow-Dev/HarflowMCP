@@ -124,6 +124,95 @@ def test_managed_page_reader_decorates_noncanonical_task_directory_from_workflow
     assert managed[1]['workflow_run_id'] == run['workflow_run_id']
 
 
+@pytest.mark.parametrize('role', ['orchestrator', 'builder'])
+@pytest.mark.parametrize('status', ['blocked', 'preparing'])
+def test_missing_receipt_with_foreign_workflow_metadata_keeps_authority_pending(tmp_path, monkeypatch, role, status):
+    """Real ownership preparation cannot disclose foreign history before finding the caller."""
+    from harflow_mcp.workflow_inspection import page_indexing_response
+    root = tmp_path / 'state'
+    directory = root / 'tasks'
+    storage = workflows.WorkflowStore(root=root)
+    run = storage.create_run(definition(), 'owned assignment', tmp_path)
+    caller = replace(record('verified-caller', status='running'), pid=20, pgid=20)
+    storage.update_run(run['workflow_run_id'], lambda value: value.update(
+        execution_contract='delegation', status='running', activations=[{
+            'id': 'owned-execution', 'node_id': role, 'role': role, 'status': 'running',
+            'created_at': 0.0, 'tasks': [{'task_id': caller.task_id, 'status': 'running'}],
+        }]), 'seed_caller')
+    receipt = storage.owners / f'{caller.task_id}.json'
+    assert receipt.exists()
+    receipt.unlink()
+    store.write(directory, caller)
+    store.bootstrap_catalog(directory)
+    assert catalog.Catalog(directory, store.RECORD_SUFFIX, layout=resolve_layout(root=root)).ready()
+    foreign_ids = []
+    for number in range(1 if status == 'blocked' else 201):
+        foreign = dict(run, workflow_run_id=f'foreign-run-{number:03}', activations=[], tasks=[])
+        if status == 'blocked':
+            foreign['large_legacy_field'] = 'x' * catalog.METADATA_BYTES
+        foreign_ids.append(foreign['workflow_run_id'])
+        (storage.runs / f"{foreign['workflow_run_id']}.json").write_text(
+            json.dumps(workflow_run_documents.encode(foreign)))
+    assert not storage._ownership_catalog().ready()
+    monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda *a, **k: SimpleNamespace(
+        caller=SimpleNamespace(record=caller), undecidable=None))
+
+    with catalog.metadata_request():
+        assert managed_page_reader(directory) == (False, None)
+        raw = catalog.get_authority_preparation(directory)
+        assert raw['status'] == status and raw['source'] == 'workflow_catalog'
+        if status == 'blocked':
+            assert raw['blocked_records'] == 1
+            assert foreign_ids[0] in json.dumps(raw['blocked_sources'])
+        else:
+            assert raw['pending_records'] > 0
+        original = json.dumps(raw, sort_keys=True)
+        pending = page_indexing_response(directory)
+        assert pending['catalog_state'] == {key: raw[key] for key in ('status', 'source', 'reason')}
+        assert pending['items'] == pending['related_headers'] == []
+        assert pending['counts_complete'] is False
+        assert pending['bootstrap_pending'] == (status == 'preparing')
+        assert pending['authority_incomplete'] == (status == 'blocked')
+        encoded = json.dumps(pending)
+        assert all(identifier not in encoded for identifier in foreign_ids)
+        assert run['workflow_run_id'] not in encoded
+        for field in ('blocked_sources', 'blocker_types', 'pending_records', 'blocked_records', 'total_active_count'):
+            assert field not in encoded
+        assert json.dumps(catalog.get_authority_preparation(directory), sort_keys=True) == original
+    # Removing the foreign obstacles lets the same real reader recover the persisted role.
+    for identifier in foreign_ids:
+        (storage.runs / f'{identifier}.json').unlink()
+    for _ in range(4):
+        with catalog.metadata_request():
+            ready, managed = managed_page_reader(directory)
+        if ready:
+            break
+    assert ready and managed[0]['role'] == role
+    assert managed[1]['workflow_run_id'] == run['workflow_run_id']
+
+
+@pytest.mark.parametrize('status', ['blocked', 'preparing'])
+def test_cold_task_index_returns_neutral_state_before_caller_detection(tmp_path, monkeypatch, status):
+    """A cold index cannot yet distinguish a direct caller from a managed caller."""
+    from harflow_mcp.workflow_inspection import page_indexing_response
+    directory = tmp_path / 'state' / 'tasks'
+    legacy_tasks(directory, 101 if status == 'preparing' else 1)
+    if status == 'blocked':
+        write_external(directory, record('t0000', prompt='x' * catalog.METADATA_BYTES))
+    monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda *a, **k: pytest.fail('Authority not indexed yet'))
+    with catalog.metadata_request():
+        assert managed_page_reader(directory) == (False, None)
+        pending = page_indexing_response(directory)
+        assert pending['catalog_state'] == {
+            'status': status, 'source': 'task_catalog',
+            'reason': 'Preparing bounded metadata index' if status == 'preparing' else 'Metadata or caller identity requires direct inspection'}
+        assert pending['items'] == [] and pending['counts_complete'] is False
+        assert pending['bootstrap_pending'] == (status == 'preparing')
+        assert pending['authority_incomplete'] == (status == 'blocked')
+        for field in ('pending_records', 'blocked_records', 'blocked_sources', 'blocker_types', 't0000'):
+            assert field not in json.dumps(pending)
+
+
 def test_stable_cursor_ignores_updates_and_newer_insertions_with_equal_timestamp_ids(tmp_path):
     directory = tmp_path / 'state' / 'tasks'
     for identifier in ('a', 'b', 'c', 'd'):
@@ -1439,7 +1528,7 @@ async def test_concurrent_caller_preparation_survives_worker_hops_without_shared
     blocked, preparing = await asyncio.gather(blocked_request(), preparing_request())
     assert blocked['catalog_state']['status'] == 'blocked'
     assert blocked['catalog_state']['source'] == 'caller_authority'
-    assert blocked['catalog_state']['blocker_types'] == ['oversized_metadata']
+    assert set(blocked['catalog_state']) <= {'status', 'source', 'reason'}
     assert blocked['authority_incomplete'] and not blocked['bootstrap_pending']
     assert preparing['catalog_state']['status'] == 'preparing'
     assert preparing['bootstrap_pending'] and not preparing['authority_incomplete']

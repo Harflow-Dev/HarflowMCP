@@ -1498,9 +1498,13 @@ while workflow and task history scrolls.
 Transient catalog preparation retries through Monitor's normal two-second read polling. It does
 not restart workflows, retry executions, or change permissions. Loaded definitions, history,
 selected content and scroll state stay visible while the catalog catches up. Read responses
-distinguish `ready`, `preparing`, and `blocked`; preparation includes its source and bounded
-progress, while persistent blocks retain actionable diagnostics. Pending caller authority
-does not expose new workflow identifiers or complete counts.
+distinguish `ready`, `preparing`, and `blocked`. After direct-reader authority is established,
+preparation includes its source and bounded progress, while persistent blocks retain actionable
+diagnostics. While caller authority is pending, `catalog_state` exposes only `status`, `source`
+and `reason`; content remains empty and counts unknown. Global progress, blocker details and
+other catalog fields are withheld, including for a cold index that eventually establishes a
+direct caller. Existing direct/full inspection retains its diagnostics. See
+[bounded read authority](contracts.md#bounded-read-authority-preparation) for the exact shape.
 
 A blocked first page shows available placeholders, the reported blocker and **Retry tasks**
 instead of remaining on a loading skeleton. Retrying refreshes reads; it does not grant access

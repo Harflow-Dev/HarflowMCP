@@ -184,8 +184,7 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
                 if action == 'limit_hits':
                     # Authority is not established, so nothing global (ids or counts) is exposed.
                     from .workflow_limit_hits import pending
-                    state = page_indexing_response(directory)['catalog_state']
-                    return pending({key: state[key] for key in ('status', 'source', 'reason') if key in state})
+                    return pending(page_indexing_response(directory)['catalog_state'])
                 return page_indexing_response(directory)
             if action == 'limit_hits':
                 from .workflow_limit_hits import refuse_managed

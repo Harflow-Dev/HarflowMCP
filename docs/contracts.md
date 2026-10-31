@@ -1038,6 +1038,29 @@ The new fields, `data` members and error codes are additive; unknown optional fi
 the `ctl-batch.json` fixture shows a prefix row. The exception is the documented ctl code change:
 `unknown_workflow_run` replaces `workflow_error` for a missing run.
 
+### Bounded read authority preparation
+
+Before bounded caller authority is established, shared preparation responses expose a
+`catalog_state` containing only `status`, `source` and `reason` when present. This allowlist
+applies equally to task/event reads, workflow reads and ctl Monitor shortcuts that use the
+shared preparation response. It excludes global progress and counts, blocker types and any
+other catalog fields. A cold index follows this rule even when
+the caller is subsequently verified as direct.
+
+The shared response retains `items: []`, `related_headers: []`, `next_cursor: null`,
+`has_more: false` and `counts_complete: false`. `bootstrap_pending` is true for `preparing`;
+`history_incomplete` and `authority_incomplete` are true for `blocked`, which also carries
+`note` equal to the safe reason. No totals are supplied. Adapters may add empty content arrays
+for their existing response shapes. Workflow limit-hit preparation uses the same allowlisted
+state as `index_state`, with its existing empty results and `scan` values (`examined: 0`,
+`current_examined: 0`, `complete: false` and the fixed scan limits). These are request-local
+scan values, not global catalog totals.
+
+This is an intentional removal of unsafe optional diagnostics from pre-authority responses
+within the existing wire version. Established direct-reader catalog diagnostics, authorized
+managed projections and full inspection keep their existing behavior. In particular,
+post-authority workflow limit-hit preparation retains its existing scan and state fields.
+
 ### Bounded workflow run filters and field projections
 
 `list_workflow_run_page` (MCP) and `harflow-ctl workflow-list-page` accept optional filters; every

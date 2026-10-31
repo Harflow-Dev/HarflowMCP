@@ -17,6 +17,11 @@ Task ids and workflow run ids may be passed as unique prefixes of at least 8 cha
 resolved id in `resolved_from`, and an ambiguous prefix lists its candidates. See
 [id prefixes](docs/contracts.md#id-prefixes).
 
+While bounded reads are still establishing caller authority, preparation responses expose only
+neutral status, source and reason, with empty content and unknown counts. This also applies to a
+cold index for a direct caller; retry until authority is established. See
+[bounded read authority](docs/contracts.md#bounded-read-authority-preparation).
+
 After a dispatch server restart, surviving execution is reported as a quiet observation change;
 lost or uncertain owner/capture evidence remains visible. Full diagnostics retain the original
 dispatcher identity. See [supervision](docs/supervision.md#dispatch-origin-owner-and-responding-server).
