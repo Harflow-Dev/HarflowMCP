@@ -110,7 +110,7 @@ def _marker(root: Path) -> bool:
     if value.get("product") != PRODUCT or value.get("format") != "harflow.store":
         raise _incompatible("foreign store marker", reason="foreign_store")
     if (type(value.get("v")) is not int or value["v"] != 1
-            or type(value.get("layout_version")) is not int or value["layout_version"] != 1):
+            or type(value.get("layout_version")) is not int or value["layout_version"] not in (1, 2)):
         raise _incompatible("unsupported store layout", reason="unsupported_layout")
     try:
         compatible = persisted_compatible(value.get("product_version"), "harflow.store", target_version=PRODUCT_VERSION)

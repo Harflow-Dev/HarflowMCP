@@ -79,7 +79,27 @@ async def test_task_and_workflow_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
-    assert names == ['apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'cancel_workflow_message', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_approval_request', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_artifacts', 'get_workflow_notifications', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_approval_requests', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recent_limit_hits', 'recover_workflow', 'register_artifact', 'respond_approval_request', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'send_workflow_message', 'start_task', 'start_workflow', 'subscribe', 'subscribe_workflow', 'unsubscribe', 'unsubscribe_workflow', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder', 'workflow_limit_hits']
+    assert names == ['acquire_slot', 'apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'cancel_workflow_message', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_approval_request', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_artifacts', 'get_workflow_notifications', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_approval_requests', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recent_limit_hits', 'recover_workflow', 'register_artifact', 'release_slot', 'respond_approval_request', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'send_workflow_message', 'slot_status', 'start_task', 'start_workflow', 'subscribe', 'subscribe_workflow', 'unsubscribe', 'unsubscribe_workflow', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder', 'workflow_limit_hits']
+
+
+@pytest.mark.asyncio
+async def test_phase_slot_tools_preserve_typed_resource_and_state_errors(monkeypatch):
+    from harflow_mcp import phase_slots
+    from harflow_mcp.state_ownership import StateBusy
+
+    def refuse(*_args, **_kwargs):
+        raise phase_slots.SlotRefused("fixture refusal")
+    monkeypatch.setattr(phase_slots, "acquire", refuse)
+    with pytest.raises(MCPError, match="fixture refusal") as resource_error:
+        await call("acquire_slot", name="sim", wait_seconds=0)
+    assert resource_error.value.data == {"code": "slot_refused"}
+
+    def busy(*_args, **_kwargs):
+        raise StateBusy("fixture state lock", reason="lock_busy", data={"root": "fixture"})
+    monkeypatch.setattr(phase_slots, "status", busy)
+    with pytest.raises(MCPError, match="fixture state lock") as state_error:
+        await call("slot_status", name="sim")
+    assert state_error.value.data == {"code": "state_busy", "root": "fixture", "reason": "lock_busy"}
 
 
 async def test_list_backends_describes_every_one(monkeypatch) -> None:

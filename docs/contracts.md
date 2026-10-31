@@ -1258,3 +1258,33 @@ subdirectories below those roots are not followed intentionally. Status and comp
 establish that Claude selected a file. Unavailable observation omits `inherited_rules`, rather than
 asserting an observed empty inventory. Additive unknown rule-entry fields are ignored on reload;
 malformed required fields normalize the optional observation to unknown.
+
+## Task phase slots
+
+Capability `phase-slots.v1` advertises MCP `acquire_slot`, `release_slot`, `slot_status`
+and `harflow-ctl slot` commands. Monitor UI is outside this capability. Task full,
+brief and compact status replies add optional `phase_slots`, separate from whole-task
+`resources`. Each bounded row reports `lease_id`, `task_id`, `name`, `state`, `capacity`,
+queue/grant/deadline/cleanup timestamps, `position`, `blocked_by`, `blockers` and `diagnostic`.
+`blocked_by` retains reservation IDs; additive `blockers` gives at most 100 matching
+owner/state rows with `since`, enqueue/grant timestamps and optional `release_requested`.
+Only queued phases report blockers: prior same-name FIFO requests and non-borrowed
+holders when capacity is full/overcommitted. Later queued requests do not block earlier
+ones, and held/cleanup/final phases do not report peer holders or queues as blockers.
+Unavailable phase evidence is explicit (`state: unavailable` with a bounded diagnostic),
+while ordinary task reads remain usable. `list_tasks(waiting_for_resource=NAME)` also
+includes running tasks queued for that phase name. Task waits preserve these projections;
+reads never mutate slot state. Slot lifecycle events live in the resource ledger, with
+at most 256 timestamped entries, and introduce no task event kinds.
+
+Acquire returns queued immediately and is idempotent for one execution/name. Its queue
+budget is durable, bounded 0..21600 seconds and never revokes a held lease. Expiry is
+idempotent until explicit release acknowledges the expired lease; polling cannot renew
+its deadline. Human resolution of untracked claimed cleanup requires explicit confirmation
+of inspection/stopping owned descendants and never overrides retained live/unknown runner evidence. Lease receipts
+bind the immutable task/owner/agent generation and qualified task/workflow scope ancestry.
+Resumes/continuations do not transfer phase leases. Cleanup status is capacity-consuming
+until durable success or explicit human inspection/resolution. Old engines reject the
+explicitly enabled store layout 2 before resource operations; normal layout 1 behavior
+remains supported. See [resources](resources-and-worktrees.md#task-phase-slots) for the
+human enable/service/configuration protocol, private evidence repair and restrictions.

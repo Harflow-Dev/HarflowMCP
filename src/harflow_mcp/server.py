@@ -1872,8 +1872,9 @@ async def list_tasks(
             entry["launch_refusal"] = refusals[entry["task_id"]]
     entries.extend(entry for entry in pending_entries if entry["task_id"] not in known)
     if waiting_for_resource is not None:
-        entries = [entry for entry in entries if entry.get("pending_launch") and entry.get("launch_state") == "waiting_for_resources"
-                   and waiting_for_resource in (entry.get("resources") or {}).get("names", [])]
+        entries = [entry for entry in entries if (entry.get("pending_launch") and entry.get("launch_state") == "waiting_for_resources"
+                   and waiting_for_resource in (entry.get("resources") or {}).get("names", []))
+                   or any(lease.get("name") == waiting_for_resource and lease.get("state") == "queued" for lease in entry.get("phase_slots", []))]
     entries = await _filter_task_reads(entries)
     entries.sort(key=lambda entry: (entry.get("started_at") or "", entry["task_id"]))
 
@@ -3477,6 +3478,56 @@ async def get_workflow_artifacts(workflow_run_id: str, cursor: str | None = None
             cursor=cursor, limit=limit, execution_id=execution_id, task_id=task_id)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+
+
+@mcp.tool()
+@_task_document_errors
+async def acquire_slot(name: str, wait_seconds: StrictInt = 300) -> dict[str, Any]:
+    """Acquire a task-owned phase lease around heavy commands. Returns queued immediately when
+    blocked; retry the same name every two seconds to observe a grant. Queue budget is 0..21600
+    seconds, never a held-lease timeout. Release lease_id on every exit, including queued exits.
+    Phase slots require human enable and a verified task caller; they never borrow ancestor holds.
+    """
+    from .phase_slots import acquire
+    try:
+        return await asyncio.to_thread(acquire, _reg().log_dir, name, wait_seconds)
+    except resource_ledger.ResourceError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except StateOwnershipError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code, **exc.as_dict()}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def release_slot(lease_id: str) -> dict[str, Any]:
+    """Release this execution's lease or cancel its queued request. Cleanup remains capacity
+    consuming until successful; failed/uncertain cleanup requires human inspection and resolve.
+    Stop all owned heavy descendants before release. Client interruption alone never releases.
+    """
+    from .phase_slots import release
+    try:
+        return await asyncio.to_thread(release, _reg().log_dir, lease_id)
+    except resource_ledger.ResourceError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except StateOwnershipError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code, **exc.as_dict()}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def slot_status(name: str | None = None) -> dict[str, Any]:
+    """Read bounded phase holders, queue positions, capacity, cleanup blockers and timestamp events.
+    This read never performs cleanup or changes the ledger.
+    """
+    from .phase_slots import status
+    try:
+        return await asyncio.to_thread(status, _reg().log_dir, name)
+    except resource_ledger.ResourceError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except StateOwnershipError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code, **exc.as_dict()}) from None
 
 
 if __name__ == "__main__":

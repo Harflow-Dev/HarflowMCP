@@ -1,11 +1,11 @@
 # Resources and worktrees
 
-Two independent options on dispatched tasks and workflows: named exclusive [resources](#resources) and a private
+Two independent options on dispatched tasks and workflows: named [resources](#resources) and a private
 [worktree](#worktrees). They combine: resources are granted first, then the worktree is made.
 
 ## Resources
 
-Named, exclusive resources let tasks take turns on something only one of them can use at a time: an
+Named resources default to exclusive access and let tasks take turns on an
 iOS simulator, a test database, a device, a branch. Resources grant nothing and change no access;
 they only order who may start.
 
@@ -17,7 +17,8 @@ harflow-ctl run --backend claude --repo . --prompt "..." --resource ios-simulato
 ```
 
 - A name is 1 to 64 characters of lowercase letters, digits and `. _ : -`, starting with a letter or
-  digit. A request names 1 to 16 distinct names. Capacity is one per name.
+  digit. A request names 1 to 16 distinct names. Capacity defaults to one per name; explicit
+  [phase-slot configuration](#task-phase-slots) can increase it for layout 2.
 - A task starts only when it holds **every** name it asked for, never some of them. Requests are
   granted strictly first come first served per name, so a request for several names cannot be
   starved by a stream of small ones.
@@ -27,7 +28,8 @@ harflow-ctl run --backend claude --repo . --prompt "..." --resource ios-simulato
 - Resources are accepted at every freedom, including `read_only`, and need supervised execution (the
   MCP server and `harflow-ctl`). Workflows declare resources in their saved definition; see [workflow scopes](#workflow-scopes).
 - The names are released when the run's exit is observed. A grandchild process that outlives the
-  agent (a simulator, a dev server) can still be running; cleanup hooks are future work.
+  agent (a simulator, a dev server) can still be running. Optional host cleanup applies only to
+  [phase leases](#optional-host-cleanup); whole-task/workflow requests for hook-configured names refuse.
 
 ### A task that is waiting
 
@@ -154,7 +156,9 @@ Paste into an agent's instructions where it dispatches Harflow tasks:
 
 ### Limits
 
-Capacity is one and not configurable. A grandchild that outlives its agent can outlast the release.
+Layout 1 and unconfigured names have capacity one. Explicit layout 2 configuration can increase
+capacity; cleanup hooks require capacity one and phase leases. A grandchild that outlives its agent
+can outlast whole-task release.
 Resources do not isolate anything: two tasks that do not name a resource can still collide on it.
 The Mac Monitor does not show pending tasks yet; it can read them from `harflow-ctl resources --json`.
 
@@ -286,3 +290,151 @@ locking, including nested paths and paths under an older configured worktree roo
 Lookup receipts are retained after worktree removal. Corrupt engine-owned lookup metadata fails
 closed; G04 does not automatically prune or repair these receipts. A missing worktree may therefore
 remain visible in inventory without triggering creation or cleanup.
+
+## Task phase slots
+
+Capability `phase-slots.v1` adds cooperative capacity around a task's heavy commands.
+Code-writing can overlap while simulator, build or test phases take turns. Whole-task
+`resources` and phase leases use the same ledger and FIFO admission. Unconfigured names
+have capacity one; an explicitly configured capacity applies to both kinds of reservation.
+A task and its ancestors/descendants cannot stack named reservations with phase leases.
+Phase leases never borrow. Workflow Nodes with checkout-only scopes may participate.
+
+A verified human first stops all MCP servers (including idle client-attached servers),
+task owners and workflow schedulers, then runs:
+
+```sh
+harflow-ctl slot enable --json
+harflow-ctl slot configure heavy --capacity 1 --json
+```
+
+Enable takes exclusive root ownership and promotes the selected store to layout 2.
+It refuses live/unknown legacy owners, active inner locks, reservations and repair state.
+Older engines refuse layout 2. Enable is irreversible; fresh roots remain layout 1 until
+explicitly enabled. An interrupted prepared enable can be retried by a human under
+exclusive ownership. Ordinary operations never initialize a missing layout 2 ledger.
+Completed initialization has a durable bootstrap witness; missing initialized state
+requires inspection and explicit repair, never default configuration.
+
+MCP tools are `acquire_slot(name, wait_seconds=300)`, `release_slot(lease_id)` and
+`slot_status(name=None)`. CLI equivalents:
+
+```sh
+harflow-ctl slot acquire heavy --wait-seconds 300 --json
+harflow-ctl slot status heavy --json
+harflow-ctl slot release --lease-id LEASE_ID --json
+```
+
+Acquire returns immediately with `queued` or `held` and a durable `lease_id`. Retry
+acquire with the same name every two seconds to inspect the same request. The queue
+budget is 0..21600 seconds, default 300; zero allows an immediate grant only. A request
+expires at its deadline. Further acquire calls for that execution/name return the same
+`expired` lease and original deadline until `release(lease_id)` durably acknowledges it.
+After acknowledgment, a new acquire explicitly starts a fresh request/budget; polling
+never renews the queue budget. Successful released phases can acquire their next phase
+normally. Held
+capacity never expires. Changing names or stacking phases refuses. Cancelling an RPC
+never implies release. A lost grant response can leave capacity held: retry the same
+acquire, or explicitly release the request. Release also cancels a queued request.
+
+Paste these instructions into participating agents' tasks:
+
+> Write and review code without a lease. Before each heavy command, acquire the shared
+> slot. If queued, retry the same acquisition every two seconds; use a longer explicit
+> queue budget when needed. Run the heavy command only after `held`. Hold until every
+> owned heavy descendant stops. In a `finally` path release the lease on every exit,
+> including giving up while queued, and check cleanup succeeds. Inspect a refusal;
+> do not bypass it with a separate lock. Cooperative participation is required.
+
+The command must already be reachable through a configured MCP server or permitted
+`harflow-ctl` and state access. Restricted Codex CLI may refuse state writes; MCP usage
+depends on the harness's MCP approval configuration. This feature adds no backend
+argv, permission grants, sandbox roots or MCP registrations, and does not qualify all
+backend/freedom combinations. A separate shell heavy-lock fallback remains uncoordinated
+with phase slots unless an explicit adapter is provided. General shell waits and
+independently surviving descendants remain the caller's responsibility.
+
+### Optional host cleanup
+
+Cleanup is disabled by default. A verified human can configure explicit argv with an
+absolute executable; shell interpolation is never performed. Use a script that targets
+only dedicated resources. For example, after creating a dedicated executable:
+
+```sh
+harflow-ctl slot configure heavy --capacity 1 \
+  --cleanup-argv '["/opt/harflow/bin/reset-dedicated-test-device", "dedicated-device-id"]' \
+  --cleanup-timeout 60 --json
+```
+
+Hooks require capacity one and a persisted unrestricted task with network request not
+false and resolved network access `enabled`, `unrestricted` or `not_controlled`.
+Whole-task/workflow resource requests for hook-configured names refuse, including
+unrestricted ones. Hook policy cannot change while any queue/holder mentions the name.
+The executable's device/inode, timestamps, size and hash are snapshotted; upgrades that
+change it block cleanup pending human inspection. The supervisor checks executable identity
+immediately before and after launching the configured path; a detected change retains uncertain
+capacity. This portable launch does not atomically pin the executable against same-user path
+replacement, including replace-and-restore races. Same-user direct state or executable modification
+is outside this cooperative boundary. Configuration and receipts are private owned
+regular files, with nofollow reads and bounded JSON.
+
+`slot enable` starts a detached host supervisor. After reboot or supervisor death,
+a human runs `harflow-ctl slot service-start --json`. Hook acquisitions require its
+qualified live generation. Triggering task, waiter and reaper processes publish intents;
+they never run cleanup in their sandbox or inherit authority from a different waiter.
+The supervisor monitors settlement on a sub-two-second cadence and runs cleanup in a
+fresh recorded process session, with bounded timeout and discarded output.
+
+A release retains capacity while cleanup is pending, running, failed or uncertain.
+Only a durable successful result frees it. Failure, timeout, process loss and interrupted
+receipt/ledger publication retain blockers. A claimed cleanup is never automatically
+replayed after a crash; exactly-once external side effects are not promised. Timeout
+signals only its recorded runner, leaving independently surviving descendants for
+inspection. A known live or uncertain recorded runner prevents human resolution.
+After inspecting/stopping owned work, use:
+
+```sh
+harflow-ctl slot resolve --lease-id LEASE_ID --json
+```
+
+Resolution acknowledges inspection and frees an uncertain/failed blocker without
+rerunning cleanup. If a crash left a claimed cleanup without qualified runner evidence,
+default resolution refuses. After inspecting and stopping all owned untracked cleanup
+descendants, a human can add `--confirm-untracked-cleanup-stopped`; its acknowledgment
+is persisted. This flag never overrides a known live or uncertain runner from either
+the receipt or ledger. The supervisor records spawn intent before execution; capture or
+publication failures stop/wait only its freshly owned unreaped child and retain uncertainty
+about independent descendants. Status exposes timestamps, FIFO position, blockers, bounded diagnostics
+and at most 256 lifecycle events. A queued phase includes bounded `blockers` with the
+holder task/workflow identity, state and `since` timestamp (grant time for a holder or
+enqueue time for an earlier FIFO request), plus compatible `blocked_by` IDs. Only
+capacity-consuming holders at full capacity and earlier same-name queued requests block
+a queued phase; later queues and peer holders are not shown as blockers for held phases.
+Task status/list/waits separately expose `phase_slots`;
+no slot events are appended to the task's single-writer event log. Reads never reconcile
+or execute cleanup. Receipt and task/launch evidence remain retained for every unresolved
+phase. Resumes/continuations use fresh task IDs and never inherit phase leases.
+
+Corrupt configuration never falls back to capacity/hook defaults. A human can restore a
+fully validated configuration and retain a closed repair marker, then reconstruct claims:
+
+```sh
+harflow-ctl slot restore-configuration \
+  --configuration '{"epoch": 1, "names": {"heavy": {"capacity": 1}}}' --json
+harflow-ctl resources-repair --json
+```
+
+Repair restores every uncertain phase receipt as a capacity-consuming blocker and
+preserves overcommit; it does not silently grant a damaged queue. The phase evidence directory is bounded to 4096 total entries. Admission checks that
+budget before creating a new receipt; existing requests can still settle at the limit.
+Released/resolved and acknowledged-expired evidence is pruned only after the durable
+ledger no longer contains its lease. Unacknowledged expiry remains while its execution
+is live; conclusive matching settlement permits pruning before task retention. Temporary
+or otherwise unprunable files still count toward the bound and may require inspection.
+
+Before exclusive state operations, stop all work, settle every lease and run
+`harflow-ctl slot service-stop --json`; wait for supervisor exit. Its lifetime shared root
+lease blocks exclusive operations. Destructive `state-recover` and storage-line promotion
+of phase-enabled layout 2 are currently unsupported and refuse without deleting/moving
+state or creating a backup; select a fresh root or retain the compatible engine line.
+Layout 1 recovery remains supported. Monitor holders/queue UI is not implemented.

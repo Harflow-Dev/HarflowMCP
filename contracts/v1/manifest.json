@@ -506,6 +506,51 @@
       "required_capabilities": [],
       "valid": true
     },
+    "ctl-phase-slot-held.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "phase-slots.v1"
+      ],
+      "valid": true
+    },
+    "ctl-phase-slot-queued.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "phase-slots.v1"
+      ],
+      "valid": true
+    },
+    "ctl-phase-slot-cleanup-uncertain.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "phase-slots.v1"
+      ],
+      "valid": true
+    },
+    "ctl-phase-slot-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "phase-slots.v1"
+      ],
+      "valid": true
+    },
+    "invalid-phase-slot-envelope.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.5",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "phase-slots.v1"
+      ],
+      "valid": false
+    },
     "ctl-approval-error-already-answered.json": {
       "encoding": "json",
       "expected_product_version": "0.0.5",
@@ -877,7 +922,7 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "a55abe06bd94967f601c2de025e4b7120e74b92b495c847c9420187715fc3fbb",
+    "version-info.json": "18f4512ecb2bdd1ff9b6ba248a03c37580e7481edc3a718e897340b084109fc7",
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -909,6 +954,11 @@
     "ctl-workflow-limit-hits-ready.json": "32c3ee7cdc13a281a8b6627102ba65363ca325c669e3a0ac270d9ea6d5fcba31",
     "ctl-workflow-limit-hits-empty.json": "a18f3f47c152084937b090b3616f2696281e6425f43b87f88dc4226c1c9491bf",
     "ctl-workflow-limit-hits-preparing.json": "74ad30139f4940ff386301abbe5f27fe6054c20d04fdff019bee488a476e1499",
+    "ctl-phase-slot-held.json": "f716caf97a6a56df188a1907f24424dab0f771cfd35c7d3dca5a8f08f7efdfd5",
+    "ctl-phase-slot-queued.json": "96896e44fac13df13c6d17fe55a69f7118cff8a9039897e0e5606eb19ff86505",
+    "ctl-phase-slot-cleanup-uncertain.json": "85282f43120d938f2296d918a6ff4c4c1d97f55ea22fcb639b6ee4ca5911394e",
+    "ctl-phase-slot-refused.json": "400db4c1c5f063bc950cf1149a9b65755b230426b60266ed991e67b150abf25b",
+    "invalid-phase-slot-envelope.json": "75016272cecc31b8358767820a0c7a05bee01752d3f08ec7b90e9d3091d10ce6",
     "ctl-approval-error-already-answered.json": "adca538a289a9b3bd8caeac8e643e240c01e3f21ccd401724c36b0765d86b0c4",
     "ctl-approval-error-caller-undecidable-approval.json": "19b205b2f9abb54468e4e60db7194179c9080e0518a02ecfe6311eb88cfd3985",
     "ctl-approval-error-caller-undecidable-global.json": "6860900bbc83a59a3a4f79bea00507ef9811b90b38de4db99e74697589ffb092",
@@ -955,6 +1005,6 @@
     "ctl-approval-state-system-rejected-admission.json": "17e5bc79ea674ffa7c18fbded62c97b7a06427182e9b65b6f02a4a8026efb6f7",
     "ctl-approval-state-system-rejected-delivery.json": "076d23d723b73fdae054e2e852d996974306a39979d32d31a9abc1bdda8297dc",
     "ctl-approval-state-unsupported.json": "0e68277cf8cb333bbc6d5e2c08bdce41030310d93667130352d9a86d8aea89a1",
-    "ctl-approval-status-awaiting.json": "67bbe416360dad3ef58c2069b3b33fcad2c0033a7b0bc1f0605f8c1619a31d9c"
+    "ctl-approval-status-awaiting.json": "7b6abfc62839327d26cb5685b4a43fb5000d45fdbcdf59c186052f4f320b2c67"
   }
 }

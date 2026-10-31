@@ -206,3 +206,15 @@ full diagnostics. The timestamp identifies the new reader's process start, not t
 crash. Owner/capture/input uncertainty remains visible and does not qualify as safe adoption.
 See [the projection contract](contracts.md#surviving-execution-after-dispatcher-restart).
 The Mac restart-note presentation remains pending separate design/implementation.
+
+## Phase-slot cleanup ownership
+
+The optional `phase-slots.v1` supervisor is a detached, human-started host process with a
+lifetime shared state-root lease and a generation-qualified singleton lock. It watches
+task-generation-bound phase receipts and executes only snapshotted cleanup argv from
+qualified unrestricted/network-compatible task authority. CLI/MCP callers publish intents
+and never execute hooks. After supervisor loss, a new human `slot service-start` reconciles
+unfinished claims as uncertain rather than replaying side effects. Every unresolved
+request, hold or cleanup protects task/launch evidence from retention. See
+[phase slots](resources-and-worktrees.md#task-phase-slots) for enable, repair and service
+shutdown sequencing, conservative timeout behavior and current layout 2 recovery limits.

@@ -37,7 +37,7 @@ def restore_group_report_observations(prepared):
             prepared[field] = freeze(prepared[field])
 
 
-REAP_INTERVAL_SECONDS = 15.0
+REAP_INTERVAL_SECONDS = 2.0
 
 
 class _NotStarted(Exception):

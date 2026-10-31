@@ -255,7 +255,7 @@ async def _grant(supervisor: Any, held: dict[str, Any], owner: dict[str, Any], s
     last_reap = 0.0
     async def keep_waiting() -> bool:
         nonlocal last_reap
-        if time.monotonic() - last_reap >= 5:
+        if time.monotonic() - last_reap >= 2:
             last_reap = time.monotonic()
             await asyncio.to_thread(reap, supervisor.registry.log_dir)
         detail = await asyncio.to_thread(_wait_view, supervisor.registry.log_dir, held)

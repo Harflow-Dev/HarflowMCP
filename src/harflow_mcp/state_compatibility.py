@@ -14,7 +14,7 @@ QUALIFIED_FORMATS = frozenset({
     "harflow.task.control", "harflow.task.inbox", "harflow.task.artifacts",
     "harflow.task.approvals", "harflow.task-launch", "harflow.task-observations",
     "harflow.notifications", "harflow.resource-ledger", "harflow.workflow.worktree",
-    "harflow.qualification",
+    "harflow.qualification", "harflow.phase-lease", "harflow.phase-bootstrap", "harflow.slot-service",
 })
 QUALIFIED_SOURCE_LINES = {(0, 0): {name: frozenset({1}) for name in QUALIFIED_FORMATS}}
 
@@ -27,5 +27,5 @@ def persisted_compatible(version: str, format_name: str, schema_version: int = 1
     if type(schema_version) is not int or source > target or format_name not in QUALIFIED_FORMATS:
         return False
     if source == target:
-        return schema_version == 1
+        return schema_version in ({1, 2} if format_name == "harflow.resource-ledger" else {1})
     return schema_version in QUALIFIED_SOURCE_LINES.get(source, {}).get(format_name, ())

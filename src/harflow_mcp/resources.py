@@ -60,6 +60,7 @@ import inspect
 import json
 import os
 import re
+import stat
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
@@ -69,6 +70,8 @@ from pathlib import Path
 from typing import Any
 
 from .state_compatibility import persisted_compatible
+from .state_access import layout_operation
+from .state_layout import resolve_layout
 from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 LEDGER_FORMAT = "harflow.resource-ledger"
@@ -204,6 +207,8 @@ class Entry:
     granted_at: str | None = None
     deadline_at: str | None = None
     release_requested: bool = False
+    purpose: str = "whole_task"
+    phase_state: str | None = None
 
     @property
     def held(self) -> bool:
@@ -293,6 +298,8 @@ def _entry_view(raw: Mapping[str, Any]) -> Entry:
         granted_at=raw.get("granted_at"),
         deadline_at=raw.get("deadline_at"),
         release_requested=bool(raw.get("release_requested", False)),
+        purpose=raw.get("purpose", "whole_task"),
+        phase_state=raw.get("phase_state"),
     )
 
 
@@ -312,10 +319,14 @@ def _validate_document(document: Any) -> list[dict[str, Any]]:
         raise ValueError("the ledger is not a JSON object")
     if document.get("product") != PRODUCT or document.get("format") != LEDGER_FORMAT:
         raise ValueError("missing or foreign ledger product/format")
-    if type(document.get("v")) is not int or document["v"] != 1:
+    if type(document.get("v")) is not int or document["v"] not in (1, 2):
         raise ValueError("unsupported ledger version")
     if not persisted_compatible(document.get("product_version"), LEDGER_FORMAT):
         raise ValueError("incompatible ledger product line")
+    if document["v"] == 2:
+        from .phase_slots import validate_configuration, validate_events
+        validate_configuration(document.get("slot_configuration"))
+        validate_events(document.get("slot_events"))
     entries = document.get("entries")
     if type(entries) is not list or len(entries) > MAX_ENTRIES:
         raise ValueError("ledger entries must be a bounded list")
@@ -327,6 +338,9 @@ def _validate_document(document: Any) -> list[dict[str, Any]]:
         if type(rid) is not str or RESERVATION_ID_RE.fullmatch(rid) is None or rid in seen:
             raise ValueError("a ledger entry has a missing, invalid or duplicate reservation_id")
         seen.add(rid)
+        if document["v"] == 2:
+            from .phase_slots import validate_phase_entry
+            validate_phase_entry(raw)
         names = raw.get("names")
         if type(names) is not list or validate_names(names) != tuple(names):
             raise ValueError(f"entry {rid} has invalid or unsorted names")
@@ -386,6 +400,8 @@ class _Transaction:
         self.capacity_of = capacity_of
         self.clock = clock
         self.dirty = False
+        self.document: dict[str, Any] = {}
+        self.receipt_writer = None
 
     def find(self, reservation_id: str) -> dict[str, Any] | None:
         return next((raw for raw in self.entries if raw["reservation_id"] == reservation_id), None)
@@ -397,8 +413,24 @@ class _Transaction:
     def borrowers_of(self, reservation_id: str) -> list[dict[str, Any]]:
         return [raw for raw in self.entries if raw.get("borrows_from") == reservation_id]
 
+    def phase_event(self, raw: dict[str, Any], kind: str) -> None:
+        if raw.get("purpose") != "phase":
+            return
+        events = self.document.setdefault("slot_events", [])
+        events.append({"at": self.clock(), "kind": kind, "lease_id": raw["reservation_id"], "task_id": raw["owner"].get("task_id"), "name": raw["names"][0]})
+        del events[:-256]
+        if self.receipt_writer is not None:
+            self.receipt_writer(raw)
+
     def grant_pass(self) -> None:
         """Strict per-name FIFO, all or nothing. Idempotent: a pass that grants nothing writes nothing."""
+        now = self.clock()
+        for raw in list(self.entries):
+            if raw.get("purpose") == "phase" and raw["state"] == "queued" and raw.get("deadline_at") and datetime.fromisoformat(raw["deadline_at"]) <= datetime.fromisoformat(now):
+                raw["phase_state"] = "expired"
+                self.phase_event(raw, "expired")
+                self.entries.remove(raw)
+                self.dirty = True
         held_count: dict[str, int] = {}
         for raw in self.entries:
             if raw["state"] == "held" and raw.get("borrows_from") is None:
@@ -413,6 +445,9 @@ class _Transaction:
             if free and blocked.isdisjoint(names):
                 raw["state"] = "held"
                 raw["granted_at"] = self.clock()
+                if raw.get("purpose") == "phase":
+                    raw["phase_state"] = "held"
+                    self.phase_event(raw, "granted")
                 self.touch(raw)
                 for name in names:
                     held_count[name] = held_count.get(name, 0) + 1
@@ -424,6 +459,18 @@ class _Transaction:
         raw = self.find(reservation_id)
         if raw is None:
             return "absent"
+        if raw.get("purpose") == "phase":
+            phase = raw.get("phase_state")
+            if phase in ("cleanup_pending", "cleanup_running", "cleanup_failed", "cleanup_uncertain"):
+                return phase
+            raw["release_requested_at"] = self.clock()
+            if raw["state"] == "held" and raw.get("cleanup_policy"):
+                raw["phase_state"] = "cleanup_pending"
+                self.phase_event(raw, "cleanup_pending")
+                self.touch(raw)
+                return "cleanup_pending"
+            raw["phase_state"] = "released"
+            self.phase_event(raw, "released")
         if self.borrowers_of(reservation_id):
             if not raw.get("release_requested"):
                 raw["release_requested"] = True
@@ -450,7 +497,8 @@ class ResourceLedger:
         clock: Callable[[], str] = _now,
         lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     ) -> None:
-        self.directory = Path(state_root) / RESOURCES_DIRECTORY
+        self.state_layout = resolve_layout(root=state_root)
+        self.directory = self.state_layout.root / RESOURCES_DIRECTORY
         self.path = self.directory / LEDGER_NAME
         self._lock_path = self.directory / LOCK_NAME
         self._capacity_of = capacity_of
@@ -462,6 +510,9 @@ class ResourceLedger:
     def _lock(self) -> int:
         """Take the leaf flock, retrying without blocking, and return its descriptor."""
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = self.directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ResourceLedgerUnavailable("resource directory must be an owned directory without group/world writes")
         descriptor = os.open(self._lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         deadline = time.monotonic() + self._lock_timeout
         delay = 0.001
@@ -486,18 +537,46 @@ class ResourceLedger:
         finally:
             os.close(descriptor)
 
+    def _layout_two(self) -> bool:
+        from .state_ownership import _read_marker
+        return (_read_marker(self.state_layout.root) or {}).get("layout_version") == 2
+
     def _read_document(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         """The qualified entries and the repair marker, if any. Raises `ResourceLedgerCorrupt`."""
         try:
-            with self.path.open("rb") as handle:
-                payload = handle.read(64 * 1024 * 1024)
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise ResourceLedgerCorrupt("resource ledger must be an owned private regular file")
+                payload = handle.read(64 * 1024 * 1024 + 1)
+                if len(payload) > 64 * 1024 * 1024:
+                    raise ResourceLedgerCorrupt("resource ledger exceeds size bound")
         except FileNotFoundError:
+            document = _empty_document()
+            if self._layout_two():
+                if not getattr(self, "_bootstrap_initialization", False):
+                    raise ResourceLedgerCorrupt("layout 2 ledger is missing; ordinary operations never initialize defaults; inspect state and retry explicit human enable only for interrupted prepared bootstrap")
+                from .phase_slots import initialize_document
+                document = initialize_document(self.state_layout.root)
+            self._document = document
             return [], None
         except OSError as exc:
             raise ResourceLedgerUnavailable(f"the resource ledger cannot be read: {exc}") from None
         try:
             document = json.loads(payload)
             entries = _validate_document(document)
+            if document["v"] == 2 and not self._layout_two():
+                raise ValueError("v2 ledger requires layout 2")
+            if document["v"] == 1 and self._layout_two():
+                from .phase_slots import initialize_document
+                if not getattr(self, "_bootstrap_initialization", False):
+                    raise ValueError("legacy ledger in layout 2 requires explicit interrupted-enable completion")
+                if entries or document.get("repair"):
+                    raise ValueError("layout 2 cannot initialize from occupied legacy ledger")
+                document = initialize_document(self.state_layout.root)
+                entries = document["entries"]
+            self._document = document
             return entries, _validate_repair(document.get("repair"))
         except (ValueError, RecursionError, UnicodeDecodeError, InvalidResourceRequest) as exc:
             raise ResourceLedgerCorrupt(
@@ -516,14 +595,24 @@ class ResourceLedger:
             )
         return entries
 
+    @layout_operation
     def _transact(self, action: Callable[[_Transaction], Any]) -> Any:
         """One bounded read-modify-write under the leaf lock. Nothing in `action` may block or await."""
         descriptor = self._lock()
         try:
-            transaction = _Transaction(self._read_entries(), self._capacity_of, self._clock)
+            entries = self._read_entries()
+            document = self._document
+            configured = document.get("slot_configuration", {}).get("names", {})
+            capacity_of = lambda name: configured.get(name, {}).get("capacity", self._capacity_of(name))
+            transaction = _Transaction(entries, capacity_of, self._clock)
+            transaction.document = document
+            if document["v"] == 2:
+                from .phase_slots import write_receipt
+                transaction.receipt_writer = lambda raw: write_receipt(self.state_layout.root, raw)
+                from .phase_slots import recover_transaction
+                recover_transaction(transaction, self.state_layout.root)
             result = action(transaction)
             if transaction.dirty:
-                document = _empty_document()
                 document["entries"] = transaction.entries
                 _atomic_write(self.path, document)
             return result
@@ -531,9 +620,13 @@ class ResourceLedger:
             self._unlock(descriptor)
 
     def _read_only(self) -> list[dict[str, Any]]:
-        """A consistent read that never creates the directory, for pure readers."""
+        """A missing root remains missing; existing storage requires root ownership."""
         if not self.directory.exists():
             return []
+        return self._read_existing()
+
+    @layout_operation
+    def _read_existing(self) -> list[dict[str, Any]]:
         descriptor = self._lock()
         try:
             return copy.deepcopy(self._read_entries())
@@ -542,6 +635,7 @@ class ResourceLedger:
 
     # ---- requests --------------------------------------------------------------------------
 
+    @layout_operation
     def request(
         self,
         names: Iterable[str],
@@ -559,10 +653,18 @@ class ResourceLedger:
         wanted = validate_names(names)
         who = _owner_from(owner)
         rid = validate_reservation_id(reservation_id) if reservation_id is not None else uuid.uuid4().hex
+        from .phase_slots import owner_lineage
+        provenance = owner_lineage(self.state_layout.root, who) if self._layout_two() else None
 
         def action(transaction: _Transaction) -> Entry:
             if transaction.find(rid) is not None:
                 raise InvalidResourceRequest(f"reservation {rid} already exists")
+            if provenance is not None:
+                from .phase_slots import check_conflicts
+                check_conflicts(transaction, who.as_dict(), provenance, phase=False)
+                configured = transaction.document["slot_configuration"]["names"]
+                if any(configured.get(name, {}).get("cleanup") for name in wanted):
+                    raise InvalidResourceRequest("hook-configured names require a qualified phase lease; whole-task/workflow reservation refused")
             if len(transaction.entries) >= MAX_ENTRIES:
                 raise InvalidResourceRequest("the resource ledger is full")
             now = transaction.clock()
@@ -574,6 +676,8 @@ class ResourceLedger:
                 "enqueued_at": now,
                 "generation": 1,
             }
+            if provenance is not None:
+                raw["scope_chain"] = provenance
             if deadline_at is not None:
                 raw["deadline_at"] = deadline_at
             if scope is not None:
@@ -699,6 +803,7 @@ class ResourceLedger:
     def entries(self) -> list[Entry]:
         return [_entry_view(raw) for raw in self._read_only()]
 
+    @layout_operation
     async def acquire(
         self,
         names: Iterable[str],
@@ -777,6 +882,8 @@ class ResourceLedger:
                     "enqueued_at": raw["enqueued_at"],
                     "generation": raw["generation"],
                 }
+                if raw.get("purpose") == "phase":
+                    row.update(lease_id=raw["reservation_id"], purpose="phase", phase_state=raw.get("phase_state"), diagnostic=raw.get("diagnostic"))
                 if raw["state"] == "held":
                     row["granted_at"] = raw["granted_at"]
                     if raw.get("borrows_from") is not None:
@@ -788,7 +895,7 @@ class ResourceLedger:
                     if raw.get("deadline_at") is not None:
                         row["deadline_at"] = raw["deadline_at"]
                     queue.append(row)
-            resources.append({"name": name, "capacity": self._capacity_of(name), "holders": holders, "queue": queue})
+            resources.append({"name": name, "capacity": self._document.get("slot_configuration", {}).get("names", {}).get(name, {}).get("capacity", self._capacity_of(name)), "holders": holders, "queue": queue})
         return resources
 
     # ---- reaping ---------------------------------------------------------------------------
@@ -803,6 +910,9 @@ class ResourceLedger:
         observed = self.entries()
         verdicts: dict[str, tuple[int, str]] = {}
         for entry in observed:
+            if entry.purpose == "phase":
+                report.kept.append(entry.reservation_id)
+                continue
             resolver = resolvers.get(entry.owner.kind)
             if resolver is None:
                 report.kept.append(entry.reservation_id)
@@ -835,6 +945,7 @@ class ResourceLedger:
 
     # ---- repair ----------------------------------------------------------------------------
 
+    @layout_operation
     def begin_repair(self) -> RepairToken:
         """Close a corrupt ledger for repair and return the token that publishes the reconstruction.
 
@@ -863,12 +974,16 @@ class ResourceLedger:
             _fsync_directory(self.directory)
             token = RepairToken(uuid.uuid4().hex, target)
             document = _empty_document()
+            if self._layout_two():
+                from .phase_slots import repair_configuration
+                document = repair_configuration(self.state_layout.root, target)
             document["repair"] = {"id": token.id, "started_at": _now(), "moved_to": str(target)}
             _atomic_write(self.path, document)
             return token
         finally:
             self._unlock(descriptor)
 
+    @layout_operation
     def complete_repair(self, token: RepairToken, specs: Iterable[Mapping[str, Any]]) -> RepairResult:
         """Publish the complete reconstruction in one atomic replace and reopen the ledger.
 
@@ -879,6 +994,11 @@ class ResourceLedger:
         stand-in for the lender that blocks every name its borrowers held until they settle (reported
         as a conflict either way; a borrower is never dropped or narrowed). Everything is `held`: repair never queues.
         """
+        listed = [dict(spec) for spec in specs]
+        if self._layout_two():
+            from .phase_slots import owner_lineage
+            for spec in listed:
+                spec["scope_chain"] = owner_lineage(self.state_layout.root, _owner_from(spec["owner"]))
         built: list[dict[str, Any]] = []
         result = RepairResult()
         descriptor = self._lock()
@@ -887,7 +1007,6 @@ class ResourceLedger:
             if repair is None or repair["id"] != token.id:
                 raise RepairNotInProgress("no repair with this token is in progress")
             now = _now()
-            listed = [dict(spec) for spec in specs]
             roots = [spec for spec in listed if not spec.get("borrows_from")]
             borrowers = [spec for spec in listed if spec.get("borrows_from")]
             held_names: set[str] = set()
@@ -909,6 +1028,8 @@ class ResourceLedger:
                 seen.add(rid)
                 raw: dict[str, Any] = {"reservation_id": rid, "names": list(wanted), "state": "held", "owner": who.as_dict(),
                                        "enqueued_at": now, "granted_at": now, "generation": 1}
+                if spec.get("scope_chain"):
+                    raw["scope_chain"] = spec["scope_chain"]
                 if spec.get("release_requested"):
                     raw["release_requested"] = True
                 return raw
@@ -917,7 +1038,7 @@ class ResourceLedger:
                 raw = entry_for(spec)
                 if raw is None:
                     continue
-                if not held_names.isdisjoint(raw["names"]):
+                if self._document["v"] == 1 and not held_names.isdisjoint(raw["names"]):
                     result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "name_already_held"})
                     continue
                 held_names.update(raw["names"])
@@ -954,7 +1075,13 @@ class ResourceLedger:
                 raw["borrows_from"] = root["reservation_id"]
                 built.append(raw)
                 result.restored.append(raw["reservation_id"])
-            document = _empty_document()
+            document = self._document
+            if document["v"] == 2:
+                from .phase_slots import repair_entries
+                restored_phases = repair_entries(self.state_layout.root)
+                built.extend(restored_phases)
+                result.restored.extend(raw["reservation_id"] for raw in restored_phases)
+            document.pop("repair", None)
             document["entries"] = built
             _atomic_write(self.path, document)
         finally:

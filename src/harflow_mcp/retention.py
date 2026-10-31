@@ -541,6 +541,17 @@ def _delete_task(
             # Subscription insertion takes this same task lock before SQLite.
             # Recheck after the initial sweep snapshot, before catalog locks/deletion.
             from .notifications import pinned_tasks
+            from .phase_slots import retained, lifecycle_lock, SlotLifecycleBusy
+            from .state_ownership import _read_marker
+            if (_read_marker(log_dir.parent) or {}).get("layout_version") == 2:
+                try:
+                    locks.enter_context(lifecycle_lock(log_dir, task_id))
+                except SlotLifecycleBusy:
+                    stats["kept_locked"] += 1
+                    return
+            if retained(log_dir, task_id):
+                stats["kept_locked"] += 1
+                return
             if task_id in pinned_tasks(log_dir):
                 stats['kept_locked'] += 1
                 return

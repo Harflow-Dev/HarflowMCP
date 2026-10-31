@@ -15,7 +15,7 @@ TEXT_BYTES = 1024
 LIST_FIELDS = frozenset({'task_id', 'backend', 'status', 'title', 'group', 'repo_path',
     'started_at', 'finished_at', 'session_id', 'parent_task_id', 'root_task_id',
     'duration_seconds', 'background_idle_seconds', 'output_capture', 'input_channel', 'last_captured_output_at', 'recovered', 'observation_mode', 'observation_note', 'owner', 'dispatch_origin', 'responding_server', 'persisted_status', 'observed_exit',
-    'needs_reconciliation', 'process_identity_state', 'needs_direct_lookup', 'note'})
+    'phase_slots', 'needs_reconciliation', 'process_identity_state', 'needs_direct_lookup', 'note'})
 REQUIRED_FIELDS = frozenset({'task_id', 'status', 'needs_reconciliation',
     'needs_direct_lookup', 'persisted_status', 'observed_exit', 'process_identity_state'})
 ACCEPTED_FILTERS = ('group', 'title_contains', 'repo', 'status', 'backend', 'since', 'predecessor_task_id')
@@ -111,6 +111,8 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
     keys = LIST_FIELDS | {'exit_code', 'owned_by_live_server', 'workflow_run_id', 'workflow_node_id'}
     result = {key: (_text(value, 256) if isinstance(value, str) else value)
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
+    if isinstance(payload.get('phase_slots'), list):
+        result['phase_slots'] = payload['phase_slots'][:1]
     if isinstance(payload.get('supervision'), dict):
         result['supervision'] = payload['supervision']
     for key in ('owner', 'dispatch_origin', 'responding_server'):
@@ -200,6 +202,10 @@ def list_tasks(log_dir: Path, *, limit: int = 50, cursor: str | None = None,
                    status=status, backend=backend, since=since)
     validate_filters(filters)
     result = store.list_page(log_dir, limit=limit, cursor=cursor, filters=filters)
+    from .phase_slots import task_view
+    if 'phase_slots' in selected:
+        for item in result['items']:
+            item['phase_slots'] = task_view(log_dir, item['task_id'])
     result['items'] = [{key: value for key, value in item.items() if key in selected}
                        for item in result['items'] if status is None or item.get('status') == status]
     # Store reconciles identities after indexed selection. Do not publish a row

@@ -233,6 +233,34 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     attach_p.add_argument("--pid", type=int, required=True)
     attach_p.add_argument("--json", action="store_true")
 
+    slot_p = sub.add_parser("slot", help="Task phase capacity and host cleanup (explicit human enable)")
+    slot_sub = slot_p.add_subparsers(dest="slot_action", required=True)
+    for action in ("enable", "service-start", "service-stop"):
+        child = slot_sub.add_parser(action)
+        child.add_argument("--json", action="store_true")
+    child = slot_sub.add_parser("acquire", help="Return queued/held immediately; retry same name to poll")
+    child.add_argument("name")
+    child.add_argument("--wait-seconds", type=int, default=300, help="Durable queue budget 0..21600, never a hold timeout")
+    child.add_argument("--json", action="store_true")
+    for action in ("release", "resolve"):
+        child = slot_sub.add_parser(action)
+        child.add_argument("--lease-id", required=True)
+        if action == "resolve":
+            child.add_argument("--confirm-untracked-cleanup-stopped", action="store_true", help="Acknowledge inspection and stopping all owned untracked cleanup descendants; never overrides a known live/uncertain runner")
+        child.add_argument("--json", action="store_true")
+    child = slot_sub.add_parser("status", help="Read capacity, holders, FIFO queue and cleanup blockers")
+    child.add_argument("name", nargs="?")
+    child.add_argument("--json", action="store_true")
+    child = slot_sub.add_parser("restore-configuration", help="Human validated full configuration JSON; retains closed repair state")
+    child.add_argument("--configuration", required=True)
+    child.add_argument("--json", action="store_true")
+    child = slot_sub.add_parser("configure", help="Human-only machine capacity and optional explicit cleanup argv")
+    child.add_argument("name")
+    child.add_argument("--capacity", type=int, default=1)
+    child.add_argument("--cleanup-argv", help="JSON array of explicit argv, absolute executable, no shell")
+    child.add_argument("--cleanup-timeout", type=int, default=60)
+    child.add_argument("--json", action="store_true")
+
     resources_p = sub.add_parser(
         "resources",
         help="show each resource name's capacity, holders and queue from the reservation ledger",
@@ -1226,6 +1254,8 @@ def _cmd_resources_release(args: argparse.Namespace) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     elif outcome == "release_requested":
         print(f"{reservation_id}: release requested; it goes when its last borrower is released")
+    elif outcome.startswith("cleanup_"):
+        print(f"{reservation_id}: {outcome}; capacity remains occupied")
     else:
         print(f"{reservation_id}: released" + ("; session claim released" if session == "released" else ""))
     return 0
@@ -1733,6 +1763,18 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+    if args.command == "slot" and args.slot_action == "enable":
+        from . import phase_slots
+        try:
+            refused = _human_only_refusal(args, "enable phase slots")
+            if refused is not None:
+                return refused
+            result = phase_slots.enable(default_log_dir().parent)
+            result["service"] = phase_slots.service_start(default_log_dir())
+        except (StateOwnershipError, phase_slots.ResourceError) as exc:
+            return _fail(args, exc.code, str(exc), exc.as_dict() if isinstance(exc, StateOwnershipError) else None)
+        print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
     if args.command in {"state-inspect", "state-recover"}:
         from .state_layout import resolve_layout
         from .state_recovery import inspect_state, recover_state
@@ -1767,6 +1809,35 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
+    if args.command == "slot":
+        from . import phase_slots
+        if args.slot_action in {"configure", "restore-configuration", "resolve", "service-start", "service-stop"}:
+            refused = _human_only_refusal(args, args.slot_action + " phase slots")
+            if refused is not None:
+                return refused
+        try:
+            directory = default_log_dir()
+            action = args.slot_action
+            if action == "acquire":
+                result = phase_slots.acquire(directory, args.name, args.wait_seconds)
+            elif action == "release":
+                result = phase_slots.release(directory, args.lease_id)
+            elif action == "status":
+                result = phase_slots.status(directory, args.name)
+            elif action == "restore-configuration":
+                result = phase_slots.restore_configuration(directory, json.loads(args.configuration))
+            elif action == "configure":
+                result = phase_slots.configure(directory, args.name, args.capacity, json.loads(args.cleanup_argv) if args.cleanup_argv is not None else None, args.cleanup_timeout)
+            elif action == "resolve":
+                result = phase_slots.resolve(directory, args.lease_id, args.confirm_untracked_cleanup_stopped)
+            elif action == "service-start":
+                result = phase_slots.service_start(directory)
+            else:
+                result = phase_slots.service_stop(directory)
+        except (phase_slots.ResourceError, ValueError) as exc:
+            return _fail(args, getattr(exc, "code", "invalid_params"), str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
     if args.command == "statistics-page":
         from .statistics import statistics_page, StatisticsError
         try:

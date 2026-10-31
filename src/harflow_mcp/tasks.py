@@ -910,12 +910,14 @@ class Task:
         replay cost — so live and recovered listings can hold the same shape.
         """
         from . import approvals
+        from .phase_slots import task_view
         return {
             "metadata_persisted": self.latest_record_landed,
             **({"persistence_error": self.persistence_error.as_dict()} if self.persistence_error is not None else {}),
             "caller_approvals": self.caller_approvals,
             "caller_write_approvals": self.caller_write_approvals,
             "interaction_owner": self.interaction_owner,
+            "phase_slots": task_view(self.log_path.parent, self.task_id),
             **({"resources": dict(self.resources)} if self.resources else {}),
             **({"worktree": dict(self.worktree)} if self.worktree else {}),
             **({"scratch": dict(self.scratch)} if self.scratch else {}),
@@ -5479,6 +5481,12 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                         mark(registry.log_dir, task.task_id, launch_generation,
                              continuation_scheduling='pending')
                     registry.persist(task)
+                    if task.latest_record_landed:
+                        try:
+                            from .phase_slots import reconcile
+                            await asyncio.to_thread(reconcile, registry.log_dir)
+                        except Exception:
+                            log.warning("Phase settlement reconciliation deferred for %s", task.task_id, exc_info=True)
                     if task.output_drained and task.exit_code is not None and task.latest_record_landed:
                         try:
                             from .scratch import materialize_outputs
@@ -5537,7 +5545,6 @@ def _maintain(log_dir: Path) -> Any:
         raise
     except Exception:
         log.debug("abandoned launch recovery pass failed", exc_info=True)
-    swept = retention.maybe_sweep(log_dir)
     try:
         from . import task_resources
         task_resources.reap(log_dir)
@@ -5545,7 +5552,7 @@ def _maintain(log_dir: Path) -> Any:
         raise
     except Exception:
         log.debug("resource reaper pass failed", exc_info=True)
-    return swept
+    return retention.maybe_sweep(log_dir)
 
 
 def _touch_shared_scratch(registry: "TaskRegistry", task: Task) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -198,6 +199,20 @@ def workflow_storage(tmp_path):
         yield workflows.WorkflowStore(root)
 
 
+@pytest.fixture
+def phase_enabled_workflow_storage(tmp_path):
+    from harflow_mcp import phase_slots, state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+
+    root = tmp_path / "phase-state"
+    layout = resolve_layout(root=root)
+    with state_ownership.state_session(layout):
+        (root / "tasks").mkdir(exist_ok=True)
+    phase_slots.enable(root)
+    with state_ownership.state_session(layout):
+        yield workflows.WorkflowStore(root)
+
+
 def stored_run(storage, tmp_path, *, run_id="run-resource-test"):
     return storage.create_run(workflows.validate_definition(definition()), "prompt", tmp_path,
                               permission_policy="saved_node", run_id=run_id)
@@ -257,7 +272,9 @@ def test_attempt_without_named_resources_is_an_empty_holding_scope(workflow_stor
 
 
 @pytest.mark.asyncio
-async def test_competing_no_caller_roots_queue_for_run_scope_and_advance_fifo(workflow_storage, tmp_path):
+async def test_competing_no_caller_roots_queue_for_run_scope_and_advance_fifo(phase_enabled_workflow_storage, tmp_path):
+    from harflow_mcp import phase_slots
+    workflow_storage = phase_enabled_workflow_storage
     first = _root_resource_run(workflow_storage, tmp_path, "root-resource-first")
     second = _root_resource_run(workflow_storage, tmp_path, "root-resource-second")
     for run in (first, second):
@@ -279,6 +296,53 @@ async def test_competing_no_caller_roots_queue_for_run_scope_and_advance_fifo(wo
     else:
         pytest.fail("second independent workflow did not publish its queued run grant")
     assert queued["resources"]["names"] == ["checkout:repo"]
+
+    # Atomically replace a valid settled receipt after the reader captures its open
+    # source but before its path recheck. The real private reader must report the
+    # typed source-change transient, and the unrelated legacy wait must recover.
+    receipt = {
+        "reservation_id": "transient-final", "names": ["sim"], "state": "held",
+        "owner": {"kind": "task", "task_id": "transient-owner"}, "generation": 1,
+        "enqueued_at": "2026-10-31T00:00:00+00:00", "granted_at": "2026-10-31T00:00:00+00:00",
+        "purpose": "phase", "phase_state": "released", "execution_generation": "a" * 64,
+        "scope_chain": ["task:transient-owner"],
+        "agent_identity": {"pid": os.getpid(), "start_time": "fixture-agent", "markers": []},
+        "owner_identity": {"pid": os.getpid(), "start_time": "fixture-owner", "markers": []},
+        "task_authority": {"freedom": "read_only", "network": None, "network_access": None},
+        "cleanup_policy": None, "policy_epoch": 0,
+    }
+    phase_slots.write_receipt(workflow_storage.root, receipt)
+    receipt_path = workflow_storage.root / "phase-leases" / "transient-final.json"
+    real_lstat = Path.lstat
+    real_read_once = phase_slots._read_private_once
+    replaced = False
+    observed_source_change = threading.Event()
+    def replace_before_path_recheck(path, *args, **kwargs):
+        nonlocal replaced
+        if path == receipt_path and not replaced:
+            replacement = path.with_name(path.name + ".replacement")
+            replacement.write_bytes(path.read_bytes())
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, path)
+            replaced = True
+        return real_lstat(path, *args, **kwargs)
+    def observe_private_read_once(path, *args, **kwargs):
+        try:
+            return real_read_once(path, *args, **kwargs)
+        except phase_slots.SlotSourceChanged:
+            if Path(path) == receipt_path:
+                observed_source_change.set()
+            raise
+    Path.lstat = replace_before_path_recheck
+    phase_slots._read_private_once = observe_private_read_once
+    try:
+        observed = await asyncio.wait_for(asyncio.to_thread(observed_source_change.wait, 3), timeout=4)
+        assert observed
+        assert replaced
+        assert not waiting.done(), "a valid atomic source replacement must not cancel the legacy workflow wait"
+    finally:
+        Path.lstat = real_lstat
+        phase_slots._read_private_once = real_read_once
 
     workflow_storage.update_run(first["workflow_run_id"], lambda r: r.update(status="completed"), "fixture_complete")
     workflow_resources.release_run(workflow_storage, workflow_storage.get_run(first["workflow_run_id"]))

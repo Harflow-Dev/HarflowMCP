@@ -235,13 +235,17 @@ def write_landed(log_dir: Path, record: TaskRecord, *, expected_record: TaskReco
         log.warning('refusing to persist a record for an invalid task id')
         return False
     try:
-        with catalog_lock(log_dir, layout=task_layout(log_dir)):
+        from contextlib import nullcontext
+        from .phase_slots import lifecycle_lock, SlotRefused
+        from .state_ownership import _read_marker
+        phase_gate = lifecycle_lock(log_dir, record.task_id) if (_read_marker(log_dir.parent) or {}).get("layout_version") == 2 else nullcontext()
+        with phase_gate, catalog_lock(log_dir, layout=task_layout(log_dir)):
             if expected_record is not None:
                 current = _read(log_dir, record.task_id)
                 if current is None or asdict(current) != asdict(expected_record):
                     return False
             return _write_landed_locked(log_dir, record)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, SlotRefused) as exc:
         _write_error.set(TaskDocumentError(record.task_id, str(exc), code="task_unavailable"))
         log.warning("could not lock record for task %s", record.task_id, exc_info=True)
         return False
@@ -1111,6 +1115,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, responding_server=None, ctl_observation: bool = False, parent_observer=None) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts, recovery_activity
+    from .phase_slots import task_view
     qualified = read(log_dir, record.task_id, include_prompt=False)
     if qualified is None:
         raise TaskDocumentError(record.task_id, 'Task metadata disappeared', code='task_unavailable')
@@ -1155,6 +1160,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "caller_write_approvals": record.caller_write_approvals,
         **({"caller_approved_writes": approved_writes} if record.caller_write_approvals else {}),
         "interaction_owner": record.interaction_owner,
+        "phase_slots": task_view(log_dir, record.task_id),
         **({"resources": record.resources} if record.resources else {}),
         **({"worktree": record.worktree} if record.worktree else {}),
         **({"scratch": record.scratch} if record.scratch else {}),
@@ -1245,10 +1251,12 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None, ctl_obse
     from . import followups, approvals
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     launch_fields = _launch_refusal_fields(log_dir, record.task_id)
+    from .phase_slots import task_view
     return {
         "caller_approvals": record.caller_approvals,
         "caller_write_approvals": record.caller_write_approvals,
         "interaction_owner": record.interaction_owner,
+        "phase_slots": task_view(log_dir, record.task_id),
         **({"resources": record.resources} if record.resources else {}),
         **({"worktree": record.worktree} if record.worktree else {}),
         **({"scratch": record.scratch} if record.scratch else {}),

@@ -434,6 +434,8 @@ def recover_state(layout: StateLayout, *, operation_id: str, confirmation_token:
     root = layout.root
     journal = None
     try:
+        if (ownership._read_marker(root) or {}).get("layout_version") == 2:
+            raise _failure("Destructive recovery of phase-enabled layout 2 is unsupported; resolve every lease, stop the slot service, and select a fresh state root. No backup was created", "phase_layout_recovery_unsupported", unsafe=True)
         proposal = _decode(confirmation_token)
         if (not isinstance(operation_id, str) or OPERATION.fullmatch(operation_id) is None
                 or proposal.get('operation_id') != operation_id or proposal.get('state_root') != str(root)

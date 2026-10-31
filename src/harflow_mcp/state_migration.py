@@ -59,8 +59,10 @@ def validate_promotion(root: Path, *, target_version: str) -> None:
     Payload semantics remain the responsibility of existing format readers. No
     payload is rewritten. Unknown raw logs and derived indexes are not schemas.
     """
-    from .state_ownership import StateIncompatible
+    from .state_ownership import StateIncompatible, _read_marker
     try:
+        if (_read_marker(root) or {}).get("layout_version") == 2:
+            raise ValueError("Phase-enabled layout 2 storage-line promotion is unsupported; select a fresh root or retain this engine line")
         for directory_name in ('tasks', 'workflows', 'workflow-runs', 'workflow-owners'):
             directory = root / directory_name
             if not directory.exists() and not directory.is_symlink():

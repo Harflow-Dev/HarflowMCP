@@ -523,6 +523,8 @@ def task_resolver(log_dir: Path):
 
     def resolve(entry: Entry) -> str:
         task_id = entry.owner.task_id
+        if entry.purpose == "phase":
+            return KEEP
         if not task_id:
             return KEEP
         receipt = read_launch(log_dir, task_id)
@@ -552,7 +554,20 @@ def task_resolver(log_dir: Path):
 def reap(log_dir: Path):
     """Run the reaper with task, workflow run and workflow attempt resolvers."""
     from .workflow_resources import owner_resolvers
-    return ledger_for(log_dir).reap({"task": task_resolver(log_dir), **owner_resolvers(log_dir)})
+    from .phase_slots import reconcile, SlotSourceChanged, SlotLifecycleBusy
+    from .resources import ReapReport
+    deferred = None
+    try:
+        reconcile(log_dir)
+    except (SlotSourceChanged, SlotLifecycleBusy) as exc:
+        deferred = str(exc)[:500]
+    try:
+        report = ledger_for(log_dir).reap({"task": task_resolver(log_dir), **owner_resolvers(log_dir)})
+    except (SlotSourceChanged, SlotLifecycleBusy) as exc:
+        report = ReapReport(errors={"resource_maintenance": str(exc)[:500]})
+    if deferred:
+        report.errors["phase_reconciliation"] = deferred
+    return report
 
 
 # ---- recovery commands -------------------------------------------------------------------------
