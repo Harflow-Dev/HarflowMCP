@@ -1,16 +1,22 @@
 """Human controls follow engine evidence, never launch origin."""
 import copy
 import pytest
-from harflow_mcp import identity, workflow_monitor_controls as controls
+from harflow_mcp import identity, workflow_attention, workflow_monitor_controls as controls
 from harflow_mcp.workflow_cancellation import monitor_projection
 from harflow_mcp.workflow_responses import monitor
 from test_workflow_interactions import pending
 
+
+def _actionable_projection(storage, run):
+    run["attention_checkpoint_id"] = workflow_attention.checkpoint_id(storage, run)
+    return run
+
 @pytest.mark.parametrize('state,reason,allowed', [('alive','start_time_match',False), ('undecidable','ps_failed',False), ('dead','legacy_markers_not_seen',False), ('dead','pid_absent',True)])
 def test_caller_control_requires_qualified_death(pending, monkeypatch, state, reason, allowed):
     storage, run = pending
-    monkeypatch.setattr(identity, 'check_detail', lambda evidence: (state, reason))
+    _actionable_projection(storage, run)
     before = copy.deepcopy(run)
+    monkeypatch.setattr(identity, 'check_detail', lambda evidence: (state, reason))
     actions = controls.projection(storage, run)
     for action in ('resume', 'additional_attempts', 'revise_goal'):
         assert actions[action]['allowed'] is allowed
@@ -21,11 +27,13 @@ def test_caller_control_requires_qualified_death(pending, monkeypatch, state, re
 
 def test_monitor_checkpoint_and_failed_recovery(pending):
     storage, run = pending
+    _actionable_projection(storage, run)
     run.update(interaction_owner='monitor', status='needs_input', input_decision_id='decision', optional_review_skip_available=True)
     actions = controls.projection(storage, run)
     assert actions['resume']['allowed'] and actions['skip_optional_review']['allowed']
     assert not actions['recover']['allowed']
     run['status'] = 'failed'
+    run['attention_checkpoint_id'] = "attention:failed-fixture"
     actions = controls.projection(storage, run)
     assert actions['recover']['allowed'] and actions['additional_attempts']['allowed']
     assert not actions['resume']['allowed'] and not actions['skip_optional_review']['allowed']
@@ -44,6 +52,7 @@ def test_child_exposes_root_route_without_applying_child_answer(pending):
 def test_refresh_disables_controls_when_execution_changes(pending, update, expected):
     storage, run = pending
     run['interaction_owner'] = 'monitor'
+    _actionable_projection(storage, run)
     assert controls.projection(storage, run)['resume']['allowed']
     run.update(update)
     action = controls.projection(storage, run)['resume']
@@ -53,6 +62,7 @@ def test_refresh_disables_controls_when_execution_changes(pending, update, expec
 def test_unknown_scheduler_keeps_reason_and_compact_evidence(pending, monkeypatch):
     storage, run = pending
     run.update(interaction_owner='monitor', supervisor_identity={'pid':42,'start_time':'unknown','markers':[]})
+    _actionable_projection(storage, run)
     monkeypatch.setattr(identity, 'identity_check', lambda evidence:'undecidable')
     action = monitor(monitor_projection(storage, run))['monitor_controls']['resume']
     assert not action['allowed'] and 'uncertain' in action['reason']
@@ -79,18 +89,19 @@ def test_interrupted_scheduler_recovery_matches_control_without_attempt_grant(pe
     run = storage.update_run(rid, lambda value: value.update(
         status=status, interaction_owner='monitor',
         supervisor_identity={'pid': 999999, 'start_time': 'gone', 'markers': []}), 'fixture')
+    before = copy.deepcopy(storage.get_run(rid))
+    _actionable_projection(storage, run)
     monkeypatch.setattr(identity, 'identity_check', lambda evidence: 'dead')
     launches = []
     monkeypatch.setattr(workflows, '_launch', lambda storage, identifier: launches.append(identifier))
-    before = copy.deepcopy(run)
     actions = controls.projection(storage, run)
     assert actions['recover']['allowed']
     assert not actions['additional_attempts']['allowed']
     assert 'cannot grant' in actions['additional_attempts']['reason']
     assert storage.get_run(rid) == before
     with pytest.raises(workflows.WorkflowError, match='cannot grant additional attempts'):
-        storage.control(rid, 'recover', 'Restore scheduler', additional_attempts=1, interaction_owner='monitor')
-    recovered = storage.control(rid, 'recover', 'Restore scheduler', interaction_owner='monitor')
+        storage.control(rid, 'recover', 'Restore scheduler', additional_attempts=1, attention_checkpoint_id=run['attention_checkpoint_id'], interaction_owner='monitor')
+    recovered = storage.control(rid, 'recover', 'Restore scheduler', attention_checkpoint_id=run['attention_checkpoint_id'], interaction_owner='monitor')
     assert recovered['scheduler_recovery']['reason'] == 'Restore scheduler'
     assert recovered.get('attempt_grants') == before.get('attempt_grants')
     assert recovered.get('transition_grant') == before.get('transition_grant')
@@ -103,6 +114,7 @@ def test_interrupted_scheduler_requires_qualified_death(pending, monkeypatch, sc
     run = storage.update_run(run['workflow_run_id'], lambda value: value.update(
         status='running', interaction_owner='monitor',
         supervisor_identity={'pid': 999999, 'start_time': 'unknown', 'markers': []}), 'fixture')
+    _actionable_projection(storage, run)
     monkeypatch.setattr(identity, 'identity_check', lambda evidence: scheduler_state)
     action = controls.projection(storage, run)['recover']
     assert not action['allowed'] and 'confirmed owner death' in action['reason']

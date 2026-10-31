@@ -130,7 +130,10 @@ async def test_public_resume_after_definite_start_failure_reuses_reserved_owner_
     reserved = recorded[0]
     assert reserved['status'] == 'needs_attention' and reserved['interaction_owner'] == 'monitor'
     monkeypatch.setattr(w.subprocess, 'Popen', lambda *args, **kwargs: calls.append(args))
-    resumed = store.control(reserved['workflow_run_id'], 'resume', interaction_owner='monitor')
+    from harflow_mcp.workflow_attention import checkpoint_id
+    checkpoint = checkpoint_id(store, store.get_run(reserved['workflow_run_id']))
+    assert checkpoint
+    resumed = store.control(reserved['workflow_run_id'], 'resume', attention_checkpoint_id=checkpoint, interaction_owner='monitor')
     assert resumed['workflow_run_id'] == reserved['workflow_run_id'] and resumed['status'] == 'running'
     assert len(calls) == 2 and len(store.list_runs()) == 1
 

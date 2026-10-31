@@ -137,7 +137,7 @@ def test_cli_inspection_parity(monkeypatch, capsys, owned_state):
 def test_cli_recovery_parity(monkeypatch, capsys, owned_state):
     async def recover(action, **kwargs):
         assert action == "recover"
-        assert kwargs == {"run_id": "r1", "instructions": "Inspected the failure", "additional_attempts": 2}
+        assert kwargs == {"run_id": "r1", "instructions": "Inspected the failure", "additional_attempts": 2, "attention_checkpoint_id": None}
         return {"status": "running"}
     monkeypatch.setattr(server, "_workflow_call", recover)
     monkeypatch.setattr(ctl, "default_log_dir", lambda: owned_state / "tasks")
@@ -148,7 +148,7 @@ def test_cli_recovery_parity(monkeypatch, capsys, owned_state):
 async def test_recovery_requires_reason_and_forwards_explicit_grants(monkeypatch):
     async def call(action, **kwargs):
         assert action == "recover"
-        assert kwargs == {"run_id": "r", "instructions": "examined", "additional_attempts": 1}
+        assert kwargs == {"run_id": "r", "instructions": "examined", "additional_attempts": 1, "attention_checkpoint_id": None}
         return kwargs
     monkeypatch.setattr(server, "_workflow_call", call)
     with pytest.raises(Exception, match="nonempty"):
@@ -305,7 +305,7 @@ def test_cli_monitor_start_and_resume_forward_internal_owner(monkeypatch, capsys
     assert ctl.main(["workflow-start", "feature", "--repo", "/tmp/repo", "--prompt", "Work", "--monitor", "--json"]) == 0
     assert observed[-1][1]["interaction_owner"] == "monitor"
     assert ctl.main(["workflow-resume", "r1", "--instructions", "Answer", "--decision-id", "d1", "--monitor", "--json"]) == 0
-    assert observed[-1] == ("resume", {"run_id": "r1", "instructions": "Answer", "additional_attempts": 0, "decision_id": "d1", "allow_optional_review_skip": False, "interaction_owner": "monitor"})
+    assert observed[-1] == ("resume", {"run_id": "r1", "instructions": "Answer", "additional_attempts": 0, "decision_id": "d1", "allow_optional_review_skip": False, "attention_checkpoint_id": None, "interaction_owner": "monitor"})
     capsys.readouterr()
 
 

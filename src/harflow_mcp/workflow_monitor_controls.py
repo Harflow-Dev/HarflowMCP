@@ -91,6 +91,11 @@ def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     scheduler_recovery = control_run.get("status") in {"starting", "running", "cancelling"}
     if scheduler_recovery:
         set_action("recover", delegation_reason or ownership_reason or _scheduler_recovery_reason(storage, control_run))
+    if status != "needs_input" and not run.get("input_decision_id") and not run.get("attention_checkpoint_id"):
+        reason = "No qualified actionable checkpoint is available; refresh the workflow. Legacy suspended records require a legitimate engine mutation"
+        for action in ("resume", "recover"):
+            if controls[action]["allowed"]:
+                set_action(action, reason)
     # Pause does not claim caller authority: only resume/recover/goal revision
     # (and explicit messaging) support the qualified dead-caller handover.
     set_action("pause", ("Workflow interaction belongs to its original caller" if not monitor_owned else "")

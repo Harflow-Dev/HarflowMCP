@@ -1311,3 +1311,69 @@ until durable success or explicit human inspection/resolution. Old engines rejec
 explicitly enabled store layout 2 before resource operations; normal layout 1 behavior
 remains supported. See [resources](resources-and-worktrees.md#task-phase-slots) for the
 human enable/service/configuration protocol, private evidence repair and restrictions.
+
+### Workflow attention checkpoints
+
+Capability `workflow-attention-checkpoints.v1` adds optional opaque
+`attention_checkpoint_id` strings to workflow status/detail projections and
+verified `pending_attention` rows, and the same optional argument to
+`resume_workflow` / `recover_workflow` (`workflow-resume` / `workflow-recover`
+with `--attention-checkpoint-id`). Wire envelopes remain v1. Preserve the token
+originally displayed with the user's draft; a later read must not silently
+replace it before submission. Do not combine this argument with `decision_id`.
+Questions, usage-limit choices and optional-review consent retain their exact
+existing decision-ID paths. Pause and cancel do not use checkpoint tokens.
+
+An `attention:` token binds the persisted root, verified reciprocal source path,
+forwarding-hop status/action and current source checkpoint markers. Cached
+`attention_source.attention_checkpoint` values are not authoritative. New issued
+work identities and suspension transitions rotate the existing marker; reads,
+publication, waiting durations and progress inside an issued attempt do not.
+Tokens survive restart. An informational pending row may name a source that is
+not selected by the root: its token becomes actionable through root control only
+when it matches the root's currently selected authoritative chain. Diagnostic
+rows with unverified ownership have no token. A root whose persisted running
+state merely projects descendant attention has no actionable root token.
+
+A `scheduler:` token binds an active root's persisted status and qualified
+supervisor process generation, without new process probes during token reads.
+Recovery still requires the existing confirmed-death, ownership and sequence
+checks. Kind, mode or owner changes invalidate the token; a duplicate request
+never authorizes a newer owner or a failed-run recovery.
+
+A supplied token is always enforced. Initially stale requests return typed
+`attention_checkpoint_stale` before reconciliation, delivery preparation,
+interaction handover, instructions, grants or launches. Initially current
+requests reconcile every selected source hop under the tree mutation lock and
+recheck identity before those effects. If truth reconciliation changes the
+checkpoint, only truth updates remain, and the request refuses as stale. Refresh,
+review the new checkpoint, and explicitly submit again; never replay the draft
+automatically. Prepared deliveries bind their checkpoint. An unreceived delivery
+from a superseded checkpoint can be replaced under verified tree ownership;
+a matching received receipt is acknowledged without repeating grants or
+resuming a newer checkpoint. New prepared attention deliveries retain the root's
+existing checkpoint marker as an `attention_root_checkpoint` witness. If the
+source accepted the delivery and remains active while the parent completion
+was interrupted, the verified unchanged root/path/witness retains the original
+token for the unfinished parent handover. The same completion composes through
+verified pending forwarding hops only when their witnesses and original prose,
+grants, owner and action remain compatible. An exact retry unwinds unfinished
+parent transitions and launches after unlock; child instructions and grants are
+not reapplied. A new child suspension or changed root witness invalidates that
+completion identity. Older deliveries without a witness cannot establish a new
+guarded completion identity; an authorized exact legacy retry remains available.
+The root action/status matrix applies before forwarding: resume accepts paused
+or attention roots, and recover accepts failed roots (or the separate active
+scheduler-recovery mode). Recovery of a failed forwarded root applies the reason
+and grants to its verified authoritative source, then completes the parent
+transition; it does not grant the root or unrelated siblings.
+
+Monitor non-question resume/recover requires the token and otherwise returns
+`attention_checkpoint_required`. Ordinary caller/MCP omission retains legacy
+behavior without the checkpoint guarantee. Qualified older marker-bearing
+records work; markerless suspended records expose no actionable token and return
+`attention_checkpoint_unavailable` until a legitimate engine mutation establishes
+the existing marker. Reads never manufacture one. Inspect or cancel such a run,
+or use an authorized legacy caller continuation; do not edit persistence.
+Immediate queued messaging retains its existing no-answer/no-grant continuation
+authority and is separate from displayed recovery submission.

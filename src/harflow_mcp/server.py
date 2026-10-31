@@ -2637,7 +2637,8 @@ async def _workflow_dispatch(action: str, **kwargs: Any) -> Any:
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
-        data = None
+        from .workflow_attention import CheckpointError
+        data = {"code": exc.code} if isinstance(exc, CheckpointError) else None
         if hasattr(exc, "missing_references"):
             data = {"missing_references": exc.missing_references,
                     "missing_references_truncated": exc.missing_references_truncated}
@@ -3256,11 +3257,15 @@ async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 @_task_document_errors
-async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None, allow_optional_review_skip: StrictBool = False) -> dict[str, Any]:
+async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None, allow_optional_review_skip: StrictBool = False, attention_checkpoint_id: str | None = None) -> dict[str, Any]:
     """Resume a caller-owned run with instructions and optional explicit attempt grants.
 
     Preserve spaces and word boundaries in instructions rather than compressing natural
     prose; the caller's source text is retained unchanged before workflow input assembly.
+
+    For non-question continuation, pass the originally displayed attention_checkpoint_id.
+    A stale checkpoint refuses the answer and grants; refresh before submitting again.
+    Omission retains legacy caller behavior. Do not combine it with decision_id.
 
     For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
     in instructions. Stale answers and live/uncertain dispatches are refused. When the root
@@ -3286,7 +3291,7 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     """
     _guard_launch_layout()
     from .workflow_responses import compact
-    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))
+    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, attention_checkpoint_id=attention_checkpoint_id))
 
 
 @mcp.tool()
@@ -3326,12 +3331,14 @@ async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id
 
 @mcp.tool()
 @_task_document_errors
-async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0) -> dict[str, Any]:
+async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0, attention_checkpoint_id: str | None = None) -> dict[str, Any]:
     """Explicitly recover a failed settled run or a root with a confirmed-dead scheduler.
 
     Supply a reason and retain completed work. Interrupted scheduler recovery preserves
     existing attempts and decision budgets; uncertain execution ownership blocks recovery.
-    Accepted recovery sets the run's resumed_at.
+    Accepted recovery sets the run's resumed_at. Pass the originally displayed
+    attention_checkpoint_id to bind failed-run or scheduler recovery to its current
+    persisted identity. Stale requests refuse without applying the reason or grants.
 
     Preserve spaces and word boundaries in reason rather than compressing natural
     prose; the caller's source text is retained unchanged before workflow input assembly.
@@ -3342,7 +3349,7 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
     if not reason or not reason.strip():
         raise MCPError(INVALID_PARAMS, "Recovery reason must be nonempty")
     from .workflow_responses import compact
-    return compact(await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts))
+    return compact(await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts, attention_checkpoint_id=attention_checkpoint_id))
 
 
 @mcp.tool()

@@ -168,7 +168,7 @@ def _selection(value, path):
 
 
 def _delivery(value, path):
-    _shape(value, {"id": str, "payload": _object({**_fields("source_id action", counters="additional_attempts", booleans="allow_optional_review_skip", nullable_strings="instructions decision_id interaction_owner"), "source": _source})}, path)
+    _shape(value, {"id": str, "payload": _object({**_fields("source_id action attention_checkpoint_id", counters="additional_attempts attention_root_checkpoint", booleans="allow_optional_review_skip", nullable_strings="instructions decision_id interaction_owner"), "source": _source})}, path)
 
 
 def _source(value, path):

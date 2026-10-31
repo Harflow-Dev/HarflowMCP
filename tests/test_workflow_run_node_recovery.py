@@ -888,8 +888,9 @@ async def test_terminal_parallel_child_live_tasks_are_signaled_without_overwriti
 def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, monkeypatch, kind, failure_target):
     parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
     child = finished_child(store, parent, parent['activations'][0], status='needs_input' if kind == 'input' else kind)
-    child.update(interaction_owner='monitor')
-    source = {'workflow_run_id': child['workflow_run_id'], 'workflow_name': child['name']}
+    child.update(interaction_owner='monitor', attention_checkpoint=1)
+    source = {'workflow_run_id': child['workflow_run_id'], 'workflow_name': child['name'],
+              'path': [parent['workflow_run_id'], child['workflow_run_id']]}
     if kind == 'input':
         child.update(input_decision_id='question-one', input_question='Answer me')
     write_run(store, child)
@@ -900,6 +901,10 @@ def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, 
         else:
             r.update(attention_source=source)
     store.update_run(parent['workflow_run_id'], seed, 'fixture')
+    from harflow_mcp.workflow_attention import checkpoint_id
+    attention_checkpoint_id = checkpoint_id(store, store.get_run(parent['workflow_run_id']))
+    if kind != 'input':
+        assert attention_checkpoint_id
     original = store.update_run
     failed = False
     def injected(identifier, change, event, detail=None, **options):
@@ -912,11 +917,26 @@ def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, 
             raise OSError('injected write failure')
         return original(identifier, change, event, detail, **options)
     monkeypatch.setattr(store, 'update_run', injected)
-    options = {'decision_id': 'question-one'} if kind == 'input' else {}
+    options = {'decision_id': 'question-one'} if kind == 'input' else {'attention_checkpoint_id': attention_checkpoint_id}
     with pytest.raises(OSError, match='injected'):
         store.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='monitor', **options)
     # Restart: the delivery identity and accepted child receipt come from disk.
     restarted = w.WorkflowStore(root=store.root)
+    if failure_target in {'child-after-write', 'parent'} and kind != 'input':
+        # A durable child receipt completes only this original root checkpoint.
+        # Retrying its exact payload acknowledges the handover without applying the
+        # child grant or instructions again, then launches the root once after unlock.
+        launches = []
+        monkeypatch.setattr(w, '_launch', lambda storage, identifier: launches.append(identifier))
+        child_before = (restarted.runs / f"{child['workflow_run_id']}.json").read_bytes()
+        monkeypatch.setattr(restarted, 'reconcile_run', lambda identifier, **options: restarted.get_run(identifier))
+        completed = restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='monitor', **options)
+        assert completed['status'] == 'running' and 'forwarded_delivery' not in completed
+        assert (restarted.runs / f"{child['workflow_run_id']}.json").read_bytes() == child_before
+        assert restarted.get_run(child['workflow_run_id'])['transition_grant'] == 2
+        assert restarted.get_run(child['workflow_run_id'])['instructions'] == 'exact answer'
+        assert launches == [parent['workflow_run_id']]
+        return
     with pytest.raises(w.WorkflowError, match='original caller'):
         restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='caller', **options)
     with pytest.raises(w.WorkflowError, match='pending'):

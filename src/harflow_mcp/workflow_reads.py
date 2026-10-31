@@ -130,7 +130,7 @@ async def bounded_caller(directory: Path):
         return detection.caller
 
 
-MANAGED_SUMMARY_FIELDS = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source", "interaction_state", "messages", "monitor_controls")
+MANAGED_SUMMARY_FIELDS = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "attention_checkpoint_id", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source", "interaction_state", "messages", "monitor_controls")
 MANAGED_SUMMARY_DERIVED = ("technical_plan", "technical_plan_truncated", "technical_plan_execution_id", "activations")
 
 
@@ -446,6 +446,10 @@ def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
                         label += " [usage_limit" + (f": {candidate}" if candidate else "") + "]"
                     names.append(label)
                 result["attention_reason"] = f"{len(names)} workflow runs need input or attention: " + ", ".join(names)
+    from .workflow_attention import checkpoint_id
+    checkpoint = checkpoint_id(storage, run)
+    if checkpoint is not None and result.get("status") == run.get("status"):
+        result["attention_checkpoint_id"] = checkpoint
     from .workflow_interactions import projection as interaction_projection
     result.update(interaction_projection(storage, result))
     from .workflow_messages import projection as message_projection

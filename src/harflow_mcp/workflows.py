@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 import uuid
 from typing import Any
 
@@ -744,6 +745,9 @@ def _write(path: Path, value: Any, *, layout, before_replace=None, after_replace
         temp.unlink(missing_ok=True)
 
 
+_TREE_MUTATION = threading.local()
+
+
 class WorkflowStore:
     def __init__(self, root: Path | None = None):
         from .state_layout import resolve_layout
@@ -767,6 +771,26 @@ class WorkflowStore:
             yield
         finally:
             descriptor.close(unlock=True)
+
+    @contextmanager
+    def tree_mutation(self, root_id: str):
+        """Serialize one synchronous tree operation, reusing only this thread's lock."""
+        key = (str(self.root.resolve()), root_id)
+        active = getattr(_TREE_MUTATION, "active", None)
+        if active is not None:
+            if active["key"] != key:
+                raise WorkflowError("Cannot nest mutations of different workflow trees")
+            yield
+            return
+        launches = []
+        with self.lock(f"tree-mutation:{root_id}"):
+            _TREE_MUTATION.active = {"key": key, "launches": launches}
+            try:
+                yield
+            finally:
+                del _TREE_MUTATION.active
+        for storage, identifier in launches:
+            _launch(storage, identifier)
 
     @contextmanager
     @layout_operation
@@ -1281,7 +1305,7 @@ class WorkflowStore:
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         # All tree mutations serialize with the human cancellation eligibility check.
         from .catalog import catalog_lock, Catalog
-        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"), catalog_lock(self.runs, layout=self.state_layout):
+        with self.tree_mutation(root_id), self.lock(f"run:{run_id}"), catalog_lock(self.runs, layout=self.state_layout):
             run, source = self._read_run(run_id)
             current_root = (run.get("parent_link") or {}).get("root_workflow_run_id") or run_id
             if current_root != root_id:
@@ -1291,7 +1315,8 @@ class WorkflowStore:
                 runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
                 if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
                     raise DispatchNotStarted("Scheduling stopped before reservation")
-            attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
+            from .workflow_attention import semantic_identity
+            attention_before = semantic_identity(run)
             checkpoint_before = run.get("attention_checkpoint")
             finished_before = qualified_finished_at(run)
             # These fields describe the current suspension, not its history. Keep
@@ -1307,7 +1332,7 @@ class WorkflowStore:
                 for key, value in suspension_before.items():
                     if key in run and run[key] == value:
                         run.pop(key)
-            attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
+            attention_after = semantic_identity(run)
             if run.get("status") in {"needs_attention", "paused", "failed"}:
                 if attention_before != attention_after or "attention_checkpoint" not in run:
                     run["attention_checkpoint"] = run.get("sequence", 0) + 1
@@ -1456,7 +1481,48 @@ class WorkflowStore:
         return run
 
     @layout_operation
-    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False) -> dict[str, Any]:
+    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, attention_checkpoint_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False, _message_resume: bool = False) -> dict[str, Any]:
+        from .workflow_attention import require_checkpoint, authoritative_chain, checkpoint_id
+        observed = self.get_run(run_id, refresh_atomic=True)
+        root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
+        guarded = attention_checkpoint_id is not None
+        if _message_resume and (action != "resume" or instructions is not None or additional_attempts or decision_id or _internal):
+            raise WorkflowError("Queued messaging cannot authorize answers or grants")
+        if guarded and (action not in {"resume", "recover"} or decision_id is not None):
+            raise WorkflowError("attention_checkpoint_id requires non-question resume or recover")
+        # Only an explicit question request bypasses the attention-token requirement.
+        # An observed question can move on before the tree lock is acquired.
+        question = action == "resume" and isinstance(decision_id, str) and bool(decision_id)
+        if action in {"resume", "recover"} and interaction_owner == "monitor" and not _internal and not question and not guarded and not _message_resume:
+            from .workflow_attention import CheckpointError
+            raise CheckpointError("attention_checkpoint_required", "Refresh the workflow and submit its current attention_checkpoint_id")
+        with self.tree_mutation(root_id):
+            current = self.get_run(run_id, refresh_atomic=True)
+            if ((current.get("parent_link") or {}).get("root_workflow_run_id") or run_id) != root_id:
+                raise WorkflowError("Workflow root changed before control")
+            if guarded:
+                require_checkpoint(self, current, attention_checkpoint_id, action)
+                # Scheduler recovery has its own validation lifecycle; attention
+                # reconciliation must never precede its owner/death refusal.
+                reconciled = set()
+                if attention_checkpoint_id.startswith("attention:"):
+                    # Complete truth reconciliation at every forwarding hop before
+                    # parent delivery, interaction handover or attempt grants.
+                    for hop in reversed(authoritative_chain(self, current)):
+                        if not _supervisor_present(hop):
+                            self.reconcile_run(hop["workflow_run_id"])
+                        reconciled.add(hop["workflow_run_id"])
+                    require_checkpoint(self, self.get_run(run_id, refresh_atomic=True), attention_checkpoint_id, action)
+                _TREE_MUTATION.active["checkpoint"] = attention_checkpoint_id
+                _TREE_MUTATION.active["checkpoints"] = {
+                    hop["workflow_run_id"]: checkpoint_id(self, hop)
+                    for hop in authoritative_chain(self, self.get_run(run_id, refresh_atomic=True))
+                } if attention_checkpoint_id.startswith("attention:") else {run_id: attention_checkpoint_id}
+                _TREE_MUTATION.active["reconciled"] = reconciled
+            return self._control(run_id, action, instructions, additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, _internal=_internal, _delivery=_delivery, _ordinary_answer=_ordinary_answer)
+
+    @layout_operation
+    def _control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
@@ -1562,7 +1628,7 @@ class WorkflowStore:
                 publish_input(self, child)
                 result = self.get_run(run_id, refresh_atomic=True)
                 if not _supervisor_present(result):
-                    _launch(self, run_id)
+                    _request_launch(self, run_id)
                 return result
             local_input_route = target is not None and target['workflow_run_id'] == run_id
             if target is None:
@@ -1629,9 +1695,22 @@ class WorkflowStore:
             payload = {"source_id": source_id, "action": source_action, "instructions": instructions,
                        "additional_attempts": additional_attempts, "decision_id": decision_id,
                        "allow_optional_review_skip": allow_optional_review_skip, "interaction_owner": interaction_owner, "source": source}
+            if decision_id is None:
+                from .workflow_attention import checkpoint_id
+                checkpoint = checkpoint_id(self, observed)
+                if checkpoint is not None:
+                    payload["attention_checkpoint_id"] = checkpoint
+                    payload["attention_root_checkpoint"] = observed["attention_checkpoint"]
             previous = observed.get("forwarded_delivery")
             replace_delivered = False
-            if previous is not None and (previous.get("payload", {}).get("source") != source or previous.get("payload", {}).get("decision_id") != decision_id):
+            replace_superseded = False
+            if previous is not None and previous.get("payload", {}).get("attention_checkpoint_id") != payload.get("attention_checkpoint_id") and payload.get("attention_checkpoint_id"):
+                from .workflow_inputs import verified_source
+                prior_id = previous.get("payload", {}).get("source_id")
+                if verified_source(self, observed, prior_id):
+                    prior_run = self.get_run(prior_id, refresh_atomic=True)
+                    replace_superseded = prior_run.get("forwarded_delivery_receipt") != previous
+            if previous is not None and (previous.get("payload", {}).get("source") != source or previous.get("payload", {}).get("decision_id") != decision_id or previous.get("payload", {}).get("attention_checkpoint_id") != payload.get("attention_checkpoint_id")):
                 prior_source = self.get_run(previous["payload"]["source_id"], refresh_atomic=True)
                 replace_delivered = prior_source.get("forwarded_delivery_receipt") == previous
             def prepare(r: dict[str, Any]) -> None:
@@ -1640,10 +1719,14 @@ class WorkflowStore:
                 if r.get("status") != observed.get("status") or r.get("input_decision_id") != observed.get("input_decision_id") or r.get("input_source") != observed.get("input_source") or r.get("attention_source") != observed.get("attention_source"):
                     raise WorkflowError("The forwarded source moved on; re-read the current run")
                 pending = r.get("forwarded_delivery")
-                if pending is not None and not (replace_delivered and pending == previous):
+                if pending is not None and not ((replace_delivered or replace_superseded) and pending == previous):
                     pending_payload = copy.deepcopy(pending.get("payload", {}))
                     # Existing deliveries predate structured consent and mean no opt-in.
                     pending_payload.setdefault("allow_optional_review_skip", False)
+                    if "attention_checkpoint_id" not in pending_payload and "attention_checkpoint_id" in payload:
+                        pending_payload["attention_checkpoint_id"] = payload["attention_checkpoint_id"]
+                    if "attention_root_checkpoint" not in pending_payload and "attention_root_checkpoint" in payload:
+                        pending_payload["attention_root_checkpoint"] = payload["attention_root_checkpoint"]
                     if pending_payload != payload:
                         raise WorkflowError("A forwarded delivery is pending; retry its original answer and grants")
                 else:
@@ -1684,22 +1767,61 @@ class WorkflowStore:
                     token.pop("decision_error", None)
             result = self.update_run(run_id, clear_forwarded, "forwarded_input_answered", {"source": source_id}, resumed=not _internal and not _ordinary_answer)
             if not _supervisor_present(result) and not result.get("parent_link"):
-                _launch(self, run_id)
+                _request_launch(self, run_id)
             return result
-        if action == "resume" and observed.get("status") in {"needs_attention", "paused"} and (observed.get("attention_source") or {}).get("workflow_run_id") not in (None, run_id):
+        if action in {"resume", "recover"} and observed.get("status") in {"needs_attention", "paused", "failed"} and (observed.get("attention_source") or {}).get("workflow_run_id") not in (None, run_id):
+            if action == "resume" and observed["status"] == "failed":
+                raise WorkflowError("Workflow is terminal; recover the failed workflow instead")
+            if action == "recover" and observed["status"] != "failed":
+                raise WorkflowError("Only failed delegation workflows can recover")
             source = observed["attention_source"]
             source_id = source["workflow_run_id"]
             source_run = self.get_run(source_id, refresh_atomic=True)
-            previous_payload = (observed.get("forwarded_delivery") or {}).get("payload", {})
+            previous = observed.get("forwarded_delivery")
+            previous_payload = (previous or {}).get("payload", {})
+            if (previous
+                    and getattr(_TREE_MUTATION, "active", {}).get("checkpoints", {}).get(run_id) in (None, previous_payload.get("attention_checkpoint_id"))
+                    and source_run.get("forwarded_delivery_receipt") == previous
+                    and previous_payload.get("source_id") == source_id
+                    and previous_payload.get("source") == source
+                    and previous_payload.get("decision_id") is None
+                    and previous_payload.get("allow_optional_review_skip", False) is allow_optional_review_skip
+                    and previous_payload.get("instructions") == instructions
+                    and previous_payload.get("additional_attempts") == additional_attempts
+                    and previous_payload.get("interaction_owner") == interaction_owner):
+                from .workflow_attention import CONTINUING
+                continuing = source_run.get("status") in CONTINUING
+                # Complete only the parent's unfinished handover. A newer child
+                # suspension receives an acknowledgement without being resumed.
+                def acknowledge(r: dict[str, Any]) -> None:
+                    from .workflow_interactions import authorize
+                    authorize(self, r, interaction_owner, action, pending=True)
+                    if r.get("forwarded_delivery") != previous or r.get("attention_source") != source:
+                        raise WorkflowError("Forwarded receipt changed before acknowledgement")
+                    record_delivery(r)
+                    r.pop("forwarded_delivery", None)
+                    r["input_delivery_receipt"] = {"workflow_run_id": source_id, "accepted_at": source_run.get("updated_at", time.time()), "delivery_id": previous["id"]}
+                    if continuing:
+                        r["status"] = "running"
+                        for key in ("attention_source", "optional_review_skip_available", "attention_reason", "suspended_via_root"):
+                            r.pop(key, None)
+                result = self.update_run(run_id, acknowledge, "forwarded_attention_receipt_acknowledged", resumed=continuing and not _internal and not _ordinary_answer)
+                if continuing and not _supervisor_present(result) and not result.get("parent_link"):
+                    _request_launch(self, run_id)
+                return result
             same_source = previous_payload.get("source_id") == source_id and previous_payload.get("source") == source
-            source_action = (previous_payload.get("action") if same_source else None) or ("recover" if source_run.get("status") == "failed" else "resume")
+            source_action = "recover" if source_run.get("status") == "failed" else "resume"
             delivery = prepare_delivery(source_id, source_action, source)
             # The grant and recovery instructions belong to the paused child;
             # resuming the root must not allocate a fresh invocation or grant its siblings.
             self.control(source_id, source_action, instructions=instructions, additional_attempts=additional_attempts,
                          interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
+            from .workflow_attention import CONTINUING
+            accepted_source = self.get_run(source_id, refresh_atomic=True)
+            if accepted_source.get("status") not in CONTINUING or accepted_source.get("forwarded_delivery_receipt") != delivery:
+                raise WorkflowError("The source did not complete this handover; its current checkpoint remains suspended")
             def clear_attention(r: dict[str, Any]) -> None:
-                if r.get("status") not in {"needs_attention", "paused"} or r.get("attention_source") != source or r.get("forwarded_delivery") != delivery:
+                if r.get("status") not in {"needs_attention", "paused", "failed"} or r.get("attention_source") != source or r.get("forwarded_delivery") != delivery:
                     raise WorkflowError("The child attention source moved on; re-read the current run before resuming")
                 record_delivery(r)
                 r.pop("forwarded_delivery", None)
@@ -1710,7 +1832,7 @@ class WorkflowStore:
                 r.pop("suspended_via_root", None)
             result = self.update_run(run_id, clear_attention, "forwarded_attention_resumed", {"source": source_id}, resumed=not _internal and not _ordinary_answer)
             if not _supervisor_present(result) and not result.get("parent_link"):
-                _launch(self, run_id)
+                _request_launch(self, run_id)
             return result
         if action in {"resume", "recover", "cancel"}:
             observed = self.get_run(run_id, refresh_atomic=True)
@@ -1718,7 +1840,7 @@ class WorkflowStore:
                 from . import identity
                 if identity.identity_check(observed["supervisor_identity"]) == "undecidable":
                     raise WorkflowError("Supervisor identity is uncertain; cannot " + ("cancel" if action == "cancel" else "resume or recover"))
-            if action in {"resume", "recover"} and not _supervisor_present(observed):
+            if action in {"resume", "recover"} and not _supervisor_present(observed) and run_id not in getattr(_TREE_MUTATION, "active", {}).get("reconciled", set()):
                 self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}, "allow_optional_review_skip": allow_optional_review_skip}
         def change(r: dict[str, Any]) -> None:
@@ -1852,7 +1974,7 @@ class WorkflowStore:
             record_delivery(r)
         result = self.update_run(run_id, change, f"control:{action}", control_detail, resumed=action in {"resume", "recover"} and not _internal and not _ordinary_answer)
         if action in {"resume", "recover", "cancel"} and not _supervisor_present(result) and not result.get("parent_link"):
-            _launch(self, run_id)
+            _request_launch(self, run_id)
         return result
 
     @layout_operation
@@ -2074,6 +2196,17 @@ def _require_no_active_historical_runs(storage: WorkflowStore) -> None:
         historical = db.execute("SELECT 1 FROM entries INDEXED BY active_historical WHERE active=1 AND COALESCE(json_extract(payload,'$.kind'),'workflow')!='builder' AND COALESCE(json_extract(payload,'$.execution_contract'),'')!='delegation' LIMIT 1").fetchone()
     if historical:
         raise WorkflowError("Active historical runs must settle or be cancelled before delegation execution")
+
+
+def _request_launch(storage: WorkflowStore, run_id: str) -> None:
+    active = getattr(_TREE_MUTATION, "active", None)
+    if active is None:
+        _launch(storage, run_id)
+        return
+    if active["key"] != (str(storage.root.resolve()), run_id):
+        raise WorkflowError("Supervisor launch does not belong to the locked workflow root")
+    if not any(identifier == run_id for _, identifier in active["launches"]):
+        active["launches"].append((storage, run_id))
 
 
 def _launch(storage: WorkflowStore, run_id: str) -> None:

@@ -218,3 +218,11 @@ unfinished claims as uncertain rather than replaying side effects. Every unresol
 request, hold or cleanup protects task/launch evidence from retention. See
 [phase slots](resources-and-worktrees.md#task-phase-slots) for enable, repair and service
 shutdown sequencing, conservative timeout behavior and current layout 2 recovery limits.
+
+Explicit workflow scheduler recovery can carry the originally displayed
+`attention_checkpoint_id` (`--attention-checkpoint-id` in ctl). Its `scheduler:`
+identity binds the persisted active status and supervisor generation; owner or
+recovery-mode changes refuse stale requests before reason, grants or launch.
+Monitor requires this token and capability `workflow-attention-checkpoints.v1`.
+This does not relax confirmed-death or execution-ownership checks. See
+[checkpoint contracts](contracts.md#workflow-attention-checkpoints).

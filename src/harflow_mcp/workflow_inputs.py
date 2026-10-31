@@ -4,7 +4,7 @@ from .catalog import Catalog
 from .workflow_references import MAX_WORKFLOW_NESTING_DEPTH
 
 
-def project(store, root, *, _records=None, _cached=None, _budget=None):
+def project(store, root, *, _records=None, _cached=None, _budget=None, _tokens=True):
     from .workflows import WorkflowError
     from .workflow_run_documents import WorkflowRunDocumentError
     from .bounded_io import ReadLimit
@@ -86,6 +86,13 @@ def project(store, root, *, _records=None, _cached=None, _budget=None):
         raise WorkflowError('Workflow input decisions are ambiguous')
     inputs.sort(key=lambda e: (e['waiting_since'], e['workflow_run_id'], e['decision_id']))
     attention.sort(key=lambda e: e['workflow_run_id'])
+    if _tokens:
+        from .workflow_attention import row_checkpoint_id
+        for entry in attention:
+            if not entry.get("parent_workflow_run_id"):
+                token = row_checkpoint_id(root, entry["path"], cached)
+                if token is not None:
+                    entry["attention_checkpoint_id"] = token
     return dict(pending_inputs=inputs, pending_attention=attention, pending_input_count=len(inputs), pending_attention_count=len(attention))
 
 

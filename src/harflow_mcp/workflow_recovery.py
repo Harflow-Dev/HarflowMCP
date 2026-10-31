@@ -70,7 +70,7 @@ def validate(storage: Any, root: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: str | None) -> dict[str, Any]:
-    from .workflows import WorkflowError, _launch, _supervisor_present, _require_delegation_control
+    from .workflows import WorkflowError, _request_launch, _supervisor_present, _require_delegation_control
     _require_delegation_control(root)
     if root.get("kind") == "builder" or root.get("parent_link"):
         raise WorkflowError("Interrupted scheduler recovery requires a delegation root")
@@ -100,7 +100,7 @@ def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: 
         had_pending = bool(prior) and prior.get("replaced_owner") == run.get("supervisor_identity")
         run["scheduler_recovery"] = {"reason": reason, "requested_at": time.time(), "replaced_owner": copy.deepcopy(run.get("supervisor_identity"))}
     result = storage.update_run(root["workflow_run_id"], reserve, "scheduler_recovery_requested", resumed=lambda r: not had_pending)
-    _launch(storage, root["workflow_run_id"])
+    _request_launch(storage, root["workflow_run_id"])
     return result
 
 

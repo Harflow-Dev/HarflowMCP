@@ -1980,3 +1980,24 @@ proves caller loss. The optional live-caller sharing mode is not implemented.
 Existing decision, permission, recovery and goal revision safeguards still apply;
 workflow tasks continue to require responses through workflow controls. See the
 [public interaction contract](contracts.md#caller-loss-and-workflow-interaction-handover).
+
+### Continuing the checkpoint you inspected
+
+For non-question resume and recovery, retain the displayed
+`attention_checkpoint_id` and supply it as the same MCP argument or CLI
+`--attention-checkpoint-id`. Monitor requires this identity. Questions and
+usage-limit answers continue to use `decision_id`; do not send both.
+A stale refusal preserves the draft and applies no answer or attempt grants.
+Refresh and review the changed checkpoint before submitting again. The engine
+never automatically retries the prose against a newer source. Scheduler recovery
+uses the same field with a distinct `scheduler:` token. Markerless legacy
+suspensions have no qualified token until a legitimate engine mutation; ordinary
+caller omission remains supported without a checkpoint guarantee. See
+[checkpoint contracts](contracts.md#workflow-attention-checkpoints).
+
+When a failed root carries a verified child attention source, recover routes its
+reason and attempt grants to that source. Resume remains for paused/input/attention
+roots; recover on a paused root and resume on a failed root refuse. An interrupted
+forwarded handover can finish using its original guarded token while the exact
+received source remains active and the root witness is unchanged. This completion
+does not repeat child instructions or grants.

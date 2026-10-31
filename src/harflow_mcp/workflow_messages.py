@@ -176,7 +176,7 @@ async def deliver_now(storage, result: dict, *, interaction_owner: str) -> dict:
         elif run["status"] in {"paused", "needs_attention"} and not run.get("pending_inputs") and not run.get("input_question"):
             # Control revalidates ownership, live/uncertain attempts, approvals, current checkpoint
             # and attempt budget. No new retry grant or fabricated answer is supplied.
-            storage.control(run["workflow_run_id"], "resume", interaction_owner=interaction_owner)
+            storage.control(run["workflow_run_id"], "resume", interaction_owner=interaction_owner, _message_resume=True)
         else:
             return result
         result.pop("refusal", None)

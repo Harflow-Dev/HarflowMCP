@@ -65,6 +65,12 @@ maintenance or resume admission. Missing or uncertain process generations stay p
 launch receipt reports a per-task refusal while unrelated discovery continues. Human `launch-settle`
 uses the same death checks. See [abandoned launch recovery](docs/supervision.md#dead-executions-and-disk-capacity).
 
+Non-question workflow continuation can bind the originally displayed
+`attention_checkpoint_id`; Monitor requires capability
+`workflow-attention-checkpoints.v1` and this token for resume/recovery. Stale
+requests refuse the answer and grants; refresh and review before resubmitting.
+Questions retain their decision-ID path. See [checkpoint contracts](docs/contracts.md#workflow-attention-checkpoints).
+
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
 Task status distinguishes the dispatching server, execution owner and responding server.
 A normal attachment to a task launched by this server is not recovered; another observer or missing

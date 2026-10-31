@@ -571,6 +571,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             goal_group.add_argument("--goal-file", help="UTF-8 run goal file, preserving spaces and line breaks")
         if action == "revise-goal":
             wp.add_argument("--expected-revision", type=int, required=True, help="Current goal revision, or 0 when absent; history is limited to 64 revisions and 1 MiB UTF-8 per run")
+        if action in {"resume", "recover"}:
+            wp.add_argument("--attention-checkpoint-id", help="Originally displayed checkpoint identity; stale requests refuse without applying prose or grants")
         if action == "resume":
             wp.add_argument("--decision-id")
             wp.add_argument("--allow-optional-review-skip", action="store_true", help="Explicitly permit skipping the current eligible optional review refusal; requires its current decision ID and answer")
@@ -1650,8 +1652,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if args.monitor:
                 if not reason.strip():
                     raise ValueError("Recovery reason must be nonempty")
-                return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts, interaction_owner="monitor")
-            return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts)
+                return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts, attention_checkpoint_id=args.attention_checkpoint_id, interaction_owner="monitor")
+            return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts, attention_checkpoint_id=args.attention_checkpoint_id)
         if action == "migrate":
             from .workflows import migrate_workflows
             from .workflow_hooks import refuse_managed
@@ -1706,8 +1708,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "resume":
             instructions = _workflow_text(args, "instructions")
             if args.monitor:
-                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip, interaction_owner="monitor")
-            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip)
+                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip, attention_checkpoint_id=args.attention_checkpoint_id, interaction_owner="monitor")
+            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip, attention_checkpoint_id=args.attention_checkpoint_id)
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
@@ -1718,7 +1720,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
     except Exception as exc:
         data = getattr(getattr(exc, "error", None), "data", None)
         code = data.get("code") if isinstance(data, dict) else None
-        if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable", *id_resolution.CODES}:
+        if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable", "attention_checkpoint_required", "attention_checkpoint_unavailable", "attention_checkpoint_stale", *id_resolution.CODES}:
             code = "workflow_error"
             if args.command == "workflow-limit-hits":
                 from .workflow_limit_hits import Refused
