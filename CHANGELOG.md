@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Qualify the GitHub transport notice and guidance for tools that drop injected Git configuration or use another SCM provider (#100).
+
 - Report bounded, partial candidate Claude inherited permission rules in previews and per-execution snapshots, and qualify approval refusals without attributing an unobserved source (#99).
 
 - Correct ordinary Codex exec enforcement reporting for inherited configuration, allow-rule bypasses and MCP startup. Retain private requested-authority caps for nested dispatch, workflow saves and shared scratch without changing launch policy, persisted records or public shapes. Preserve configured project behavior and disclose trust persistence and uncertain effective authority (#40).

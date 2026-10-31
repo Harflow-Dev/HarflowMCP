@@ -354,7 +354,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--extra-writable-path", action="append", default=None,
                        help="Existing absolute file/directory grant; repeat up to 16 times; verified harnesses only")
     run_p.add_argument("--group-report-output", action=argparse.BooleanOptionalAction, default=None, help="Opt in to qualified read-only repository plus group-scoped report output; resumes inherit, --no-group-report-output disables")
-    run_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
+    run_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Configure process-local GitHub SSH prefix rewriting to HTTPS for this run (default: server setting; resumes inherit)")
     run_p.add_argument("--allowed-command", action="append", default=None,
                        help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
     run_p.add_argument("--branch", default=None, help="Literal branch Harflow creates from --base before the agent starts")
@@ -388,7 +388,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     preview_p.add_argument("--extra-writable-path", action="append", default=None,
                            help="Existing absolute file/directory grant; repeat up to 16 times")
     preview_p.add_argument("--group-report-output", action=argparse.BooleanOptionalAction, default=None, help="Opt in to qualified read-only repository plus group-scoped report output; resumes inherit, --no-group-report-output disables")
-    preview_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
+    preview_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Configure process-local GitHub SSH prefix rewriting to HTTPS for this run (default: server setting; resumes inherit)")
     preview_p.add_argument("--allowed-command", action="append", default=None,
                            help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
     preview_p.add_argument("--branch", default=None)
@@ -411,7 +411,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--background-idle-seconds", type=float)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--group-report-output", action=argparse.BooleanOptionalAction, default=None, help="Opt in to qualified read-only repository plus group-scoped report output; resumes inherit, --no-group-report-output disables")
-    resume_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
+    resume_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Configure process-local GitHub SSH prefix rewriting to HTTPS for this run (default: server setting; resumes inherit)")
     resume_p.add_argument("--allowed-command", action="append", default=None,
                           help="Replace the saved command grants for this run (repeatable); omitted inherits them")
     resume_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE")
@@ -427,7 +427,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     continue_p.add_argument("--background-idle-seconds", type=float)
     continue_p.add_argument("--notes-path", help="Optional UTF-8 notes file")
     continue_p.add_argument("--group-report-output", action=argparse.BooleanOptionalAction, default=None, help="Opt in to qualified read-only repository plus group-scoped report output; resumes inherit, --no-group-report-output disables")
-    continue_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
+    continue_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Configure process-local GitHub SSH prefix rewriting to HTTPS for this run (default: server setting; resumes inherit)")
     continue_p.add_argument("--allowed-command", action="append", default=None,
                             help="Replace the saved command grants for the successor (repeatable); omitted inherits them")
     continue_p.add_argument("--fetch", action="append", default=None, metavar="REMOTE")

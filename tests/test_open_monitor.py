@@ -18,9 +18,10 @@ from harflow_mcp.tasks import TaskRegistry
 
 
 GIT_ONLY_NOTICES = [
-    "Git: GitHub SSH URLs configured to rewrite to HTTPS; HTTPS authentication observation: unknown. "
-    "SSH URLs for github.com are fetched over HTTPS, so SSH agent setup does not affect them; "
-    "git_https_rewrite=false restores SSH. Network, sandbox and repository access are not verified."
+    "Git: GitHub SSH prefix rewrite to HTTPS configured; HTTPS authentication observation: unknown. "
+    "Matching URLs rewrite only in Git processes preserving the injected config; tools that drop it "
+    "or use other SCM, including Xcode's built-in provider, may bypass it. "
+    "Network, sandbox and repository access are not verified."
 ]
 
 

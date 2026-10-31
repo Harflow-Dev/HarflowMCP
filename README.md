@@ -131,11 +131,7 @@ See the
 [grant grammar and per-run workflow migration](docs/harness-permissions.md#dispatch-time-command-grants-allowed_commands).
 Other backends explicitly refuse command-grant requests rather than silently broadening access.
 
-GitHub dependencies using SSH URLs are configured to use HTTPS in headless child processes by
-default. Set `HARFLOW_GIT_HTTPS_REWRITE=0` on the server to disable this, or override a task with
-`git_https_rewrite` (`harflow-ctl run --no-git-https-rewrite`). Configure private repository credentials
-with `gh auth setup-git`; Harflow never reads or stores tokens. See [Git transport](docs/git-transport.md)
-for observations and sandbox limitations.
+Headless runs configure a GitHub SSH-to-HTTPS prefix rewrite for Git processes that preserve the injected configuration; see [Git transport](docs/git-transport.md) for overrides, authentication and limitations.
 
 Ordinary Codex exec inherits user and trusted project configuration, allow rules and MCP servers.
 Read-only and network-disable pins do not establish effective confinement; permission reports

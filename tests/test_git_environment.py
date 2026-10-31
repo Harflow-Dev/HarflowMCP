@@ -69,7 +69,7 @@ def test_https_remedy_is_shown_only_while_the_rewrite_is_on(status, needle):
     disclosed = git.disclosure(True, status)
     assert needle in disclosed["remedy"] and "restart" in disclosed["remedy"]
     assert needle in git.notice(True, status)
-    assert "SSH URLs for github.com are fetched over HTTPS" in git.notice(True, status)
+    assert "Matching URLs rewrite only in Git processes" in git.notice(True, status)
     assert "remedy" not in git.disclosure(False, status)
     assert "gh auth" not in git.notice(False, status)
     assert "SSH URLs for github.com" not in git.notice(False, status)
@@ -80,8 +80,82 @@ def test_observations_without_a_fix_keep_no_remedy(status):
     assert "remedy" not in git.disclosure(True, status)
     assert "remedy" not in git.disclosure(False, status)
     assert "gh auth setup-git" not in git.notice(True, status)
-    assert "SSH URLs for github.com are fetched over HTTPS" in git.notice(True, status)
+    assert "Matching URLs rewrite only in Git processes" in git.notice(True, status)
     assert "SSH URLs for github.com" not in git.notice(False, status)
+
+
+@pytest.mark.parametrize("status", [
+    "unknown", "gh_missing", "gh_not_authenticated",
+    "gh_authenticated_helper_not_observed", "gh_authenticated_helper_declaration_observed",
+])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_full_notice_fits_header_budget_and_keeps_caveats(status, enabled):
+    text = git.notice(enabled, status)
+    assert len(text) <= 500
+    assert "Network, sandbox and repository access are not verified." in text
+    if enabled:
+        assert "preserving the injected config" in text
+        assert "tools that drop it" in text
+        assert "Xcode's built-in provider" in text
+        assert "restores SSH" not in text
+    else:
+        assert "injected config" not in text
+        assert "may bypass" not in text
+
+
+def test_nested_git_only_rewrites_when_runtime_config_is_preserved(tmp_path):
+    """A nested child that drops injected Git config bypasses the process-local rewrite."""
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    home.mkdir()
+    clean_env = {
+        **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        "HOME": str(home),
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ALLOW_PROTOCOL": "file",
+    }
+    subprocess.run(["git", "init", "-q", str(repo)], env=clean_env, check=True, timeout=10)
+
+    inherited = {
+        **clean_env,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "sensitive-helper-value",
+    }
+    configured = git.configure(inherited, True)
+    assert configured["GIT_CONFIG_COUNT"] == "3"
+    assert configured["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert configured["GIT_CONFIG_VALUE_0"] == "sensitive-helper-value"
+    assert inherited["GIT_CONFIG_COUNT"] == "1"
+    assert configured["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert configured["GIT_CONFIG_NOSYSTEM"] == "1"
+
+    child = (
+        "import os,subprocess,sys; "
+        "env=dict(os.environ); "
+        "[env.pop(k,None) for k in list(env) if k=='GIT_CONFIG_COUNT' or "
+        "k.startswith(('GIT_CONFIG_KEY_','GIT_CONFIG_VALUE_'))] if sys.argv[3]=='drop' else None; "
+        "r=subprocess.run(['git','-C',sys.argv[1],'ls-remote',sys.argv[2]],env=env,"
+        "capture_output=True,text=True); "
+        "print(r.stderr); sys.exit(r.returncode)"
+    )
+    url = "git@github.com:synthetic/repository.git"
+
+    def run_child(env, mode):
+        return subprocess.run([sys.executable, "-c", child, str(repo), url, mode], env=env,
+                              capture_output=True, text=True, check=False, timeout=10)
+
+    preserved = run_child(configured, "preserve")
+    bypassed = run_child(configured, "drop")
+    assert preserved.returncode != 0
+    assert "transport 'https' not allowed" in preserved.stdout
+    assert bypassed.returncode != 0
+    assert "transport 'ssh' not allowed" in bypassed.stdout
+    for result in (preserved, bypassed):
+        assert "sensitive-helper-value" not in result.stdout + result.stderr
+        assert "GIT_CONFIG_VALUE" not in result.stdout + result.stderr
 
 
 def test_auth_probe_discards_output_and_is_cached(monkeypatch):

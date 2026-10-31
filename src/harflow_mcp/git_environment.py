@@ -101,8 +101,8 @@ _REMEDIES = {
     "gh_authenticated_helper_not_observed": "Run `gh auth setup-git`, then restart the Harflow server. The observation is cached for the server's lifetime.",
 }
 _SSH_NOTE = (
-    "SSH URLs for github.com are fetched over HTTPS, so SSH agent setup does not affect them; "
-    "git_https_rewrite=false restores SSH."
+    "Matching URLs rewrite only in Git processes preserving the injected config; tools that drop it "
+    "or use other SCM, including Xcode's built-in provider, may bypass it."
 )
 
 
@@ -123,7 +123,7 @@ def disclosure(enabled: bool, status: str) -> dict[str, object]:
 
 
 def notice(enabled: bool, status: str) -> str:
-    transport = "GitHub SSH URLs configured to rewrite to HTTPS" if enabled else "GitHub HTTPS rewrite disabled"
+    transport = "GitHub SSH prefix rewrite to HTTPS configured" if enabled else "GitHub HTTPS rewrite disabled"
     parts = [f"Git: {transport}; HTTPS authentication observation: {status}."]
     if enabled:
         parts.append(_SSH_NOTE)
