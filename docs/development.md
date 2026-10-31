@@ -53,7 +53,7 @@ Current macOS codex-cli 0.164.0 qualification uses isolated HOME/CODEX_HOME, syn
 outside implicit temporary write roots, and a loopback fake Responses API, without credentials or
 paid model calls. It demonstrates trust persistence, inherited user/trusted-project rule bypasses,
 project layering and MCP startup; direct `codex sandbox` measurements alone do not qualify ordinary
-exec authority. Reports are conservative while launch/configuration policy remains unchanged and
-the trust-policy choice remains pending. Qualified bounded modes keep their existing version and
-configuration gates; no additional mode is enabled by this correction. See
+exec authority. The selected policy preserves launch/configuration behavior and discloses trust
+persistence and uncertain effective authority through conservative reports. Qualified bounded modes
+keep their existing version and configuration gates; no additional mode is enabled by this correction. See
 [measured facts](backend-cli-facts.md#ordinary-codex-exec-authority).

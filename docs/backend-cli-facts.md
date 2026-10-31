@@ -1282,9 +1282,9 @@ outside-root probes below establish the observations.
   server. No model tool calls were made. This establishes startup outside the worker sandbox,
   not successful MCP tool protocol behavior or a qualified tool authority boundary.
 
-Harflow keeps ordinary exec argv and configuration/trust policy unchanged pending the final policy
-choice. Effective reporting uses false OS/write guarantees and `not_controlled` for resolved disable
-requests. Enable remains `enabled`, full access `unrestricted`. Historical direct sandbox measurements
+The selected policy preserves ordinary exec argv and configuration/trust behavior, with disclosure
+of trust persistence and uncertain effective authority. Effective reporting uses false OS/write
+guarantees and `not_controlled` for resolved disable requests. Enable remains `enabled`, full access `unrestricted`. Historical direct sandbox measurements
 elsewhere in this document describe the mechanism, not ordinary exec's full inherited authority.
 Extra-path qualification does not exclude all rules; group-report excludes known user/project rule
 inputs but does not qualify every managed rule source. No qualification gate is broadened.

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Correct ordinary Codex exec enforcement reporting for inherited configuration, allow-rule bypasses and MCP startup. Retain private requested-authority caps for nested dispatch, workflow saves and shared scratch without changing launch policy, persisted records or public shapes. Trust-policy choice remains pending (#40).
+- Correct ordinary Codex exec enforcement reporting for inherited configuration, allow-rule bypasses and MCP startup. Retain private requested-authority caps for nested dispatch, workflow saves and shared scratch without changing launch policy, persisted records or public shapes. Preserve configured project behavior and disclose trust persistence and uncertain effective authority (#40).
 
 - Qualify follow-up and session history with bounded metadata-replacement reads and a shared successor snapshot. Preserve the indexed 500-hit window across SQLite join planners (#98).
 

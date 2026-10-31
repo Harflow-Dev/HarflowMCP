@@ -146,8 +146,9 @@ legacy selected-profile merge retained for requested-scope compatibility. It is 
 observation, never the complete effective authority. Missing, malformed or unreadable configuration
 cannot establish absence of other roots. Legacy selected-profile parsing is not an effective-config
 resolver. Ordinary workspace-write can persist project trust before loading project configuration.
-Harflow retains its existing argv and configuration/trust policy; a final trust-policy choice is
-pending. `ignore-user-config`, `ignore-rules` and root pins each leave other authority surfaces;
+The selected policy preserves existing argv and configuration/trust behavior, including configured
+project behavior, while disclosing trust persistence and uncertain effective authority.
+`ignore-user-config`, `ignore-rules` and root pins each leave other authority surfaces;
 none is documented as a complete remedy. See [measured facts](backend-cli-facts.md#ordinary-codex-exec-authority).
 
 Qualified extra-path and group-report modes retain their existing gates and requested profiles.
