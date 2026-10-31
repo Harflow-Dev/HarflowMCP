@@ -73,6 +73,7 @@ transcripts can supply bounded display-only recovery activity; see [public contr
 Live-input capability does not promise that stdin is still open: status reports `input_channel`
 and `input_closed_reason`. Wait for settlement before resuming a task whose input has closed.
 MCP task status exposes paged successor links; resumes and continuations retain their source IDs.
+Claude permission previews and launches disclose bounded candidate inherited rules; managed policy and effective applicability remain uncertain. See [harness permissions](docs/harness-permissions.md).
 Claude read-only plan mode permits built-in plan files; successful observed plan writes appear
 as metadata-only task artifacts. Harness session history and logs can also persist outside the
 checkout. See [harness permissions](docs/harness-permissions.md).

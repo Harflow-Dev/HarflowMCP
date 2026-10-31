@@ -96,7 +96,7 @@ These levels authorize an assignment; they do not make the harnesses equally con
   approves file edits, not arbitrary Bash or MCP calls. Publish adds direct Git commit/push,
   `gh pr create/edit/view/comment/review/checks/diff/list` and `gh repo view` allowances, including
   help. Raw `gh api`, merges, releases and repository deletion are excluded from these grants;
-  see [publication policy](contracts.md#publication-permission-policy). Deny rules win.
+  see [publication policy](contracts.md#publication-permission-policy). Inherited ask and deny rules can still restrict these allowances, including in bypass mode; deny rules win over allow rules.
 - **Codex:** HarflowMCP pins `approval_policy="never"`. Missing permission cannot be approved
   interactively. Inherited allow rules can still execute commands outside the sandbox, and MCP servers can start outside it. Workspace writes can include the checkout, temporary directories, configured
   writable roots, and the task scratch grant. There is no per-command commit deny list: a local
@@ -879,3 +879,15 @@ stops the task. These checks cannot undo an action already executed or infer whe
 auto-allowed harness action should have requested approval; automatic preflight tests and
 runtime guards are complementary. HarflowMac presentation of qualification progress is a
 separate integration; no new Mac UI or required public wire capability is introduced here.
+
+
+Claude permission preview and each launch report a bounded inventory of candidate user and
+current-directory project settings rules. The user settings directory follows the child environment
+(including `CLAUDE_CONFIG_DIR`); worktree launches use the final launch directory. Claude 2.1.310 on macOS
+was measured to load current-directory project settings, not root or intermediate ancestor settings
+when launched in a nested directory. Other versions and platforms are unqualified. Managed file candidates are
+not proof of selection, and MDM, registry, server, embedding and helper policy sources remain
+unknown. An empty inventory does not prove absence of restrictions. Rules and notices may expose
+permission patterns and paths, but not other settings values. Caps, invalid files, unreadable files,
+symlinks and timeouts are reported as partial observations. Settings may change after the snapshot.
+A refusal does not identify the rule or source that caused it.

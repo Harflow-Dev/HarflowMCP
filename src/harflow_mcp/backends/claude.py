@@ -260,7 +260,7 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
         _CHAINED_COMMAND_CAVEAT,
     ),
     "unrestricted": (
-        "bypassPermissions removes even that gate: writes anywhere the user can write will succeed",
+        "bypassPermissions removes that gate, but inherited ask and deny rules can still restrict actions; it is not an OS sandbox",
         _UNRESTRICTED_COMPAT_BREAK_CAVEAT,
     ),
 }
@@ -363,6 +363,14 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend(ExtraPathsUnsupported):
+    def observe_enforcement(self, enforcement, cwd, env, executable):
+        from .claude_settings import observe
+        return observe(enforcement, cwd, env, executable)
+
+    def observation_unavailable(self, enforcement):
+        from .claude_settings import unavailable
+        return unavailable(enforcement)
+
     @staticmethod
     def _idle_context(seconds):
         from ..background_idle import validate

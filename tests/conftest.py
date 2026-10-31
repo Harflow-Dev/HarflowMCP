@@ -41,6 +41,20 @@ def no_monitor_app(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_claude_settings_observation(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Keep unrelated tests from consulting host Claude settings or running a version probe."""
+    from harflow_mcp.backends import claude_settings
+    from harflow_mcp.backends.claude import ClaudeBackend
+
+    # Never read machine-level managed settings, even in opted-in observation tests. Their
+    # user/project fixtures are isolated; tests for managed candidates supply their own seam.
+    monkeypatch.setattr(claude_settings, "_managed_directory", lambda _platform: None)
+    if request.node.get_closest_marker("claude_settings_observation"):
+        return
+    monkeypatch.setattr(ClaudeBackend, "observe_enforcement", lambda self, enforcement, cwd, env, executable: enforcement)
+
+
+@pytest.fixture(autouse=True)
 def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     """Neutralise best-effort caller detection everywhere by default.
 

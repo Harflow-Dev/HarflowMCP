@@ -33,6 +33,7 @@ def install_fake_claude(tmp_path: Path, monkeypatch, *, session: str = "restart-
     executable = bin_dir / "claude"
     executable.write_text(
         "#!/bin/sh\n"
+        "if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then printf '2.1.310\\n'; exit 0; fi\n"
         "if [ -n \"${HARFLOW_FAKE_CLAUDE_SPAWN_LOG:-}\" ]; then echo $$ >> \"$HARFLOW_FAKE_CLAUDE_SPAWN_LOG\"; fi\n"
         "session=${HARFLOW_FAKE_CLAUDE_SESSION:-restart-session}\n"
         "prev=\"\"\n"

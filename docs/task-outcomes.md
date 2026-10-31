@@ -98,8 +98,8 @@ spanned several versions), `no_refusal_text`, `unrecognized_text` and, for other
 
 | `denial_category` | Meaning and remedy |
 | --- | --- |
-| `deny_rule` | A deny rule refused it (Harflow's access level, user or project settings, or managed policy). Allow rules cannot override it. `harflow_access_deny: true` is added only when the command matches Harflow's own deny prefixes for the run's freedom. |
-| `approval_required` | No matching allow rule: a matching allow rule, `allowed_commands` or caller approvals are the ways forward. |
+| `deny_rule` | A deny rule refused it (Harflow's access level, user or project settings, or managed policy). Allow rules cannot override it. `harflow_access_deny: true` means Harflow also supplied a matching deny prefix for the run; it does not identify the unique cause of refusal. |
+| `approval_required` | Approval was requested. A matching allow rule or caller approval may help, but inherited ask or deny rules can remain authoritative; `allowed_commands` does not necessarily override them. The refusal does not identify its source or rule. The generic Bash permission-request sentence is classified only on measured Claude 2.1.310. |
 | `chained_command` | One part of a multi-operation command needs approval (`part`); run each part separately. |
 | `unverifiable_command` | Command substitution that cannot be checked before it runs; avoid it. |
 | `path_safety` | A built-in path check allow rules cannot satisfy; caller approvals can approve it on qualified versions. |

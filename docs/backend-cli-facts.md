@@ -1288,3 +1288,32 @@ guarantees and `not_controlled` for resolved disable requests. Enable remains `e
 elsewhere in this document describe the mechanism, not ordinary exec's full inherited authority.
 Extra-path qualification does not exclude all rules; group-report excludes known user/project rule
 inputs but does not qualify every managed rule source. No qualification gate is broadened.
+
+
+### Claude 2.1.310 on macOS: inherited permission observations
+
+Isolated `HOME` and `CLAUDE_CONFIG_DIR` probes with a local scripted API showed user settings at
+the configured directory and project/local settings in the launch working directory. A nested
+launch ignored tested repository-root and intermediate project settings. A relocated config
+directory excluded the default home settings in this probe. Both ask and deny rules restricted
+explicit CLI allows at `acceptEdits` and `bypassPermissions`. Malformed JSON was ignored in the
+measured case. Result-confirmed ask used `Claude requested permissions to use Bash, but you
+haven't granted it yet.`; neither ask nor deny supplied a source or rule. These observations do
+not qualify other versions, platforms or managed policy. Managed file locations are unqualified candidates;
+managed-tier selection and non-file policy are unknown.
+
+The repeatable no-paid regression is `tests/test_claude_inherited_settings_cli.py`:
+run `HARFLOW_CLI_INTEGRATION=1 uv run pytest -q tests/test_claude_inherited_settings_cli.py`.
+It uses isolated settings and a localhost fake API, and skips unless macOS and installed
+Claude 2.1.310 match the measured baseline. A skip does not qualify a newer version;
+remeasure discovery and restriction behavior before updating that baseline.
+
+The observation reader inventories at most 24 candidate files, including bounded managed
+fragment enumeration; known managed file paths do not establish policy selection or loading.
+Explicit launch, user-configuration and managed roots are canonicalized once, while settings
+file and below-root directory symlinks are skipped. Reads consider at most 256 KiB per file
+and 1 MiB in aggregate, charging overflow sentinel bytes and stopping after aggregate exhaustion
+(at most one byte beyond 1 MiB is read). Retained rules are limited to 100 entries and 512
+characters per rule. Notices summarize source counts and effects, skipped candidates and
+tentative publishing overlap, rather than repeating rule text. They are bounded to 25 entries,
+4,096 characters per entry and 8 KiB total UTF-8 text, with explicit omission and uncertainty.

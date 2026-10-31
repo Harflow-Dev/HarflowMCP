@@ -99,7 +99,7 @@ The pure version-info capability `state-recovery.v1` advertises these commands. 
 
 Each engine-authored `tasks/<task_id>.meta.json` contains the flat reserved fields `product: "harflow"`, `format: "harflow.task"`, exact integer `v: 1`, and the writing engine's `product_version`. Private format compatibility follows the registered storage-line policy above; same-line patches work in both directions, build metadata is ignored and prereleases are refused. This is an engine-owned persisted contract; the companion app reads ctl projections rather than these files. Task metadata adds no cases to the cross-language wire fixture bundle.
 
-Qualification precedes payload interpretation and full-prompt sidecar access. Required fields and every supplied known field, including process identity, enforcement, saved grants, lineage and outcome structures, must have their declared types. Booleans cannot stand in for integers. Unknown additive fields are tolerated; absent optional fields keep their defaults. Nested grant qualification is structural and does not inspect or reauthorize target files. Resuming saved writable grants separately requires the existing supported grant shape and current filesystem identity; additive metadata acceptance does not expand that permission contract. The source filename's task id must match the payload. Caller prompts and sidecar contents remain verbatim.
+Qualification precedes payload interpretation and full-prompt sidecar access. Required fields and every supplied known field, including process identity, enforcement, saved grants, lineage and outcome structures, must have their declared types. Booleans cannot stand in for integers. Optional Claude settings observations are a deliberate exception: malformed or oversized observational fields are discarded and replaced with an unknown observation, without weakening validation of authority fields. Unknown additive fields are tolerated; absent optional fields keep their defaults. Nested grant qualification is structural and does not inspect or reauthorize target files. Resuming saved writable grants separately requires the existing supported grant shape and current filesystem identity; additive metadata acceptance does not expand that permission contract. The source filename's task id must match the payload. Caller prompts and sidecar contents remain verbatim.
 
 A verified absent metadata file is missing. Existing foreign, unqualified, malformed or incompatible metadata reports `task_incompatible`; ordinary I/O failures report `task_unavailable`. Ownership failures remain separate. Caller candidate acquisition retries one fresh whole scan only when every refusal positively identifies metadata changed during its read; it discards the first scan and requires the selected scan to be complete before filtering candidates. Ordinary acquisition uses one scan, and both caller-detection phases share the final candidates or failure. Direct reads and other complete-history consumers retain strict refusal without retry. Direct ctl errors and MCP error data retain these stable task codes. An unreadable full-prompt sidecar on otherwise qualified metadata retains the existing unavailable-assignment diagnostic: the preview is not authoritative and cannot be used as a replacement assignment.
 
@@ -390,7 +390,7 @@ do not depend on dispatch-time `allowed_commands` qualification. They do not inc
 cannot ensure GET-only API access: appended method flags or fields can turn an apparent
 read into a write. Use the supported PR/repository commands with `--json` for reads.
 No excluded command is implicitly granted by this list; inherited harness settings may
-grant additional authority, and shell wrappers are not confined by an OS Git sandbox.
+grant additional authority or restrict these grants, and shell wrappers are not confined by an OS Git sandbox.
 
 Other backends do not implement this command allow-list. Codex enables network within its
 workspace sandbox and does not filter GitHub subcommands. opencode retains the `build`
@@ -1227,3 +1227,34 @@ scratch access display uses conservative effective reporting.
 This corrects existing field semantics without changing public shapes or `contracts/v1` fixtures.
 HarflowMac consumers must interpret false/unknown guarantees accurately; no sibling source or fixture
 change is included. See [harness permissions](harness-permissions.md#ordinary-codex-exec-authority).
+
+
+### Claude inherited settings observations
+
+Permission previews and each Claude execution optionally include `enforcement.inherited_rules`,
+`settings_observation`, and `observation_notices`. Entries are candidate file rules, not effective
+permissions or causal denial attribution. Sources identify path, scope, status and candidate
+applicability. Inventory is bounded and partial; managed-tier selection and non-file policy are
+unknown. The dispatch snapshot is persisted per execution; recovery does not reread settings.
+Files can change between observation and launch. Static backend discovery has no inventory.
+Malformed optional observations on saved records are normalized to unknown. These fields do not
+participate in nested authority comparisons or alter Harflow grants.
+
+`inherited_rules` is at most 100 entries, each `{source, effect, rule, applicability}` with
+`effect` `ask` or `deny` and `applicability` `candidate`. `settings_observation` includes the
+probed version, discovery applicability, `sources`, `completeness: partial`, and limitations.
+Source entries have `path`, `scope` (`user`, `project`, `local`, `managed`), `status`
+(`readable`, `absent`, `unknown`, `invalid`, `unreadable`, `oversize`, `special`, `symlink`,
+or `truncated`) and candidate applicability. Discovery was measured only for Claude 2.1.310 on macOS;
+other versions and platforms are unqualified. At most 24 sources, 256 KiB per file, 1 MiB total and 512
+characters per rule are considered. Reads may consume one additional overflow sentinel byte per
+file, charged to the aggregate budget; no reads follow exhaustion, so actual aggregate reads
+never exceed 1 MiB plus one byte. Notices summarize counts and effects per source, with tentative
+publishing-overlap hints, skipped-source summaries, omission and uncertainty. Notice text is
+bounded to 8 KiB and 25 entries; full retained rules remain in `inherited_rules`.
+Source enumeration and observation time are also bounded. Explicit launch, user-configuration and
+managed roots are canonicalized once to support directory aliases; symlinked settings files and
+subdirectories below those roots are not followed intentionally. Status and completeness do not
+establish that Claude selected a file. Unavailable observation omits `inherited_rules`, rather than
+asserting an observed empty inventory. Additive unknown rule-entry fields are ignored on reload;
+malformed required fields normalize the optional observation to unknown.

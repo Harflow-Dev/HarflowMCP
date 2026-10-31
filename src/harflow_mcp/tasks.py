@@ -1017,6 +1017,23 @@ class Task:
         return snap
 
 
+
+
+async def _observe_enforcement(backend, enforcement, cwd, env, executable):
+    """Bound observation latency; observation failure never changes launch authority."""
+    observe = getattr(backend, "observe_enforcement", None)
+    if observe is None:
+        return enforcement
+    try:
+        observed = await asyncio.wait_for(
+            asyncio.to_thread(observe, enforcement, cwd, env, executable), timeout=1.2)
+        if isinstance(observed, Enforcement):
+            return observed
+    except Exception:
+        pass
+    return getattr(backend, "observation_unavailable", lambda value: value)(enforcement)
+
+
 class TaskRegistry:
     """In-memory registry of dispatched runs, bounded to `max_tasks` finished entries."""
 
@@ -1308,8 +1325,11 @@ class TaskRegistry:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
             if getattr(backend, "with_shared_directories", None) is not None:
                 enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_CHAIN_SCRATCH_ROOT, FUTURE_GROUP_SCRATCH_ROOT))
+        from .state_layout import child_environment
+        preview_env = {**child_environment(self.state_layout), **invocation.env}
+        enforcement = await _observe_enforcement(backend, enforcement, repo_path, preview_env, invocation.argv[0])
         preview = {"group": resolved_group, "group_report_output": group_report_output, "group_report_directory": str(report_path) if report_path is not None else None, "backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), **({"dispatch_git": git_step} if git_step else {}), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
-        grant_notices = backend.allowed_command_notices(commands)
+        grant_notices = (*backend.allowed_command_notices(commands), *enforcement.observation_notices)
         if grant_notices:
             preview["notices"] = list(grant_notices)
         return preview
@@ -2254,6 +2274,8 @@ class TaskRegistry:
                 }
 
                 spawn_env = git_environment.configure(spawn_env, git_https_rewrite)
+                enforcement = await _observe_enforcement(backend, enforcement, repo_path, spawn_env, invocation.argv[0])
+                bridge_notices.extend(notice for notice in enforcement.observation_notices if notice not in bridge_notices)
                 if allowed_commands:
                     from .merge_gate import apply_path, install, needs_gate
                     if needs_gate(allowed_commands):

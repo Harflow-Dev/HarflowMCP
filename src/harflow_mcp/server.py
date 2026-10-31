@@ -181,7 +181,7 @@ mcp = MCPServer(
         "`enforcement.network_access` on "
         "the returned task rather than assuming from the freedom name alone. "
         "`local_commit` is denied, allowed, or not_enforced. On Claude Code, write_in_repo denies "
-        "a direct git commit and publish is the level that allows committing. An optional `network` "
+        "a direct git commit and publish authorizes committing; inherited harness rules can still restrict it. An optional `network` "
         "parameter on start_task and resume_task asks for network independently of the freedom: "
         "True asks harflow_mcp to impose no network barrier of its own, False asks it to impose "
         "one, and None keeps each freedom's historical behaviour. It governs harflow_mcp's own "
@@ -544,7 +544,7 @@ async def start_task(
             remote publishing, including commit/push/PR creation/reviews, but that is not a promise the attempt succeeds — credentials,
             remote permissions, branch protection and hooks are all
             outside harflow_mcp's control. On Claude Code, write_in_repo denies a direct `git commit`
-            and `git push`; `publish` is the level that allows committing. `enforcement.local_commit`
+            and `git push`; `publish` authorizes committing; inherited harness rules can still restrict it. `enforcement.local_commit`
             reports that policy as denied, allowed, or not_enforced. How each level is enforced
             depends on the backend; the returned `enforcement` says what actually applies, via
             `local_commit`, `publish_attempts_allowed` and `network_access` among other fields.

@@ -171,6 +171,48 @@ def qualify_enforcement(value: Any, *, require_core: bool = False, path: str = "
         raise ValueError(f"Malformed {path}")
     if require_core and not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= value.keys():
         raise ValueError("Incomplete enforcement contract")
+    # Optional observations are advisory, never authority. Corruption must not make an
+    # otherwise valid saved execution unreadable or turn malformed data into a claim.
+    rules = value.get("inherited_rules")
+    metadata = value.get("settings_observation")
+    notices = value.get("observation_notices")
+    invalid = False
+    if "inherited_rules" in value:
+        valid = (isinstance(rules, list) and len(rules) <= 100 and all(
+            isinstance(r, dict) and {"source", "effect", "rule", "applicability"} <= r.keys()
+            and all(isinstance(r[k], str) and len(r[k]) <= 4096 for k in ("source", "effect", "rule", "applicability"))
+            and r["effect"] in {"ask", "deny"} and r["applicability"] == "candidate" for r in rules))
+        if not valid:
+            value.pop("inherited_rules", None); invalid = True
+        else:
+            value["inherited_rules"] = [{key: r[key] for key in ("source", "effect", "rule", "applicability")} for r in rules]
+    if "settings_observation" in value:
+        valid = (isinstance(metadata, dict) and isinstance(metadata.get("sources"), list)
+                 and len(metadata["sources"]) <= 24 and all(
+                     isinstance(x, dict) and all(isinstance(x.get(k), str) and len(x[k]) <= 4096
+                     for k in ("path", "scope", "status", "applicability"))
+                     and x["scope"] in {"user", "project", "local", "managed"}
+                     and x["status"] in {"readable", "absent", "unknown", "invalid", "unreadable", "oversize", "special", "symlink", "truncated"}
+                     and x["applicability"] == "candidate" for x in metadata["sources"])
+                 and isinstance(metadata.get("limitations"), list) and len(metadata["limitations"]) <= 24
+                 and all(isinstance(x, str) and len(x) <= 4096 for x in metadata["limitations"])
+                 and metadata.get("completeness") == "partial"
+                 and isinstance(metadata.get("applicability"), str)
+                 and metadata["applicability"] in {"unknown", "unqualified", "cwd_discovery_measured"}
+                 and (metadata.get("version") is None or (isinstance(metadata.get("version"), str) and len(metadata["version"]) <= 64)))
+        if not valid:
+            value.pop("settings_observation", None); invalid = True
+        else:
+            value["settings_observation"] = {key: metadata[key] for key in ("version", "applicability", "sources", "completeness", "limitations") if key in metadata}
+            value["settings_observation"]["sources"] = [{key: source[key] for key in ("path", "scope", "status", "applicability") if key in source} for source in metadata["sources"]]
+    if "observation_notices" in value and (not isinstance(notices, list) or len(notices) > 25 or
+                               any(not isinstance(n, str) or len(n) > 4096 for n in notices)):
+        value.pop("observation_notices", None); invalid = True
+    if invalid:
+        value.pop("inherited_rules", None)
+        value["settings_observation"] = {"version": None, "applicability": "unknown", "sources": [],
+            "completeness": "partial", "limitations": ["Saved settings observation was malformed."]}
+        value["observation_notices"] = ["Saved Claude settings observation is unknown."]
     _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "local_commit": str, "merge_conclusion": dict[str, Any], "dispatch_git": dict[str, Any], "publish_attempts_allowed": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str], "extra_allowed_command_matches": list[dict[str, str]], "group_report_output": bool}, path)
     if "local_commit" in value and value["local_commit"] not in {"denied", "allowed", "not_enforced"}:
         raise ValueError(f"Malformed {path}.local_commit")

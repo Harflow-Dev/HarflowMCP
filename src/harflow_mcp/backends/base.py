@@ -367,6 +367,10 @@ class Enforcement:
     dispatch_git: dict[str, Any] | None = None
     """Branch, base and fetch preparation Harflow ran, or the preview of what it will run."""
 
+    inherited_rules: tuple[dict[str, str], ...] | None = None
+    settings_observation: dict[str, Any] | None = None
+    observation_notices: tuple[str, ...] = ()
+
     @property
     def publish_attempts_allowed(self) -> bool:
         """Canonical publication intent; the legacy constructor field remains compatible."""
@@ -374,6 +378,9 @@ class Enforcement:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            **({"inherited_rules": list(self.inherited_rules)} if self.inherited_rules is not None else {}),
+            **({"settings_observation": self.settings_observation} if self.settings_observation is not None else {}),
+            **({"observation_notices": list(self.observation_notices)} if self.observation_notices else {}),
             **({"git_environment": self.git_environment} if self.git_environment is not None else {}),
             **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
             **({"extra_allowed_commands": list(self.extra_allowed_commands),
@@ -521,6 +528,13 @@ def control_pipe_problem(backend: Any) -> str | None:
 
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
+
+    def observe_enforcement(self, enforcement, cwd, env, executable):
+        """Optional, observational only; default backends report no inventory."""
+        return enforcement
+
+    def observation_unavailable(self, enforcement):
+        return enforcement
 
     def verify_launch_identity(self) -> None:
         """Last check before spawn. The default accepts the selected binary."""

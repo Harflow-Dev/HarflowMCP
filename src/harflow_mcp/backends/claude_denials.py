@@ -11,10 +11,12 @@ from typing import Any
 
 from . import claude_qualification as qualification
 
+_MEASURED_BASH_APPROVAL = "Claude requested permissions to use Bash, but you haven't granted it yet."
 _FLAGS = re.DOTALL
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("deny_rule", re.compile(r"Permission to use (\S+) with command (.+) has been denied\.", _FLAGS)),
     ("approval_required", re.compile(r"This command requires approval")),
+    ("approval_required", re.compile(r"Claude requested permissions to use Bash, but you haven't granted it yet\.")),
     ("chained_command", re.compile(r"This Bash command contains multiple operations\. The following part requires approval: (.+)", _FLAGS)),
     ("unverifiable_command", re.compile(r"A nested command in this command can't be checked before it runs")),
     ("path_safety", re.compile(r"Claude requested permissions to read from (.+), which contains a suspicious Windows path pattern that requires manual approval\.", _FLAGS)),
@@ -27,8 +29,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _LEGACY_MARKERS = ("this command requires approval", "contains brace with quote character")
 
 REMEDIES = {
-    "deny_rule": "A deny rule refused this. It may come from Harflow's access level, user or project settings, or managed policy. Allow rules and `allowed_commands` cannot override it.",
-    "approval_required": "A matching allow rule, `allowed_commands` on a new or resumed run, or caller approvals.",
+    "deny_rule": "A deny rule refused this. It may come from Harflow's access level, user or project settings, or managed policy. Allow rules and `allowed_commands` cannot override it. The refusal does not identify its source or rule.",
+    "approval_required": "A matching allow rule or caller approval may help, but inherited ask or deny rules can remain authoritative; `allowed_commands` does not necessarily override them. The refusal does not identify its source or rule.",
     "chained_command": "Run each part as a separate command. Each part needs its own permission.",
     "unverifiable_command": "Avoid command substitution, or run the inner command separately.",
     "path_safety": "A built-in path check. Allow rules cannot satisfy it. Use caller approvals (Read, on qualified versions) or rename the path.",
@@ -79,6 +81,8 @@ def classify_one(denial: dict[str, Any], state: dict[str, Any], deny_prefixes: t
     text = state.get("tool_error_text", {}).get(tool_id)
     if text is None:
         return unclassified("no_refusal_text", version)
+    if text == _MEASURED_BASH_APPROVAL and version != "2.1.310":
+        return unclassified("unmeasured_text_version", version)
     found = match(text)
     if found is None:
         return unclassified("unrecognized_text", version)
@@ -87,6 +91,7 @@ def classify_one(denial: dict[str, Any], state: dict[str, Any], deny_prefixes: t
                            "classification_basis": {"claude_code_version": version, "evidence": "result_event_and_tool_result_text"}}
     if category in _EXTRA and detail is not None:
         out[_EXTRA[category]] = detail
+    # A matching Harflow deny was supplied; this does not identify the refusal's unique cause.
     if category == "deny_rule" and _denied_by_harflow(denial, deny_prefixes):
         out["harflow_access_deny"] = True
     return out

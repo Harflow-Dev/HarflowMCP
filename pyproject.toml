@@ -33,5 +33,6 @@ testpaths = ["tests"]
 markers = [
     "integration: spawns a real agent CLI; spends real tokens. Opt in with HARFLOW_INTEGRATION=1",
     "cli_integration: drives a real MCP client CLI, or a real agent CLI's own parser, against a sandboxed config or throwaway repo. No model calls in the measured cases, but depends on those binaries. Opt in with HARFLOW_CLI_INTEGRATION=1",
+    "claude_settings_observation: explicitly exercises Claude settings observation with fixture-only or isolated CLI settings",
     "allow_unknown_event_kinds: the test deliberately writes an event kind outside events.EVENT_KINDS (exempt from the conftest check)",
 ]
