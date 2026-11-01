@@ -333,9 +333,10 @@ async def test_base_ref_is_resolved_after_the_resource_grant(tmp_path, source, m
     waiter = await reg.start("reply two", source, backend=get("claude"), freedom="write_in_repo", resources=["sim"], worktree={}, task_id="b" * 32)
     assert store.read(log_dir, waiter.task_id) is None
     moved = commit(source, "while-waiting.txt")
-    await wait_for(lambda: store.read(log_dir, waiter.task_id) is not None)
-    assert store.read(log_dir, waiter.task_id).worktree["base_commit"] == moved
-    assert (Path(store.read(log_dir, waiter.task_id).repo_path) / "while-waiting.txt").exists()
+    # Keep the record wait_for already read. A second read can land while the owner replaces metadata.
+    record = await wait_for(lambda: store.read(log_dir, waiter.task_id))
+    assert record.worktree["base_commit"] == moved
+    assert (Path(record.repo_path) / "while-waiting.txt").exists()
 
 
 @pytest.mark.asyncio
