@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refuse a replaced inherited-specification directory even when its inode is reused, before any artifact is written.
+
 - Distinguish disabled phase-slot layouts with `phase_slots_not_enabled` on ctl and MCP phase operations, retaining existing authority checks, human enable requirements and other refusal codes.
 
 - Qualify the GitHub transport notice and guidance for tools that drop injected Git configuration or use another SCM provider (#100).

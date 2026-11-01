@@ -8,7 +8,8 @@ from typing import Any
 
 from .workflow_context import DEFAULT_PROMPT_BUDGET_BYTES, account_legacy_prompt, acknowledged_receipt
 
-_CONTEXT_FOLDERS: dict[tuple[str, str], tuple[str, tuple[int, int]]] = {}
+_MARKER = ".identity"
+_CONTEXT_FOLDERS: dict[tuple[str, str], tuple[str, tuple[int, int], tuple[int, int], bytes]] = {}
 
 
 def bounded_inherited_context(run: dict[str, Any], root: Any) -> dict[str, Any] | None:
@@ -30,8 +31,23 @@ def bounded_inherited_context(run: dict[str, Any], root: Any) -> dict[str, Any] 
     if key not in _CONTEXT_FOLDERS:
         created = tempfile.mkdtemp(prefix="harflow-workflow-context-")
         info = os.stat(created, follow_symlinks=False)
-        _CONTEXT_FOLDERS[key] = (created, (info.st_dev, info.st_ino))
-    stored, expected_identity = _CONTEXT_FOLDERS[key]
+        # A replacement directory can reuse this inode. A private marker file cannot be
+        # recreated by mkdir, so a substituted folder fails closed before any artifact write.
+        secret = os.urandom(32)
+        directory_fd = os.open(created, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            marker_fd = os.open(_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+            try:
+                if os.write(marker_fd, secret) != len(secret):
+                    raise OSError("Inherited specification marker was not stored")
+                os.fchmod(marker_fd, 0o400)
+                marker_info = os.fstat(marker_fd)
+            finally:
+                os.close(marker_fd)
+        finally:
+            os.close(directory_fd)
+        _CONTEXT_FOLDERS[key] = (created, (info.st_dev, info.st_ino), (marker_info.st_dev, marker_info.st_ino), secret)
+    stored, expected_identity, expected_marker, secret = _CONTEXT_FOLDERS[key]
     folder = Path(stored)
     descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     digest = hashlib.sha256(encoded).hexdigest()
@@ -47,6 +63,17 @@ def bounded_inherited_context(run: dict[str, Any], root: Any) -> dict[str, Any] 
         info = os.fstat(descriptor)
         if (info.st_dev, info.st_ino) != expected_identity:
             raise ValueError("Inherited specification directory identity changed")
+        try:
+            marker_fd = os.open(_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        except FileNotFoundError as exc:
+            raise ValueError("Inherited specification directory identity changed") from exc
+        try:
+            marker_info = os.fstat(marker_fd)
+            observed = os.read(marker_fd, len(secret) + 1)
+            if (marker_info.st_dev, marker_info.st_ino) != expected_marker or observed != secret:
+                raise ValueError("Inherited specification directory identity changed")
+        finally:
+            os.close(marker_fd)
         for output_name, content in ((name, encoded), (chunk_name, chunk_bytes)):
             temporary = "." + uuid.uuid4().hex + ".tmp"
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)

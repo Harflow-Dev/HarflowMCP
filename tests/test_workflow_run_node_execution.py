@@ -865,7 +865,7 @@ def test_inherited_spec_refuses_substituted_temp_directory(tmp_path, replacement
         if directory.is_symlink():
             directory.unlink()
         else:
-            directory.rmdir()
+            shutil.rmtree(directory, ignore_errors=True)
         _CONTEXT_FOLDERS.pop((str(tmp_path), run["workflow_run_id"]), None)
 
 
