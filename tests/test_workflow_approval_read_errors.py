@@ -19,6 +19,37 @@ def write(directory, identifier, data):
     approvals._path(directory, identifier).write_bytes(data)
 
 
+def test_a_ledger_that_appears_during_open_is_read(tmp_path, monkeypatch):
+    admitted = approvals.admit(tmp_path, task_stub(tmp_path), bash(), CONTEXT)
+    real = approvals.open_descriptor
+    misses = {"n": 0}
+
+    def miss_once(path, flags, mode=0o600, *, layout, dir_fd=None):
+        if str(path).endswith(".approvals.json") and misses["n"] == 0:
+            misses["n"] += 1
+            raise FileNotFoundError(path)
+        return real(path, flags, mode, layout=layout, dir_fd=dir_fd)
+
+    monkeypatch.setattr(approvals, "open_descriptor", miss_once)
+    rows = approvals.rows(tmp_path, "task-1")
+    assert misses["n"] == 1
+    assert rows[0]["request_id"] == admitted["request_id"]
+
+
+def test_a_ledger_that_stays_unopenable_is_unavailable(tmp_path, monkeypatch):
+    approvals.admit(tmp_path, task_stub(tmp_path), bash(), CONTEXT)
+    real = approvals.open_descriptor
+
+    def miss_ledger(path, flags, mode=0o600, *, layout, dir_fd=None):
+        if str(path).endswith(".approvals.json"):
+            raise FileNotFoundError(path)
+        return real(path, flags, mode, layout=layout, dir_fd=dir_fd)
+
+    monkeypatch.setattr(approvals, "open_descriptor", miss_ledger)
+    with pytest.raises(ValueError, match="unavailable"):
+        approvals.rows(tmp_path, "task-1")
+
+
 def test_absent_ledger_is_complete_empty(tmp_path, monkeypatch):
     select(monkeypatch, ["task-1"])
     view = approval_runtime.workflow_summary(tmp_path, "run-1")

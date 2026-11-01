@@ -103,14 +103,21 @@ def _read(directory: Path, path: Path, task_id: str, *, source_budget: list[int]
     layout = task_layout(directory)
     require_state_path(layout, path)
     validate_task_id(task_id)
-    try:
-        fd = open_descriptor(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, layout=layout)
-    except FileNotFoundError:
-        # A dangling symlink is not an absent ledger.
+    fd = None
+    # An atomic replace can create the regular file between open and lstat.
+    # A symlink or other non-regular entry is not an absent ledger.
+    for _ in range(4):
         try:
-            path.lstat()
+            fd = open_descriptor(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, layout=layout)
+            break
         except FileNotFoundError:
-            return _empty(task_id)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                return _empty(task_id)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Approval ledger is unavailable")
+    if fd is None:
         raise ValueError("Approval ledger is unavailable")
     try:
         source = os.fstat(fd)
