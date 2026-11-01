@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -534,12 +535,26 @@ async def test_owner_killed_while_the_worktree_is_being_created_is_never_started
     # sandbox. Persist a nonempty generation token before simulating its death.
     receipt["owner"] = receipt["owner"] | {"start_time": "owner-generation-before-worktree"}
     task_supervision._write(log_dir / f"{started.task_id}.launch.json", receipt)
-    os.kill(receipt["owner"]["pid"], signal.SIGKILL)
-    identities.dead(receipt["owner"]["pid"])
+    pid = receipt["owner"]["pid"]
+    os.kill(pid, signal.SIGKILL)
+    # The owner holds the launch lock until it exits. Recovery takes that lock without waiting,
+    # so reap the child before asking it to settle.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            waited, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if waited == pid:
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("owner process did not exit")
+        time.sleep(0.02)
+    identities.dead(pid)
     from harflow_mcp.task_recovery import recover_abandoned
     recovery = recover_abandoned(log_dir)
     assert any(item["task_id"] == started.task_id and item["outcome"] == "never_started"
-               for item in recovery["recovered"])
+               for item in recovery["recovered"]), recovery
     assert started.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     task_resources.reap(log_dir)
     assert all(entry.owner.task_id != started.task_id for entry in ledger(tmp_path).entries())

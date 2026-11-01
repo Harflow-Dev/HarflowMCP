@@ -557,11 +557,16 @@ def write_output(output: Path, documents: dict[str, dict], meta: dict[str, dict]
     source_manifest = FIXTURES / "manifest.json"
     raw_manifest = source_manifest.read_bytes()
     manifest = json.loads(raw_manifest)
-    for name in [n for n in manifest["cases"] if n.startswith(PREFIX)]:
-        manifest["cases"].pop(name)
+    # Drop fixtures this generator no longer emits, but leave surviving entries where they are.
+    # Popping and re-adding them moves every approval case to the end and changes manifest bytes
+    # whenever another generator has appended its own fixtures.
+    fresh_names = set(documents)
+    for name in [n for n in manifest["cases"] if n.startswith(PREFIX) and n not in fresh_names]:
+        manifest["cases"].pop(name, None)
         manifest["files"].pop(name, None)
     for stale in output.glob(PREFIX + "*.json"):
-        stale.unlink()
+        if stale.name not in fresh_names:
+            stale.unlink()
     written: dict[str, bytes] = {}
     for name, document in sorted(documents.items()):
         validate_envelope(document, CTL_FORMAT, live=True, expected_version=PRODUCT_VERSION)
