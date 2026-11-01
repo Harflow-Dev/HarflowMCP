@@ -348,14 +348,28 @@ async def test_owner_killed_while_waiting_never_started_and_session_is_freed(tmp
     assert waiter.task_id in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     receipt["owner"] = receipt["owner"] | {"start_time": "owner-generation-before-wait"}
     task_supervision._write(log_dir / f"{waiter.task_id}.launch.json", receipt)
-    os.kill(receipt["owner"]["pid"], signal.SIGKILL)
-    identities.dead(receipt["owner"]["pid"])
+    pid = receipt["owner"]["pid"]
+    os.kill(pid, signal.SIGKILL)
+    # The owner holds the launch lock until it exits. Recovery takes that lock without waiting.
+    import time
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            waited, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if waited == pid:
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("owner process did not exit")
+        time.sleep(0.02)
+    identities.dead(pid)
     # Reservation reads stay observational. Explicit maintenance performs the recovery and release.
     assert waiter.task_id in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     from harflow_mcp.task_recovery import recover_abandoned
     result = recover_abandoned(log_dir)
     assert any(item["task_id"] == waiter.task_id and item["outcome"] == "never_started"
-               for item in result["recovered"])
+               for item in result["recovered"]), result
     assert waiter.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
     view = task_resources.pending_view(log_dir, waiter.task_id)
     assert view["status"] == "failed" and view["not_started_reason"] == "owner_died_before_spawn"
