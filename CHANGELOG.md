@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.6
+
 - Read an approval ledger that appears during an atomic replace, instead of treating that race as an unavailable ledger and cancelling the run.
 
 - Refuse a replaced inherited-specification directory even when its inode is reused, before any artifact is written.

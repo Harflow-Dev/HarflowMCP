@@ -1,1 +1,1 @@
-{"format":"harflow.ctl","product":"harflow","product_version":"0.0.5","result":{"configuration":{"epoch":1,"names":{"build":{"capacity":2},"simulator":{"capacity":1}}},"events":[],"leases":[],"service":{"state":"missing"},"truncated":false},"v":1}
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.6","result":{"configuration":{"epoch":1,"names":{"build":{"capacity":2},"simulator":{"capacity":1}}},"events":[],"leases":[],"service":{"state":"missing"},"truncated":false},"v":1}
