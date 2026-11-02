@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +14,84 @@ from harflow_mcp.backends.base import Enforcement
 from harflow_mcp.backends import claude_settings
 from harflow_mcp.backends import claude_denials
 from harflow_mcp.task_documents import qualify_enforcement
+
+
+class _VersionProcess:
+    def __init__(self, probe, stdout):
+        self.probe = probe
+        self.stdout = stdout
+        self.returncode = None
+
+    def wait(self, timeout=None):
+        self.probe.wait_timeouts.append(timeout)
+        if timeout is not None and self.probe.wait_timeout is not None:
+            raise self.probe.wait_timeout
+        if self.probe.late_output is not None and self.probe.write_fd is not None:
+            os.write(self.probe.write_fd, self.probe.late_output)
+            self.probe.close_writer()
+        if self.returncode is None:
+            self.returncode = self.probe.exit_code
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.probe.kill_calls += 1
+        self.returncode = -9
+        self.probe.close_writer()
+
+
+class _VersionProbe:
+    def __init__(self):
+        self.output = b"2.1.310\n"
+        self.exit_code = 0
+        self.wait_timeout = None
+        self.late_output = None
+        self.launch_error = None
+        self.calls = []
+        self.wait_timeouts = []
+        self.kill_calls = 0
+        self.write_fd = None
+        self.process = None
+        self.stdout = None
+
+    def close_writer(self):
+        if self.write_fd is not None:
+            os.close(self.write_fd)
+            self.write_fd = None
+
+    def popen(self, args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.launch_error is not None:
+            raise self.launch_error
+        read_fd, self.write_fd = os.pipe()
+        stdout = os.fdopen(read_fd, "rb", buffering=0)
+        self.stdout = stdout
+        if self.late_output is None:
+            os.write(self.write_fd, self.output)
+            self.close_writer()
+        self.process = _VersionProcess(self, stdout)
+        return self.process
+
+
+@pytest.fixture(autouse=True)
+def fake_claude_version_probe(monkeypatch):
+    """Keep settings inventory tests deterministic while exercising real select/read pipes."""
+    probe = _VersionProbe()
+    monkeypatch.setattr(claude_settings, "subprocess", SimpleNamespace(
+        Popen=probe.popen,
+        DEVNULL=subprocess.DEVNULL,
+        PIPE=subprocess.PIPE,
+        SubprocessError=subprocess.SubprocessError,
+        TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    try:
+        yield probe
+    finally:
+        probe.close_writer()
+        if probe.stdout is not None and not probe.stdout.closed:
+            probe.stdout.close()
 
 
 def executable(tmp_path: Path, text: str = "2.1.310\n") -> Path:
@@ -70,6 +150,70 @@ def test_inventory_combines_scopes_and_keeps_rules_as_candidates(tmp_path, monke
     assert "inherited_rules" not in Enforcement(freedom="unrestricted", mechanism="test", os_enforced=False, writes_confined=False).as_dict()
 
 
+def test_version_probe_uses_expected_process_arguments(tmp_path, monkeypatch, fake_claude_version_probe):
+    work = tmp_path / "work"
+    env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}
+    result = observe(tmp_path, monkeypatch, cwd=work, env=env)
+    args, kwargs = fake_claude_version_probe.calls[0]
+    assert args == [str(tmp_path / "claude-version"), "--version"]
+    assert kwargs == {"env": env, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE,
+                      "stderr": subprocess.DEVNULL, "cwd": work}
+    assert result.settings_observation["version"] == "2.1.310"
+    assert fake_claude_version_probe.wait_timeouts == [0.3]
+    assert fake_claude_version_probe.process.stdout.closed
+
+
+@pytest.mark.parametrize(("output", "exit_code"), [
+    (b"Claude Code 2.1.310\n", 7),
+    (b"Claude Code version unavailable\n", 0),
+])
+def test_nonzero_or_malformed_version_probe_is_unqualified(
+    tmp_path, monkeypatch, fake_claude_version_probe, output, exit_code
+):
+    fake_claude_version_probe.output = output
+    fake_claude_version_probe.exit_code = exit_code
+    result = observe(tmp_path, monkeypatch)
+    assert result.settings_observation["version"] is None
+    assert result.settings_observation["applicability"] == "unqualified"
+    assert fake_claude_version_probe.process.stdout.closed
+
+
+def test_late_version_output_is_read_after_process_exit(tmp_path, monkeypatch, fake_claude_version_probe):
+    fake_claude_version_probe.output = b""
+    fake_claude_version_probe.late_output = b"Claude Code 2.1.310\n"
+    result = observe(tmp_path, monkeypatch)
+    assert result.settings_observation["version"] == "2.1.310"
+    assert result.settings_observation["applicability"] == "cwd_discovery_measured"
+    assert fake_claude_version_probe.wait_timeouts == [0.3]
+    assert fake_claude_version_probe.process.stdout.closed
+
+
+def test_timed_out_version_probe_is_killed_and_pipe_closed(tmp_path, monkeypatch, fake_claude_version_probe):
+    fake_claude_version_probe.wait_timeout = subprocess.TimeoutExpired("claude --version", 0.3)
+    result = observe(tmp_path, monkeypatch)
+    assert result.settings_observation["version"] is None
+    assert result.settings_observation["applicability"] == "unqualified"
+    assert fake_claude_version_probe.process.poll() == -9
+    assert fake_claude_version_probe.kill_calls == 1
+    assert fake_claude_version_probe.wait_timeouts == [0.3, None]
+    assert fake_claude_version_probe.write_fd is None
+    assert fake_claude_version_probe.process.stdout.closed
+
+
+def test_version_probe_spawn_error_keeps_real_file_inventory(tmp_path, monkeypatch, fake_claude_version_probe):
+    fake_claude_version_probe.launch_error = OSError("fixture spawn failure")
+    work = tmp_path / "work"
+    path = tmp_path / "config/settings.json"
+    write_settings(path, {"deny": ["Bash(candidate)"]})
+    result = observe(tmp_path, monkeypatch, cwd=work)
+    assert result.settings_observation["version"] is None
+    assert result.settings_observation["applicability"] == "unqualified"
+    assert statuses(result)[path] == "readable"
+    assert [rule["rule"] for rule in result.inherited_rules] == ["Bash(candidate)"]
+    assert len(fake_claude_version_probe.calls) == 1
+    assert fake_claude_version_probe.process is None
+
+
 @pytest.mark.parametrize("payload", [b"{", b"[]", b'{"permissions":{"ask":"Bash"}}', b'{"permissions":{"deny":[2]}}'])
 def test_malformed_or_wrong_permission_shapes_are_invalid_and_not_retained(tmp_path, monkeypatch, payload):
     work = tmp_path / "work"
@@ -126,12 +270,13 @@ def test_symlinked_claude_subdirectory_is_not_followed(tmp_path, monkeypatch):
     assert not result.inherited_rules
 
 
-def test_candidate_version_is_unqualified_outside_measured_version(tmp_path, monkeypatch):
+def test_candidate_version_is_unqualified_outside_measured_version(tmp_path, monkeypatch, fake_claude_version_probe):
     monkeypatch.setattr(claude_settings.sys, "platform", "darwin")
     monkeypatch.setattr(claude_settings, "_managed_directory", lambda _platform: None)
     work = tmp_path / "work"
     work.mkdir()
     exe = executable(tmp_path, "Claude Code 2.1.312\n")
+    fake_claude_version_probe.output = b"Claude Code 2.1.312\n"
     result = claude_settings.observe(Enforcement(freedom="unrestricted", mechanism="test", os_enforced=False, writes_confined=False),
                                      work, {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": str(tmp_path / "config")}, str(exe))
     assert result.settings_observation["version"] == "2.1.312"
