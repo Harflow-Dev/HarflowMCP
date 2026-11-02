@@ -25,10 +25,16 @@ emit({"type": "thread.started", "thread_id": session})
 if "outage-fixture" in sys.argv:
     emit({"type": "turn.failed", "error": {"message": "Provider service unavailable", "code": "service_unavailable"}})
     sys.exit(1)
-if "workflow orchestrator" in prompt:
-    envelope = None
-    if prompt.startswith('{'):
-        envelope = json.loads(prompt)
+envelope = None
+if prompt.startswith('{'):
+    try:
+        candidate = json.loads(prompt)
+    except json.JSONDecodeError:
+        candidate = None
+    if isinstance(candidate, dict) and isinstance(candidate.get('checkpoint'), dict) and isinstance(candidate.get('delivery'), dict):
+        envelope = candidate
+if envelope is not None or "workflow orchestrator" in prompt:
+    if envelope is not None:
         retained = Path(os.environ['HOME']) / ('fake-context-' + session + '.json')
         if 'bootstrap' in envelope:
             retained.write_text(json.dumps(envelope['bootstrap']['context']))
@@ -92,6 +98,33 @@ else:
 emit({"type": "item.completed", "item": {"id": "answer", "type": "agent_message", "text": json.dumps(answer)}})
 emit({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}})
 '''
+
+
+def test_fake_codex_routes_compact_orchestrator_delta_without_legacy_role_text(tmp_path):
+    session = "compact-delta"
+    retained = tmp_path / f"fake-context-{session}.json"
+    retained.write_text(json.dumps({
+        "original_request": "Fixture request",
+        "decision_id": "prior",
+        "current_stage": {"node_id": "start", "phase": "routing"},
+        "valid_continuations": [{"continuation_id": "begin", "requires_prompt": False}],
+    }))
+    acknowledgement = {"scope": "fixture", "session_owner": session}
+    envelope = {"checkpoint": {"decision_id": "current"}, "delivery": {"acknowledgement": acknowledgement}}
+    prompt = json.dumps(envelope)
+    assert "workflow orchestrator" not in prompt
+    result = subprocess.run(
+        [sys.executable, "-c", FAKE_CODEX, "resume", session, prompt],
+        env={**os.environ, "HOME": str(tmp_path)}, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    answer = json.loads(next(event["item"]["text"] for event in events if event["type"] == "item.completed"))
+    assert answer == {
+        "decision_id": "current", "action": "continue", "next": [{"continuation_id": "begin"}],
+        "reason": "Fixture routing decision", "context_ack": acknowledgement,
+    }
+    assert json.loads(retained.read_text())["decision_id"] == "current"
 
 
 @pytest.fixture
@@ -187,7 +220,8 @@ def test_cli_loop_limit_stops_after_three_implementation_activations(workflow_cl
     _save(cli, tmp_path, definition)
     started = cli("run", "--workflow", "e2e-loop", "--repo", str(git_repo), "--prompt", "E2E_LOOP")
     run = _settled(cli, started["workflow_run_id"])
-    assert run["status"] == "needs_input"
+    assert run["status"] == "needs_input", {key: run.get(key) for key in ("status", "attention_reason", "failure_reason", "decision_errors")}
+    assert run.get("decision_errors", []) == [], run.get("decision_errors")
     attempts = [a for a in run["activations"] if a["node_id"] == "implement" and a["role"] == "node"]
     assert len(attempts) == 3
     assert "Grant more retries" in run["input_question"]

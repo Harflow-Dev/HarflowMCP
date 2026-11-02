@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
 import signal
 import subprocess
 from datetime import datetime, timezone
@@ -444,21 +446,33 @@ async def test_owner_and_start_time_land_in_the_persisted_record(
     from harflow_mcp import store
 
     owner = {"pid": 4242, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
-    # A brief sleep so the process is still alive when `_spawn` captures its own start time —
-    # the plain two-line script can exit and be reaped before that capture runs.
-    backend = registered(_RecordingBackend("printf '%s\\n' '{\"type\":\"x\"}'; sleep 0.3"))
+    gate = tmp_path / "identity-release.fifo"
+    os.mkfifo(gate)
+    gate_fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+    # The real shell remains alive until start has captured and persisted its identity.
+    backend = registered(_RecordingBackend(_two_line_script() + "; read -r release < " + shlex.quote(str(gate))))
     registry = TaskRegistry(log_dir=task_root(tmp_path), owner=owner)
+    task = None
+    try:
+        task = await asyncio.wait_for(registry.start("hi", tmp_path, backend=backend), 10)
+        assert task.owner == owner
+        assert task.start_time is not None
+        os.write(gate_fd, b"release\n")
+        await asyncio.wait_for(task.done.wait(), 10)
 
-    task = await registry.start("hi", tmp_path, backend=backend)
-    await task.done.wait()
+        record = store.read(task_root(tmp_path), task.task_id)
+        assert record is not None
+        assert record.owner == owner
+        assert record.start_time == task.start_time
+    finally:
+        try:
+            os.write(gate_fd, b"release\n")
+            if task is not None and not task.done.is_set():
+                await asyncio.wait_for(registry.cancel(task), 10)
+                await asyncio.wait_for(task.done.wait(), 10)
+        finally:
+            os.close(gate_fd)
 
-    assert task.owner == owner
-    assert task.start_time is not None
-
-    record = store.read(task_root(tmp_path), task.task_id)
-    assert record is not None
-    assert record.owner == owner
-    assert record.start_time == task.start_time
 
 
 def test_envelope_keys_lead_each_line_and_win_over_colliding_fields(tmp_path: Path) -> None:
