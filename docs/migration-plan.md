@@ -1,5 +1,7 @@
 # Python contract and baseline migration checklist
 
+Dispatchable work packages: [migration sessions](migration-sessions.md).
+
 Status: planned, 2026-11-02. All work items remain unverified.
 
 Own the authoritative Python engine and public contracts until explicit
