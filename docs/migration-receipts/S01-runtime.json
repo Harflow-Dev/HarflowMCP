@@ -1,0 +1,1115 @@
+{
+  "backends": {
+    "document": {
+      "backends": [
+        {
+          "backend": "claude",
+          "binary": "claude",
+          "capabilities": {
+            "allowed_commands": {
+              "boundary": "a best-effort guard against caller mistakes, not a security boundary",
+              "freedoms": [
+                "write_in_repo",
+                "publish"
+              ],
+              "grammar": {
+                "characters": "[A-Za-z0-9 _./:=@%+-] and a single *",
+                "freedoms": [
+                  "write_in_repo",
+                  "publish"
+                ],
+                "gh": "publish only, for a fixed list of subcommand pairs",
+                "git": "write_in_repo and publish; exact fetch, ff-only pull, non-force branch preparation, and merge conclusion (git commit --no-edit or git merge --continue), optionally with one contained -C path",
+                "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
+                "launchers": "the launched command is validated recursively, at most 2 deep",
+                "match": "no wildcard is exact, including a bare program name (accepted, and reported with a notice because it matches only that command with no arguments); `:*` or a final `*` is a prefix",
+                "option_order": "options before a goal or subcommand are literal and order-sensitive (`mvn -o test:*` does not match `mvn -q -o test` or `mvn -o -q test`); a wildcard needs that goal after the options (`mvn -o test:*`, not `mvn -o:*`). A launched command with no subcommand, such as `npx tsc:*`, needs an exact command (`npx tsc --noEmit -p .`). Programs whose arguments start with options, such as xcodebuild, also need one exact full command line",
+                "paths": "tokens containing / must be plain relative paths or absolute paths that resolve inside the repository, optionally as --option=path",
+                "program": "a lowercase bare name; shells, wrappers, evaluators, system tools, docker, podman, kubectl and nix are refused",
+                "wildcard": "`*` only as a separate final token (`cmd sub *`) or as the `:*` suffix (`cmd sub:*`); a wildcard needs a literal non-option token after the program"
+              },
+              "max_pattern_bytes": 256,
+              "max_patterns": 16,
+              "max_total_bytes": 2048,
+              "nested": "a nested dispatch may grant only exact patterns its caller holds, unless the caller is unrestricted; omitting grants does not inherit them",
+              "supported": true,
+              "versions": [
+                "2.1.310",
+                "2.1.312"
+              ]
+            },
+            "caller_approval_support": {
+              "freedoms": [
+                "write_in_repo",
+                "publish"
+              ],
+              "native": false,
+              "path_safety_prompt_versions": [
+                "2.1.310",
+                "2.1.312"
+              ],
+              "scope": "exact_action_once",
+              "supported": true,
+              "tools": [
+                "Bash",
+                "Read",
+                "Write",
+                "Edit"
+              ],
+              "tools_by_version": {
+                "2.1.302": [
+                  "Bash"
+                ],
+                "2.1.310": [
+                  "Bash",
+                  "Read",
+                  "Write",
+                  "Edit"
+                ],
+                "2.1.312": [
+                  "Bash",
+                  "Read",
+                  "Write",
+                  "Edit"
+                ]
+              },
+              "turn_caps": false,
+              "versions": [
+                "2.1.302",
+                "2.1.310",
+                "2.1.312"
+              ],
+              "write_tools_by_version": {
+                "2.1.302": [],
+                "2.1.310": [
+                  "Write",
+                  "Edit"
+                ],
+                "2.1.312": [
+                  "Write",
+                  "Edit"
+                ]
+              }
+            },
+            "chooses_session_id": true,
+            "extra_writable_paths": {
+              "certification": null,
+              "reason": "bounded writable paths are not certified for this backend",
+              "supported": false
+            },
+            "live_input_message_is_turn": false,
+            "network_control": {
+              "can_block": [],
+              "can_enable": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "network=True is accepted as 'impose no barrier of our own', which this backend genuinely delivers by having none to impose \u2014 not a claim of reachability: enforcement.network_access stays not_controlled, and the surrounding environment decides. network=False is refused outright: there is no barrier this backend could raise, and a silently-ignored block would be indistinguishable from an enforced one"
+              ]
+            },
+            "os_sandbox": false,
+            "per_command_deny": true,
+            "reasoning_effort": {
+              "accepted_in_real_run": true,
+              "accepts_parameter": true,
+              "caveats": [
+                "acceptance evidence is a real --effort xhigh run that produced no \"Unknown --effort value\" warning on stderr and completed normally; no cross-level comparison was made, so this does not show xhigh behaving differently from low",
+                "an --effort value outside low/medium/high/xhigh/max is silently ignored by the CLI itself (stderr warning, default effort used, measured) \u2014 harflow_mcp's own validation is what stops an unsupported value reaching it, not the CLI"
+              ],
+              "levels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "levels_change_behaviour": false,
+              "native_flag": "--effort"
+            },
+            "reports_cost_usd": true,
+            "resume_may_start_fresh": false,
+            "supports_auto_continue": true,
+            "supports_caller_approvals": true,
+            "supports_live_input": true,
+            "supports_model_selection": true,
+            "supports_turn_cap": true,
+            "system_guidance": "first_turn_sticky",
+            "tracks_background_tasks": true
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "allowed_commands": {
+                "facts": {
+                  "allowed_commands": true
+                },
+                "feature": "allowed_commands",
+                "identity": {
+                  "backend": "claude",
+                  "binary_sha256": "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+                  "executable": "<home>/.local/share/claude/versions/2.1.310",
+                  "platform": "darwin",
+                  "version": "2.1.310"
+                },
+                "ok": true,
+                "reason": "trusted maintainer version/platform seed; binary provenance was not measured",
+                "revision": "claude-permissions-v1",
+                "source": "seeded"
+              },
+              "caller_approval_tools": {
+                "facts": {
+                  "caller_approval_tools": [
+                    "Bash",
+                    "Read",
+                    "Write",
+                    "Edit"
+                  ]
+                },
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "claude",
+                  "binary_sha256": "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+                  "executable": "<home>/.local/share/claude/versions/2.1.310",
+                  "platform": "darwin",
+                  "version": "2.1.310"
+                },
+                "ok": true,
+                "reason": "trusted maintainer version/platform seed; binary provenance was not measured",
+                "revision": "claude-permissions-v1",
+                "source": "seeded"
+              },
+              "caller_write_tools": {
+                "facts": {
+                  "caller_write_tools": [
+                    "Write",
+                    "Edit"
+                  ]
+                },
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "claude",
+                  "binary_sha256": "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+                  "executable": "<home>/.local/share/claude/versions/2.1.310",
+                  "platform": "darwin",
+                  "version": "2.1.310"
+                },
+                "ok": true,
+                "reason": "trusted maintainer version/platform seed; binary provenance was not measured",
+                "revision": "claude-permissions-v1",
+                "source": "seeded"
+              },
+              "denial_texts": {
+                "facts": {
+                  "denial_texts": true
+                },
+                "feature": "denial_texts",
+                "identity": {
+                  "backend": "claude",
+                  "binary_sha256": "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+                  "executable": "<home>/.local/share/claude/versions/2.1.310",
+                  "platform": "darwin",
+                  "version": "2.1.310"
+                },
+                "ok": true,
+                "reason": "trusted maintainer version/platform seed; binary provenance was not measured",
+                "revision": "claude-permissions-v1",
+                "source": "seeded"
+              },
+              "path_safety_prompts": {
+                "facts": {
+                  "path_safety_prompts": true
+                },
+                "feature": "path_safety_prompts",
+                "identity": {
+                  "backend": "claude",
+                  "binary_sha256": "ffb64331bc0ee1b69efb7c2c428bd3ab516bc31b75bf60886b356c97c1c25ffd",
+                  "executable": "<home>/.local/share/claude/versions/2.1.310",
+                  "platform": "darwin",
+                  "version": "2.1.310"
+                },
+                "ok": true,
+                "reason": "trusted maintainer version/platform seed; binary provenance was not measured",
+                "revision": "claude-permissions-v1",
+                "source": "seeded"
+              }
+            },
+            "retry_command": "harflow-ctl qualify claude"
+          }
+        },
+        {
+          "backend": "codex",
+          "binary": "codex",
+          "capabilities": {
+            "allowed_commands": {
+              "reason": "allowed_commands is not qualified for the codex backend",
+              "supported": false
+            },
+            "caller_approval_support": {
+              "freedoms": [
+                "write_in_repo",
+                "publish"
+              ],
+              "native": false,
+              "platforms": [
+                "darwin"
+              ],
+              "scope": "exact_action_once",
+              "supported": true,
+              "tools": [
+                "commandExecution"
+              ],
+              "transport": "codex app-server",
+              "turn_caps": false,
+              "versions": [
+                "0.163.0"
+              ],
+              "workflows": false,
+              "write_approvals": true,
+              "write_tools": [
+                "fileChange"
+              ]
+            },
+            "chooses_session_id": false,
+            "extra_writable_paths": {
+              "certification": "codex-macos-0.162.0-alpha.17.2-bounded-paths-v1",
+              "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; selected and ambient external configuration namespaces protected; existing other-backend configuration unsupported; inherited repository configuration authority unchanged; writable output is not trusted for future repository or executable use; startup inputs are checked but not atomically pinned against independent concurrent writers; inherited allow-rule authority is not excluded and effective confinement is unestablished",
+              "freedoms": [
+                "write_in_repo",
+                "publish"
+              ],
+              "native_subagent": false,
+              "network": [
+                false,
+                true
+              ],
+              "platforms": [
+                "darwin"
+              ],
+              "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers; Monitor auto-open disabled",
+              "supported": false,
+              "versions": [
+                "codex-cli 0.162.0-alpha.17.2"
+              ]
+            },
+            "live_input_message_is_turn": false,
+            "network_control": {
+              "can_block": [
+                "read_only",
+                "write_in_repo",
+                "publish"
+              ],
+              "can_enable": [
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "support is non-rectangular on purpose: read-only cannot enable (the sandbox_workspace_write.network_access key is inert under the read-only sandbox, measured \u2014 set true, curl still could not resolve the host) and unrestricted cannot block (danger-full-access disables the sandbox entirely, so no barrier remains to raise). Either direction is a claim about harflow_mcp's own -c override only, never about reachability \u2014 the surrounding network can still defeat it. Inherited allow rules can bypass disable pins, so effective barrier reporting remains conservative"
+              ]
+            },
+            "os_sandbox": true,
+            "per_command_deny": false,
+            "reasoning_effort": {
+              "accepted_in_real_run": true,
+              "accepts_parameter": true,
+              "caveats": [
+                "codex does not validate model_reasoning_effort itself \u2014 an unsupported value would reach the API as a mid-run 400 rather than being rejected up front \u2014 but that gap is moot for the fixed EFFORTS vocabulary, which every model accepts (measured: a run at 'ultra', outside this vocabulary, still recorded reasoning_effort in its session rollout end to end)",
+                "acceptance evidence is the run's own session rollout recording the requested model_reasoning_effort verbatim \u2014 stronger than nothing, but reasoning_output_tokens is reported as 0 at both 'low' and 'xhigh' (measured), so a cross-level behavioural comparison is not available from codex's stream at all"
+              ],
+              "levels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "levels_change_behaviour": false,
+              "native_flag": "-c model_reasoning_effort"
+            },
+            "reports_cost_usd": false,
+            "resume_may_start_fresh": false,
+            "supports_auto_continue": false,
+            "supports_caller_approvals": true,
+            "supports_live_input": false,
+            "supports_model_selection": true,
+            "supports_turn_cap": false,
+            "system_guidance": "first_turn_sticky",
+            "tracks_background_tasks": false
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "caller_approval_tools": {
+                "facts": {},
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "codex",
+                  "binary_sha256": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+                  "executable": "<home>/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/bin/codex.js",
+                  "platform": "darwin",
+                  "version": "0.164.0"
+                },
+                "ok": false,
+                "reason": "qualification has not run",
+                "revision": "codex-permissions-v1",
+                "source": "unknown"
+              },
+              "caller_write_tools": {
+                "facts": {},
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "codex",
+                  "binary_sha256": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+                  "executable": "<home>/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/bin/codex.js",
+                  "platform": "darwin",
+                  "version": "0.164.0"
+                },
+                "ok": false,
+                "reason": "qualification has not run",
+                "revision": "codex-permissions-v1",
+                "source": "unknown"
+              },
+              "group_report_output": {
+                "facts": {},
+                "feature": "group_report_output",
+                "identity": {
+                  "backend": "codex",
+                  "binary_sha256": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+                  "executable": "<home>/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/bin/codex.js",
+                  "platform": "darwin",
+                  "version": "0.164.0"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "codex-group-reports-v1",
+                "source": "unsupported"
+              }
+            },
+            "retry_command": "harflow-ctl qualify codex"
+          }
+        },
+        {
+          "backend": "opencode",
+          "binary": "opencode",
+          "capabilities": {
+            "allowed_commands": {
+              "reason": "allowed_commands is not qualified for the opencode backend",
+              "supported": false
+            },
+            "caller_approval_support": {
+              "supported": false
+            },
+            "chooses_session_id": false,
+            "extra_writable_paths": {
+              "certification": null,
+              "reason": "bounded writable paths are not certified for this backend",
+              "supported": false
+            },
+            "live_input_message_is_turn": false,
+            "network_control": {
+              "can_block": [],
+              "can_enable": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "network=True is accepted as 'impose no barrier of our own', which this backend genuinely delivers by having none to impose \u2014 not a claim of reachability: enforcement.network_access stays not_controlled, and the surrounding environment decides. network=False is refused outright: there is no barrier this backend could raise, and a silently-ignored block would be indistinguishable from an enforced one"
+              ]
+            },
+            "os_sandbox": false,
+            "per_command_deny": false,
+            "reasoning_effort": {
+              "accepted_in_real_run": true,
+              "accepts_parameter": true,
+              "caveats": [
+                "--variant support is per model, not universal: measured working on opencode/muse-spark-1.3-contributor-free, where reasoning tokens on one prompt rose monotonically with the variant over three paired runs each \u2014 75/95/99 at the native 'minimal' (outside this vocabulary), 172/201/230 at 'low', 239/254/308 at 'xhigh'. Non-overlapping, but the low-to-xhigh margin is narrow, so treat the flag as directional rather than as a dial with a guaranteed magnitude. A model that declares no `variants` in `opencode models --verbose` (e.g. big-pickle) ignores --variant with no warning at all, and harflow_mcp cannot know which model has variants \u2014 so levels_change_behaviour=True means 'shown to change behaviour on one capable model', not 'guaranteed on the model this run uses'"
+              ],
+              "levels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "levels_change_behaviour": true,
+              "native_flag": "--variant"
+            },
+            "reports_cost_usd": true,
+            "resume_may_start_fresh": false,
+            "supports_auto_continue": false,
+            "supports_caller_approvals": false,
+            "supports_live_input": false,
+            "supports_model_selection": true,
+            "supports_turn_cap": false,
+            "system_guidance": "per_run",
+            "tracks_background_tasks": false
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "allowed_commands": {
+                "facts": {},
+                "feature": "allowed_commands",
+                "identity": {
+                  "backend": "opencode",
+                  "binary_sha256": "8c783005340f8dfc5e7d168478dd0dd2bd1faead531cb34270de2a9689d9f135",
+                  "executable": "<home>/.opencode/bin/opencode",
+                  "platform": "darwin",
+                  "version": "1.18.21"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_approval_tools": {
+                "facts": {},
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "opencode",
+                  "binary_sha256": "8c783005340f8dfc5e7d168478dd0dd2bd1faead531cb34270de2a9689d9f135",
+                  "executable": "<home>/.opencode/bin/opencode",
+                  "platform": "darwin",
+                  "version": "1.18.21"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_write_tools": {
+                "facts": {},
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "opencode",
+                  "binary_sha256": "8c783005340f8dfc5e7d168478dd0dd2bd1faead531cb34270de2a9689d9f135",
+                  "executable": "<home>/.opencode/bin/opencode",
+                  "platform": "darwin",
+                  "version": "1.18.21"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "denial_texts": {
+                "facts": {},
+                "feature": "denial_texts",
+                "identity": {
+                  "backend": "opencode",
+                  "binary_sha256": "8c783005340f8dfc5e7d168478dd0dd2bd1faead531cb34270de2a9689d9f135",
+                  "executable": "<home>/.opencode/bin/opencode",
+                  "platform": "darwin",
+                  "version": "1.18.21"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "path_safety_prompts": {
+                "facts": {},
+                "feature": "path_safety_prompts",
+                "identity": {
+                  "backend": "opencode",
+                  "binary_sha256": "8c783005340f8dfc5e7d168478dd0dd2bd1faead531cb34270de2a9689d9f135",
+                  "executable": "<home>/.opencode/bin/opencode",
+                  "platform": "darwin",
+                  "version": "1.18.21"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              }
+            },
+            "retry_command": "harflow-ctl qualify opencode"
+          }
+        },
+        {
+          "backend": "vibe",
+          "binary": "vibe",
+          "capabilities": {
+            "allowed_commands": {
+              "freedoms": [
+                "write_in_repo",
+                "publish"
+              ],
+              "grammar": {
+                "characters": "[A-Za-z0-9 _./:=@%+-] and a single *",
+                "freedoms": [
+                  "write_in_repo",
+                  "publish"
+                ],
+                "gh": "publish only, for a fixed list of subcommand pairs",
+                "git": "write_in_repo and publish; exact fetch, ff-only pull, non-force branch preparation, and merge conclusion (git commit --no-edit or git merge --continue), optionally with one contained -C path",
+                "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
+                "launchers": "the launched command is validated recursively, at most 2 deep",
+                "match": "no wildcard is exact, including a bare program name (accepted, and reported with a notice because it matches only that command with no arguments); `:*` or a final `*` is a prefix",
+                "option_order": "options before a goal or subcommand are literal and order-sensitive (`mvn -o test:*` does not match `mvn -q -o test` or `mvn -o -q test`); a wildcard needs that goal after the options (`mvn -o test:*`, not `mvn -o:*`). A launched command with no subcommand, such as `npx tsc:*`, needs an exact command (`npx tsc --noEmit -p .`). Programs whose arguments start with options, such as xcodebuild, also need one exact full command line",
+                "paths": "tokens containing / must be plain relative paths or absolute paths that resolve inside the repository, optionally as --option=path",
+                "program": "a lowercase bare name; shells, wrappers, evaluators, system tools, docker, podman, kubectl and nix are refused",
+                "wildcard": "`*` only as a separate final token (`cmd sub *`) or as the `:*` suffix (`cmd sub:*`); a wildcard needs a literal non-option token after the program"
+              },
+              "platforms": [
+                "darwin"
+              ],
+              "reason": "Exact native approval requests are answered once; native deny policies remain effective.",
+              "supported": true,
+              "transport": "vibe-acp",
+              "versions": [
+                "3.0.3"
+              ]
+            },
+            "caller_approval_support": {
+              "freedoms": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "native": false,
+              "scope": "exact_action_once",
+              "supported": true,
+              "tools": [
+                "bash",
+                "edit",
+                "read_file",
+                "write_file"
+              ],
+              "transport": "vibe-acp",
+              "turn_caps": true,
+              "versions": [
+                "3.0.3"
+              ],
+              "workflows": false,
+              "write_approvals": true,
+              "write_tools": [
+                "edit",
+                "write_file"
+              ]
+            },
+            "chooses_session_id": false,
+            "extra_writable_paths": {
+              "certification": null,
+              "reason": "bounded writable paths are not certified for this backend",
+              "supported": false
+            },
+            "live_input_message_is_turn": false,
+            "network_control": {
+              "can_block": [],
+              "can_enable": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "network=True is accepted as 'impose no barrier of our own', which this backend genuinely delivers by having none to impose \u2014 not a claim of reachability: enforcement.network_access stays not_controlled, and the surrounding environment decides. network=False is refused outright: there is no barrier this backend could raise, and a silently-ignored block would be indistinguishable from an enforced one"
+              ]
+            },
+            "os_sandbox": false,
+            "per_command_deny": false,
+            "reasoning_effort": {
+              "accepted_in_real_run": false,
+              "accepts_parameter": false,
+              "caveats": [
+                "effort is config-only ([[models]].thinking, off/low/medium/high/max) with no CLI flag at all. It is not exposed here because vibe's config-layer precedence \u2014 lowest to highest: schema defaults, GrowthBook experiments, user TOML, project TOML (outranks the user's own, and --trust honours it), VIBE_* env vars, runtime overrides, agent-profile overrides (always in effect here, since --agent is always passed), enforced admin config \u2014 means an env override keyed off the user's own config could silently apply to the wrong model, or be overridden by a layer harflow_mcp cannot inspect. A faithful translation, if this is ever revisited, is low->low, medium->medium, high->high, xhigh->max \u2014 vibe's own OpenAI-responses backend maps its max to xhigh"
+              ],
+              "levels": [],
+              "levels_change_behaviour": false,
+              "native_flag": ""
+            },
+            "reports_cost_usd": false,
+            "resume_may_start_fresh": false,
+            "supports_auto_continue": true,
+            "supports_caller_approvals": true,
+            "supports_live_input": false,
+            "supports_model_selection": true,
+            "supports_turn_cap": true,
+            "system_guidance": null,
+            "tracks_background_tasks": false
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "acp_transport": {
+                "facts": {},
+                "feature": "acp_transport",
+                "identity": {
+                  "backend": "vibe",
+                  "binary_sha256": "2fa641ff06fd5304cc4b07f7232640083a3e6626ab50a309e5f2d06bd5694380",
+                  "executable": "<home>/.local/share/uv/tools/mistral-vibe/bin/vibe",
+                  "platform": "darwin",
+                  "version": "3.0.2"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "vibe-acp-permissions-v1",
+                "source": "unsupported"
+              },
+              "allowed_commands": {
+                "facts": {},
+                "feature": "allowed_commands",
+                "identity": {
+                  "backend": "vibe",
+                  "binary_sha256": "2fa641ff06fd5304cc4b07f7232640083a3e6626ab50a309e5f2d06bd5694380",
+                  "executable": "<home>/.local/share/uv/tools/mistral-vibe/bin/vibe",
+                  "platform": "darwin",
+                  "version": "3.0.2"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "vibe-acp-permissions-v1",
+                "source": "unsupported"
+              },
+              "caller_approval_tools": {
+                "facts": {},
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "vibe",
+                  "binary_sha256": "2fa641ff06fd5304cc4b07f7232640083a3e6626ab50a309e5f2d06bd5694380",
+                  "executable": "<home>/.local/share/uv/tools/mistral-vibe/bin/vibe",
+                  "platform": "darwin",
+                  "version": "3.0.2"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "vibe-acp-permissions-v1",
+                "source": "unsupported"
+              },
+              "caller_write_tools": {
+                "facts": {},
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "vibe",
+                  "binary_sha256": "2fa641ff06fd5304cc4b07f7232640083a3e6626ab50a309e5f2d06bd5694380",
+                  "executable": "<home>/.local/share/uv/tools/mistral-vibe/bin/vibe",
+                  "platform": "darwin",
+                  "version": "3.0.2"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "vibe-acp-permissions-v1",
+                "source": "unsupported"
+              },
+              "model_selection": {
+                "facts": {},
+                "feature": "model_selection",
+                "identity": {
+                  "backend": "vibe",
+                  "binary_sha256": "2fa641ff06fd5304cc4b07f7232640083a3e6626ab50a309e5f2d06bd5694380",
+                  "executable": "<home>/.local/share/uv/tools/mistral-vibe/bin/vibe",
+                  "platform": "darwin",
+                  "version": "3.0.2"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "vibe-acp-permissions-v1",
+                "source": "unsupported"
+              }
+            },
+            "retry_command": "harflow-ctl qualify vibe"
+          }
+        },
+        {
+          "backend": "antigravity",
+          "binary": "agy",
+          "capabilities": {
+            "allowed_commands": {
+              "reason": "allowed_commands is not qualified for the antigravity backend",
+              "supported": false
+            },
+            "caller_approval_support": {
+              "supported": false
+            },
+            "chooses_session_id": false,
+            "extra_writable_paths": {
+              "certification": null,
+              "reason": "bounded writable paths are not certified for this backend",
+              "supported": false
+            },
+            "live_input_message_is_turn": true,
+            "network_control": {
+              "can_block": [],
+              "can_enable": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "network=True is accepted as 'impose no barrier of our own', which this backend genuinely delivers by having none to impose \u2014 not a claim of reachability: enforcement.network_access stays not_controlled, and the surrounding environment decides. network=False is refused outright: there is no barrier this backend could raise, and a silently-ignored block would be indistinguishable from an enforced one"
+              ]
+            },
+            "os_sandbox": false,
+            "per_command_deny": false,
+            "reasoning_effort": {
+              "accepted_in_real_run": true,
+              "accepts_parameter": true,
+              "caveats": [
+                "measured on the default model only: three paired runs gave 'low' 0/70/0 and 'high' 145/134/138 thinking tokens \u2014 non-overlapping, so the levels change behaviour there",
+                "agy itself refuses a level it does not know before any model call (exit 1, `invalid --effort \"xhigh\"`), which is why xhigh is outside this backend's vocabulary",
+                "--effort is refused at startup (exit 1) for a model id that encodes its own level (e.g. gemini-3.8-flash-low conflicts with --effort) and for claude-sonnet-4-6 (--effort is not supported for model) \u2014 harflow_mcp cannot know which model ids take it, so a dispatch combining --model with --effort can still die at startup; base family names (gemini-3.8-flash, gemini-3.1-pro) accept it"
+              ],
+              "levels": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "levels_change_behaviour": true,
+              "native_flag": "--effort"
+            },
+            "reports_cost_usd": false,
+            "resume_may_start_fresh": true,
+            "supports_auto_continue": false,
+            "supports_caller_approvals": false,
+            "supports_live_input": true,
+            "supports_model_selection": true,
+            "supports_turn_cap": false,
+            "system_guidance": null,
+            "tracks_background_tasks": false
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "allowed_commands": {
+                "facts": {},
+                "feature": "allowed_commands",
+                "identity": {
+                  "backend": "antigravity",
+                  "binary_sha256": "09fcdd8554e03bed9b2ec936e454c7f115d5610610de09ed7d79fa2feae76940",
+                  "executable": "<home>/.local/bin/agy",
+                  "platform": "darwin",
+                  "version": "1.4.8"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_approval_tools": {
+                "facts": {},
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "antigravity",
+                  "binary_sha256": "09fcdd8554e03bed9b2ec936e454c7f115d5610610de09ed7d79fa2feae76940",
+                  "executable": "<home>/.local/bin/agy",
+                  "platform": "darwin",
+                  "version": "1.4.8"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_write_tools": {
+                "facts": {},
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "antigravity",
+                  "binary_sha256": "09fcdd8554e03bed9b2ec936e454c7f115d5610610de09ed7d79fa2feae76940",
+                  "executable": "<home>/.local/bin/agy",
+                  "platform": "darwin",
+                  "version": "1.4.8"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "denial_texts": {
+                "facts": {},
+                "feature": "denial_texts",
+                "identity": {
+                  "backend": "antigravity",
+                  "binary_sha256": "09fcdd8554e03bed9b2ec936e454c7f115d5610610de09ed7d79fa2feae76940",
+                  "executable": "<home>/.local/bin/agy",
+                  "platform": "darwin",
+                  "version": "1.4.8"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "path_safety_prompts": {
+                "facts": {},
+                "feature": "path_safety_prompts",
+                "identity": {
+                  "backend": "antigravity",
+                  "binary_sha256": "09fcdd8554e03bed9b2ec936e454c7f115d5610610de09ed7d79fa2feae76940",
+                  "executable": "<home>/.local/bin/agy",
+                  "platform": "darwin",
+                  "version": "1.4.8"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              }
+            },
+            "retry_command": "harflow-ctl qualify antigravity"
+          }
+        },
+        {
+          "backend": "cursor",
+          "binary": "cursor-agent",
+          "capabilities": {
+            "allowed_commands": {
+              "reason": "allowed_commands is not qualified for the cursor backend",
+              "supported": false
+            },
+            "caller_approval_support": {
+              "supported": false
+            },
+            "chooses_session_id": false,
+            "extra_writable_paths": {
+              "certification": null,
+              "reason": "bounded writable paths are not certified for this backend",
+              "supported": false
+            },
+            "live_input_message_is_turn": false,
+            "network_control": {
+              "can_block": [],
+              "can_enable": [
+                "read_only",
+                "write_in_repo",
+                "publish",
+                "unrestricted"
+              ],
+              "caveats": [
+                "No sandbox flag Harflow sends was measured as a network barrier. A request to block the network is refused. Allowing it changes no argv, because there is no barrier to remove."
+              ]
+            },
+            "os_sandbox": false,
+            "per_command_deny": false,
+            "reasoning_effort": {
+              "accepted_in_real_run": false,
+              "accepts_parameter": false,
+              "caveats": [
+                "Cursor Agent CLI 2026.10.22-27dcf5f has no --effort flag. Harflow does not encode effort into the model id."
+              ],
+              "levels": [],
+              "levels_change_behaviour": false,
+              "native_flag": ""
+            },
+            "reports_cost_usd": false,
+            "resume_may_start_fresh": true,
+            "supports_auto_continue": false,
+            "supports_caller_approvals": false,
+            "supports_live_input": false,
+            "supports_model_selection": true,
+            "supports_turn_cap": false,
+            "system_guidance": null,
+            "tracks_background_tasks": false
+          },
+          "installed": true,
+          "qualification": {
+            "automatic": "Required features are tested before launch; discovery never runs provider probes.",
+            "features": {
+              "allowed_commands": {
+                "facts": {},
+                "feature": "allowed_commands",
+                "identity": {
+                  "backend": "cursor",
+                  "binary_sha256": "2ccc9a8e167797641448b5e5c936f006ba137a2555f117f38c5eb76a5238a233",
+                  "executable": "<home>/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent",
+                  "platform": "darwin",
+                  "version": "2026.10.22-27dcf5f"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_approval_tools": {
+                "facts": {},
+                "feature": "caller_approval_tools",
+                "identity": {
+                  "backend": "cursor",
+                  "binary_sha256": "2ccc9a8e167797641448b5e5c936f006ba137a2555f117f38c5eb76a5238a233",
+                  "executable": "<home>/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent",
+                  "platform": "darwin",
+                  "version": "2026.10.22-27dcf5f"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "caller_write_tools": {
+                "facts": {},
+                "feature": "caller_write_tools",
+                "identity": {
+                  "backend": "cursor",
+                  "binary_sha256": "2ccc9a8e167797641448b5e5c936f006ba137a2555f117f38c5eb76a5238a233",
+                  "executable": "<home>/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent",
+                  "platform": "darwin",
+                  "version": "2026.10.22-27dcf5f"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "denial_texts": {
+                "facts": {},
+                "feature": "denial_texts",
+                "identity": {
+                  "backend": "cursor",
+                  "binary_sha256": "2ccc9a8e167797641448b5e5c936f006ba137a2555f117f38c5eb76a5238a233",
+                  "executable": "<home>/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent",
+                  "platform": "darwin",
+                  "version": "2026.10.22-27dcf5f"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              },
+              "path_safety_prompts": {
+                "facts": {},
+                "feature": "path_safety_prompts",
+                "identity": {
+                  "backend": "cursor",
+                  "binary_sha256": "2ccc9a8e167797641448b5e5c936f006ba137a2555f117f38c5eb76a5238a233",
+                  "executable": "<home>/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/cursor-agent",
+                  "platform": "darwin",
+                  "version": "2026.10.22-27dcf5f"
+                },
+                "ok": false,
+                "reason": "no isolated no-paid probe is available for this feature",
+                "revision": "unsupported-v1",
+                "source": "unsupported"
+              }
+            },
+            "retry_command": "harflow-ctl qualify cursor"
+          }
+        }
+      ],
+      "format": "harflow.ctl",
+      "product": "harflow",
+      "product_version": "0.0.7",
+      "v": 1
+    },
+    "exit_code": 0
+  },
+  "identity_limits": [
+    "The active pointer and executed stable launcher were observed; no running Mac process generation was inspected.",
+    "engineSHA256 is the acquired engine wheel artifact hash recorded by the installer; the original wheel was not independently rehashed.",
+    "The installed and source 172 Python files match; this does not establish dependency or packaged behavior parity.",
+    "Backend discovery used isolated HOME and state root, reads cached/seeded qualification only, and performs no provider self-tests. Ambient production qualification caches were not read."
+  ],
+  "managed_completion_receipt": {
+    "engineSHA256": "badd323d07b184674bc269b37c8fbd8c2274db31bb01e1b644bb59c940a8407e",
+    "engineVersion": "0.0.7",
+    "engineYanked": false,
+    "generation": "0.0.7-17f21d5762f818b18e3a22a50a796aee3e01ca2e1b82d6e393d09d28dd5adad9-536A5E49-FE68-40DA-A3C8-DBB97F4B08E5",
+    "schema": 1,
+    "specification": "17f21d5762f818b18e3a22a50a796aee3e01ca2e1b82d6e393d09d28dd5adad9"
+  },
+  "python_source_tree": {
+    "algorithm": "SHA256 of concatenated sorted relative POSIX path + colon + file SHA256 + newline for *.py",
+    "file_count": 172,
+    "sha256": "a167507bbca4f05a735d404544d345d513ae05361ae589408c5a790201097063"
+  },
+  "source_version_info": {
+    "document": {
+      "architecture": "arm64",
+      "capabilities": [
+        "workflow-shared-interactions.v1",
+        "interaction-events.v1",
+        "workflow-attention-checkpoints.v1",
+        "phase-slots.v1",
+        "ctl.v1",
+        "setup.v1",
+        "events.v1",
+        "version-info.v1",
+        "state-recovery.v1",
+        "caller-approvals.monitor-respond.v1",
+        "statistics-page.v1",
+        "backend-qualification.v1",
+        "messaging.v1",
+        "limit-hits.v1",
+        "workflow-limit-hits.v1"
+      ],
+      "component": "engine",
+      "contracts": {
+        "ctl": {
+          "format": "harflow.ctl",
+          "v": 1
+        },
+        "events": {
+          "format": "harflow.event",
+          "v": 1
+        },
+        "setup": {
+          "format": "harflow.setup",
+          "v": 1
+        }
+      },
+      "format": "harflow.version-info",
+      "os": "darwin",
+      "product": "harflow",
+      "product_version": "0.0.7",
+      "state_root": "<isolated-root>/state",
+      "v": 1
+    },
+    "exit_code": 0
+  },
+  "version_info": {
+    "document": {
+      "architecture": "arm64",
+      "capabilities": [
+        "workflow-shared-interactions.v1",
+        "interaction-events.v1",
+        "workflow-attention-checkpoints.v1",
+        "phase-slots.v1",
+        "ctl.v1",
+        "setup.v1",
+        "events.v1",
+        "version-info.v1",
+        "state-recovery.v1",
+        "caller-approvals.monitor-respond.v1",
+        "statistics-page.v1",
+        "backend-qualification.v1",
+        "messaging.v1",
+        "limit-hits.v1",
+        "workflow-limit-hits.v1"
+      ],
+      "component": "engine",
+      "contracts": {
+        "ctl": {
+          "format": "harflow.ctl",
+          "v": 1
+        },
+        "events": {
+          "format": "harflow.event",
+          "v": 1
+        },
+        "setup": {
+          "format": "harflow.setup",
+          "v": 1
+        }
+      },
+      "format": "harflow.version-info",
+      "os": "darwin",
+      "product": "harflow",
+      "product_version": "0.0.7",
+      "state_root": "<isolated-root>/state",
+      "v": 1
+    },
+    "exit_code": 0
+  },
+  "version_info_comparison": {
+    "equal_except_state_root": true
+  }
+}
