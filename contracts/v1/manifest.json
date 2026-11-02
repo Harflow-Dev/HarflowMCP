@@ -466,42 +466,42 @@
     },
     "ctl-limit-hits-ready.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-limit-hits-empty.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-limit-hits-preparing.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-workflow-limit-hits-ready.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-workflow-limit-hits-empty.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-workflow-limit-hits-preparing.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.6",
+      "expected_product_version": "0.0.7",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
@@ -1089,12 +1089,12 @@
     "ctl-messaging-queued.json": "6950e16c2872fa6cf1165ee7ee90804a3d4ba2cadbfbb0cc221319f4a54ccc23",
     "ctl-workflow-messages.json": "c59fe9c78bdff72687feea8820667c356d6452bd086c25b8c9a5d9b7320e8543",
     "ctl-workflow-monitor-controls.json": "c3f3ad60ad44ebafa6271dd8e870979f398181820773084a09262866205d37b8",
-    "ctl-limit-hits-ready.json": "5129316f036ffe6b563021029e15b0a129f9015ab3fe099888f4aca25c101fc8",
-    "ctl-limit-hits-empty.json": "b5d8b346b04d0953eeba7bcab621515c340ca35b75e6296c050c5d4da29bd3bd",
-    "ctl-limit-hits-preparing.json": "8707b918d1b2aa7115a24a9081a9d6f1cc3002ff17dc9fbac9c24a93e21eb02f",
-    "ctl-workflow-limit-hits-ready.json": "d0468a24e1680a4a948ad36804af9ad1cb980110dabc3481d60b1b57ed970fa2",
-    "ctl-workflow-limit-hits-empty.json": "873e1cb53610d4e3fbd95c332dfd8c2993d290627f207c0adb42c9ecbfff978d",
-    "ctl-workflow-limit-hits-preparing.json": "5d6a5acdfe7dc7a8a239f122ceabb6116b736e5f67b96e04be10fdace435b722",
+    "ctl-limit-hits-ready.json": "67ecc44bf483d53e5c94955ef6d7ee342fdbf41c310d14803c311b9521e4fb92",
+    "ctl-limit-hits-empty.json": "7f61f73763795056448455f49feab63a926082f8db1d3e54469cb712547680c2",
+    "ctl-limit-hits-preparing.json": "70ac063f0dec1807ff8e39c3fdfe560e861fa5710099fc25ee1c8acdb74e8554",
+    "ctl-workflow-limit-hits-ready.json": "d81d429d853cea8d6dc97281c197768482e2566a28ea12ce180f10c2ae98ed04",
+    "ctl-workflow-limit-hits-empty.json": "82d42765f26fe070d048d8240032456a51c1855da66382dcaef9df3f41768ba2",
+    "ctl-workflow-limit-hits-preparing.json": "e55023f81cfa5634d042dfc8bf3a8ca24b97584293ae0c235e1fd899f18d1f3f",
     "ctl-phase-slot-held.json": "f716caf97a6a56df188a1907f24424dab0f771cfd35c7d3dca5a8f08f7efdfd5",
     "ctl-phase-slot-queued.json": "96896e44fac13df13c6d17fe55a69f7118cff8a9039897e0e5606eb19ff86505",
     "ctl-phase-slot-cleanup-uncertain.json": "85282f43120d938f2296d918a6ff4c4c1d97f55ea22fcb639b6ee4ca5911394e",
