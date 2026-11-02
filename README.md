@@ -72,6 +72,10 @@ requests refuse the answer and grants; refresh and review before resubmitting.
 Questions retain their decision-ID path. See [checkpoint contracts](docs/contracts.md#workflow-attention-checkpoints).
 
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
+If a decision cannot be encoded for persistence, scheduling stops with `needs_attention`
+and an error in `attention_reason`. After correcting the cause, resume the run to retry the
+retained decision. An interrupted active run with a confirmed-dead scheduler instead uses
+`recover_workflow`; see [workflow recovery](docs/workflows.md).
 Task status distinguishes the dispatching server, execution owner and responding server.
 A normal attachment to a task launched by this server is not recovered; another observer or missing
 identity is explained explicitly. Detail reads separately report dispatcher liveness, and routine

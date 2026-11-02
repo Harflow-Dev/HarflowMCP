@@ -1701,3 +1701,107 @@ async def test_reasked_caller_question_has_new_identity_and_authored_items(stora
 def test_authored_question_items_refuse_malformed_values(items):
     with pytest.raises(w.WorkflowError, match='question_items'):
         d.validate_question_items(items)
+
+
+@pytest.mark.parametrize("historical", [False, True])
+async def test_candidate_encoding_failure_suspends_and_reuses_settled_decision(storage, tmp_path, monkeypatch, historical):
+    from harflow_mcp import workflow_run_documents as documents
+    original = documents.encode
+    failures = []
+    launches = []
+    monkeypatch.setattr(w, "_launch", lambda *args: launches.append(args))
+    def fail_acceptance(run):
+        if any(a.get('decision_disposition') == 'accepted' for a in run['activations']):
+            failures.append(run['sequence'])
+            raise documents.WorkflowRunDocumentError(run['workflow_run_id'], 'deterministic candidate defect')
+        return original(run)
+    monkeypatch.setattr(documents, 'encode', fail_acceptance)
+    run, registry = await run_flow(storage, tmp_path)
+    assert run['status'] == 'needs_attention'
+    assert len(failures) == 1
+    assert launches == []
+    assert 'deterministic candidate defect' in run['attention_reason']
+    activation = run['activations'][-1]
+    assert not activation.get('decision_disposition')
+    assert activation['tasks'][-1]['status'] == 'completed'
+    decision_id = activation['decision_id']
+    assert len(registry.contexts) == 1
+    monkeypatch.setattr(documents, 'encode', original)
+    if historical:
+        # An old engine left this same settled control turn running/deciding.
+        storage.update_run(run['workflow_run_id'], lambda r: r.update(status='running', supervisor_pid=99999999, supervisor_identity={'pid': 99999999, 'start_time': 'dead', 'markers': []}), 'historical_stuck_scheduler')
+        from harflow_mcp import identity
+        check = identity.identity_check
+        monkeypatch.setattr(identity, 'identity_check', lambda owner: 'dead' if owner and owner.get('pid') == 99999999 else check(owner))
+        storage.control(run['workflow_run_id'], 'recover', instructions='Engine corrected; recover retained decision')
+    else:
+        storage.control(run['workflow_run_id'], 'resume')
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    final = storage.get_run(run['workflow_run_id'])
+    assert final['status'] == 'completed', final.get('attention_reason')
+    assert sum(c['decision_id'] == decision_id for c in registry.contexts) == 1
+
+
+@pytest.mark.parametrize("historical", [False, True])
+async def test_planning_registered_artifact_persists_through_authorized_assignment(storage, tmp_path, monkeypatch, historical):
+    from harflow_mcp import artifacts, store, identity
+    registered = []
+    def policy(context, registry):
+        decision = default_decision(context, registry)
+        items = (context.get('artifact_references') or {}).get('items', [])
+        for entry in decision.get('next', []):
+            if entry.get('prompt') and items:
+                entry['artifact_refs'] = [{k: items[0][k] for k in ('execution_id', 'artifact_id')}]
+        return decision
+    class ArtifactRegistry(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if kwargs['title'].endswith(' · plan'):
+                record = store.read(self._log_dir, task.task_id)
+                record = replace(record, status='running', repo_path=str(tmp_path.parent))
+                store.write(self._log_dir, record)
+                # Exercise the real registration producer, with caller identity
+                # supplied by the fake registry rather than an agent process.
+                with monkeypatch.context() as patch:
+                    patch.setattr(artifacts, '_caller', lambda logs: record)
+                    patch.setattr(artifacts, '_read_owner', lambda logs, task_id: record)
+                    patch.setattr(identity, 'identity_check', lambda value: 'alive')
+                    target = tmp_path.parent / (tmp_path.name + '-plan.txt')
+                    target.write_text('Plan evidence')
+                    registered.append(artifacts.register(self._log_dir, str(target), 'report', 'Planning output'))
+                record = replace(record, status='completed')
+                store.write(self._log_dir, record)
+            return task
+    definition = graph()
+    definition['nodes'].insert(1, {'id': 'plan', 'type': 'agent', 'role': 'planning', 'instructions': 'Plan', 'agent': {'backend': 'codex'}})
+    definition['connections'][0]['target'] = 'plan'
+    definition['connections'].insert(1, {'id': 'planned', 'source': 'plan', 'target': 'work'})
+    registry = ArtifactRegistry(storage.root, policy=policy, outputs={'plan': {'status': 'succeeded', 'result': {'technical_plan': '# Plan\nDo the work.', 'tasks': [], 'no_checklist_needed': True, 'checklist_reason': 'Small task'}, 'evidence': []}})
+    from harflow_mcp import workflow_run_documents as documents
+    original_encode = documents.encode
+    if historical:
+        def old_encoder(run):
+            if any(assignment.get('authorized_artifact_refs') for token in run['pending'] for assignment in token.get('assignments', {}).values()):
+                raise documents.WorkflowRunDocumentError(run['workflow_run_id'], 'registered_at requires number')
+            return original_encode(run)
+        monkeypatch.setattr(documents, 'encode', old_encoder)
+    run, registry = await run_flow(storage, tmp_path, definition, registry)
+    if historical:
+        assert run['status'] == 'needs_attention'
+        retained_id = run['activations'][-1]['decision_id']
+        monkeypatch.setattr(documents, 'encode', original_encode)
+        storage.update_run(run['workflow_run_id'], lambda r: r.update(status='running', supervisor_pid=99999999, supervisor_identity={'pid': 99999999, 'start_time': 'dead', 'markers': []}), 'historical_artifact_checkpoint')
+        check = identity.identity_check
+        monkeypatch.setattr(identity, 'identity_check', lambda owner: 'dead' if owner and owner.get('pid') == 99999999 else check(owner))
+        storage.control(run['workflow_run_id'], 'recover', instructions='Corrected timestamp encoder; reuse settled decision')
+        await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+        run = storage.get_run(run['workflow_run_id'])
+        assert sum(c['decision_id'] == retained_id for c in registry.contexts) == 1
+    assert run['status'] == 'completed', run.get('attention_reason')
+    worker = next(a for a in run['activations'] if a['node_id'] == 'work' and a['role'] == 'node')
+    ref = worker['authorized_artifact_refs'][0]
+    assert ref['registered_at'] == registered[0]['registered_at']
+    assert ref['artifact_id'] == registered[0]['artifact_id']
+    prompt = next(p for p, kw in registry.calls if kw['title'].endswith(' · work'))
+    assert ref['artifact_id'] in prompt
+    assert ref['path'] in prompt

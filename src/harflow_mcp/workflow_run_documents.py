@@ -35,6 +35,10 @@ class WorkflowRunDocumentError(Exception):
         return result
 
 
+class WorkflowRunCandidateError(WorkflowRunDocumentError):
+    """An unpublished mutation candidate failed encoding; stored authority is intact."""
+
+
 def identifier(value: Any) -> str:
     if type(value) is not str or not _IDENTIFIER.fullmatch(value):
         raise ValueError("Invalid workflow run identifier")
@@ -261,8 +265,23 @@ def _context(value, path):
     _shape(value, {**receipt, "receipt": _object(receipt), "ack": _object(receipt), "accounting": _object(receipt), "sections": _map(_object({"bytes": _counter, "characters": _counter})), "context_fields": _map(_object({"bytes": _counter, "characters": _counter})), "section_state": _map(_object({**_fields("digest mode", counters="revision source_bytes source_characters delivered_bytes delivered_characters length")})), "section_delivery": _map(_object({**_fields("digest mode", counters="revision source_bytes source_characters delivered_bytes delivered_characters length")})), "compatibility_reasons": _array(str), "role": str, "session_mode": str, "classification": str}, path)
 
 
+def _artifact_timestamp(value, path):
+    if type(value) in NUMBER:
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError(f"{path} must be finite")
+        return
+    if type(value) is str:
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.utcoffset() is not None and "T" in value:
+                return
+        except ValueError:
+            pass
+    raise ValueError(f"{path} must be an ISO timestamp or finite historical number")
+
+
 def _artifact(value, path):
-    _shape(value, {**_fields("execution_id artifact_id owner_task_id workflow_run_id node_id kind path note availability_at_assignment attribution", numbers="registered_at", booleans="inherited"), "registered_observation": dict}, path)
+    _shape(value, {**_fields("execution_id artifact_id owner_task_id workflow_run_id node_id kind path note availability_at_assignment attribution", booleans="inherited"), "registered_at": _artifact_timestamp, "registered_observation": dict}, path)
     for key in ("owner_task_id", "workflow_run_id"):
         if key in value:
             identifier(value[key])

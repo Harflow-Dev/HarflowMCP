@@ -1154,7 +1154,22 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                     for update in decision.get("task_updates", []):
                         item = next(x for x in r["tasks"] if x["id"] == update["task_id"])
                         item.update(status=update["status"], reason=update["reason"], completed_by_activation_id=completion_sources.get(update["task_id"]), status_decision_activation_id=activation["id"], status_changed_at=time.time())
-                accepted = supervisor.update(accept, "decision_accepted", decision)
+                try:
+                    accepted = supervisor.update(accept, "decision_accepted", decision)
+                except w.WorkflowRunCandidateError as exc:
+                    # Start from qualified durable state; retain the settled turn.
+                    message = "Decision persistence failed; resume after correcting the engine: " + str(exc)[:2048]
+                    def suspend(r: dict[str, Any]) -> None:
+                        t = next((t for t in r["pending"] if t["id"] == token["id"]), None)
+                        a = next((a for a in r["activations"] if a["id"] == activation["id"]), None)
+                        if (r["status"] == "running" and t and a and
+                                t.get("decision_id") == activation["decision_id"] and
+                                t.get("decision_activation_id") == activation["id"] and
+                                r.get("goal_revision") == activation.get("decision_goal_revision") and
+                                not a.get("decision_disposition")):
+                            r.update(status="needs_attention", attention_reason=message)
+                    supervisor.update(suspend, "decision_persistence_failed", message)
+                    return None
                 if not supervisor.tree.tree_running(accepted):
                     return None
                 return selected if decision["action"] == "continue" and not any(key.startswith(("retry:", "recover:", "recover_child:", "skip_optional:")) for key in assignments) else None

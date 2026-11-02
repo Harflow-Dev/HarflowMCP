@@ -32,7 +32,7 @@ from typing import Any
 from .workflow_definition_documents import WorkflowDefinitionDocumentError
 from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .bounded_io import ReadLimit
-from .workflow_run_documents import WorkflowRunDocumentError
+from .workflow_run_documents import WorkflowRunDocumentError, WorkflowRunCandidateError
 from . import backends, store as task_store
 from .workflow_completion import qualified_finished_at, TERMINAL_METADATA_STATUSES
 
@@ -1373,7 +1373,10 @@ class WorkflowStore:
             run.pop("can_cancel_from_monitor", None)
             run.pop("monitor_cancel_reason", None)
             from .workflow_run_documents import encode
-            document = encode(run)
+            try:
+                document = encode(run)
+            except (WorkflowRunDocumentError, ValueError, TypeError) as exc:
+                raise WorkflowRunCandidateError(run_id, str(exc)) from exc
             from .workflow_receipt_documents import encode as encode_receipt
             from .workflow_receipt_io import observe, check_source
             receipts = {}

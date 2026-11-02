@@ -1155,6 +1155,19 @@ settle its active dispatches, then records `needs_attention` with the cancellati
 not repeatedly relaunch the failed cancellation supervisor. Existing task records remain
 available for reconciliation; uncertain dispatches cannot be resumed or repeated.
 
+If a decision's candidate run document fails encoding before publication, scheduling stops
+after the first failure with `needs_attention`; `attention_reason` contains the persistence
+error. The rejected candidate changes no assignments or selected connections on disk, and
+the completed orchestrator turn is retained. Correct the engine or other underlying cause,
+then use `resume_workflow` to retry acceptance without repeating that completed turn. Other
+live or uncertain dispatches must still settle before resume. Refused stored documents and
+ownership receipts remain separate errors and are never repaired by this path.
+
+A run left `running` / `deciding` by an earlier supervisor crash can use `recover_workflow`
+once the scheduler is confirmed dead and linked ownership is qualified. After the timestamp
+validation correction, its retained artifact-authorizing decision can persist and continue;
+cancelling the run or editing its state files is unnecessary.
+
 Explicit `recover_workflow` requires a nonempty reason. For a failed, settled run it returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
 It also recovers an interrupted nonterminal root whose scheduler is confirmed dead and whose

@@ -121,6 +121,18 @@ Explicit delegation graph migration reads qualified definitions and writes quali
 
 ## Workflow run documents
 
+Selected artifact references preserve the artifact manifest's timezone-aware ISO-8601
+`registered_at` string throughout assignments, execution tokens and inherited child inputs.
+Finite numeric timestamps accepted by earlier run writers remain readable without conversion;
+new registrations continue to use ISO strings. This private validation correction changes no
+public wire envelope or capability.
+
+An unpublished mutation candidate that cannot be encoded is distinguished internally from a
+refused stored source or ownership receipt. Decision acceptance stops on the first such
+deterministic candidate failure, recording `needs_attention` and the error in `attention_reason`
+against the last qualified run. The completed control turn remains available for continuation.
+Stored-source, receipt and post-publication failures retain their existing refusal behavior.
+
 Files in `workflow-runs/<workflow_run_id>.json` contain `product: "harflow"`, `format: "harflow.workflow.run"`, exact integer `v: 1`, the writer's `product_version`, and an inner `run` object. The registered storage-line policy above applies; same-line patches and build metadata are compatible, while prereleases are refused. The inner run ID must exactly match the filename before it can select locks, lineage, sessions, ownership or controls. Public get, status and list results continue to expose the inner run payload.
 
 Qualification checks the common identity and traversal containers and every supplied known authority field, including process identity, nested attempts, native settlement flags, parent links, session bindings, grants, recovery, goals and notification points. Booleans are not integers and numeric values must be finite. Unknown additive JSON fields survive. Embedded authored definitions, builder drafts, candidate/config snapshots and graph hashes retain their existing meaning; reading does not migrate graphs or apply current authoring budgets to historical goal history. Embedded caller records use task payload qualification, while native attempts and stored result snapshots remain their own shapes. Existing permission, relationship, nonce, digest and backend certification checks still apply separately.

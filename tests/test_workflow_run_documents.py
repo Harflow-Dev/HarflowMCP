@@ -1232,3 +1232,27 @@ def test_task_snapshot_preserves_followup_object_and_nullable_unavailable_count(
         unavailable = task_store.snapshot(log_dir, task_store.read(log_dir, record.task_id))
         assert unavailable["queued_followups"]["state"] == "unavailable"
         assert unavailable["queued_followup_count"] is None
+
+
+@pytest.mark.parametrize('stamp', ['2026-10-01T00:00:00+00:00', 1727740800, 1727740800.5])
+def test_artifact_timestamp_round_trip(run_document, stamp):
+    run_document['invocation_artifact_refs'] = [{'registered_at': stamp}]
+    assert documents.decode(documents.encode(run_document), run_document['workflow_run_id'])['invocation_artifact_refs'][0]['registered_at'] == stamp
+
+
+@pytest.mark.parametrize('stamp', ['now', '2026-10-01', '2026-10-01T00:00:00', True, float('nan')])
+def test_artifact_timestamp_refuses_invalid_values(run_document, stamp):
+    run_document['invocation_artifact_refs'] = [{'registered_at': stamp}]
+    with pytest.raises(documents.WorkflowRunDocumentError):
+        documents.encode(run_document)
+
+
+def test_candidate_failure_does_not_publish_run_or_events(store_and_run):
+    storage, run = store_and_run
+    rid = run['workflow_run_id']
+    before = {p: p.read_bytes() for p in storage.runs.iterdir() if p.is_file()}
+    with pytest.raises(documents.WorkflowRunCandidateError) as error:
+        storage.update_run(rid, lambda r: r.update(invocation_artifact_refs=[{'registered_at': 'invalid'}]), 'invalid_candidate')
+    assert not error.value.published
+    assert all(p.read_bytes() == content for p, content in before.items())
+    assert storage.get_run(rid)['sequence'] == run['sequence']
