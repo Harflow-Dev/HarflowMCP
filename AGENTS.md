@@ -300,3 +300,5 @@ messages, and errors that say what to do instead of just what failed.
 - Wait defaults stay short because a client's request deadline is not discoverable. An explicit
   `timeout_seconds` up to 3600, or `until="terminal"`, is honoured as asked, never clamped. Waits
   are read-only and resumable, and never write, signal or resume (`wait_policy.py`).
+
+Migration work: see [docs/migration-plan.md](docs/migration-plan.md).
