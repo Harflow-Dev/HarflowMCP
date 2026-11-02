@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.7
+
 - Support qualified Vibe 3.0.3 ACP caller approvals, exact command grants, configured-model selection and start/resume lifecycle; retain structured refusal reasons and permission scopes without rewriting native policy lists (#35, #39).
 
 - Observe up to eight worktree roots per task using explicit `observe_repos` and structured command/edit discovery; retain original dispatch heads, branch-change comparison provenance, local-ref freshness limits and correlated publication command evidence (#24). Git observation schema v2 remains additive inside public wire v1.
@@ -9,6 +11,8 @@
 
 - Allow qualified caller and human Monitor responders to share workflow questions, recovery, goal revision and messages without transferring ownership; persist the first winning answer and return it to late responders (#102).
 - Add a read-only retained interaction event feed for native notifications covering pending requests, answers and observed task completion/failure.
+
+- Preserve artifact decision payloads across workflow persistence and stop supervisor retry loops after invalid decision data.
 
 ## 0.0.6
 
