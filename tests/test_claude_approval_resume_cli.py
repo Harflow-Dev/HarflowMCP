@@ -39,7 +39,7 @@ def _resume_api(first_command: str, second_command: str):
         # A tool result after the latest user prompt means Claude is ready to finish.
         latest_user = max((index for index, message in enumerate(body.get("messages", [])) if message.get("role") == "user"), default=-1)
         has_current_result = any(
-            index > latest_user and message.get("role") == "user"
+            index >= latest_user and message.get("role") == "user"
             and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in (message.get("content") or []))
             for index, message in enumerate(body.get("messages", []))
         )
