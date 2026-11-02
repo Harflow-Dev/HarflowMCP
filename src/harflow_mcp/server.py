@@ -550,8 +550,9 @@ async def start_task(
             depends on the backend; the returned `enforcement` says what actually applies, via
             `local_commit`, `publish_attempts_allowed` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
-            silently ignored, on a backend with no model-selection flag at all — vibe is the one
-            such case; see list_backends' capabilities.supports_model_selection.
+            silently ignored, when model selection is unsupported. Vibe accepts a configured
+            model alias through its qualified ACP transport and verifies the selected alias;
+            see list_backends' capabilities.supports_model_selection.
         background_idle_seconds: Optional finite positive live-input background wait bound,
             at most 21600 seconds. Capped/classic runs do not use live-input idle waiting.
             Continuations inherit the saved effective bound unless overridden.
@@ -568,8 +569,9 @@ async def start_task(
             list_backends' per-backend reasoning_effort caveats for what is and is not known there.
         caller_approvals: Opt in to version-qualified exact-action caller decisions: Bash, plus Read
             on Claude Code 2.1.310 (approving a Read can disclose files outside the repository).
-            Only uncapped non-native Claude Code write_in_repo/publish on a measured version is
-            supported (see list_backends caller_approval_support). Defaults off;
+            Qualified Codex app-server and Vibe ACP transports also support exact-action decisions;
+            supported tools, freedoms, caps and platforms are in list_backends caller_approval_support.
+            Defaults off;
             worker self-approval is prohibited. Decisions do not override saved policy or grant
             reusable access. Inspect list_approval_requests and get_approval_request before responding.
         caller_write_approvals: Additionally allow Write and Edit requests (including outside the
@@ -633,8 +635,8 @@ async def start_task(
             HTTPS credentials, sandbox access and reachability remain external requirements.
         allowed_commands: Optional list of Bash command patterns granted for this run only, so a task can run
             specific commands (a test runner, a build) without `unrestricted`. At most 16 patterns, 256 bytes
-            each and 2048 in total. Supported on Claude Code at write_in_repo and publish (see list_backends
-            capabilities.allowed_commands); every other backend and access level refuses the request. Each
+            each and 2048 in total. Supported on qualified Claude Code and Vibe ACP at write_in_repo and publish
+            (see list_backends capabilities.allowed_commands); other backends and access levels refuse it. Each
             pattern is a lowercase program followed by literal tokens, with at most one `*` as the final
             token or the `:*` suffix (`pytest` style: `python3 -m pytest:*`), and a wildcard needs a literal
             subcommand or target (`make test:*`). A pattern with no wildcard is exact and matches one command
@@ -987,7 +989,7 @@ async def preview_task_permissions(
     concrete canonical group folder (group is required or inherited). No folder is allocated.
     This excludes caller approvals, native children and extra writable grants.
 
-    allowed_commands is validated exactly as in start_task (grammar, installed Claude Code version,
+    allowed_commands is validated exactly as in start_task (grammar, installed backend version,
     nested-subset cap) and the returned enforcement lists it as extra_allowed_commands.
     branch, base and fetch are validated the same way as start_task and shown as dispatch_git
     without running Git.

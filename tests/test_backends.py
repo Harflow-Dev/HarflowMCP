@@ -17,6 +17,13 @@ def isolated_codex_configuration(tmp_path, monkeypatch):
     # Enforcement reads inherited writable roots; these unit cases use a clean config.
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-config"))
 
+@pytest.fixture(autouse=True)
+def isolated_vibe_protocol_qualification(monkeypatch):
+    # Invocation-shape unit tests do not probe or write the user's qualification store.
+    from harflow_mcp.backends import vibe_acp, vibe_qualification
+    monkeypatch.setattr(vibe_qualification, "qualify", lambda *_: "3.0.3")
+    monkeypatch.setattr(vibe_acp, "runtime_identity", lambda *args: {"launcher": "/fixture/vibe-acp", "files": []})
+
 from harflow_mcp import backends
 from harflow_mcp.backends import (
     STDIN_PIPE,
@@ -503,7 +510,11 @@ def test_model_is_optional_and_passed_through(backend) -> None:
     if not backend.capabilities.supports_model_selection:
         pytest.skip(f"{backend.name} has no model-selection flag at all")
     assert "sonnet" not in " ".join(start(backend))
-    assert "sonnet" in " ".join(start(backend, model="sonnet"))
+    selected = start_invocation(backend, model="sonnet")
+    if selected.control_pipe:
+        assert selected.control_context["model"] == "sonnet"
+    else:
+        assert "sonnet" in " ".join(selected.argv)
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -519,7 +530,7 @@ def test_a_backend_with_no_model_selection_refuses_a_model_rather_than_dropping_
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 def test_supports_model_selection_matches_what_was_actually_measured(backend) -> None:
-    expected = backend.name != "vibe"
+    expected = True
     assert backend.capabilities.supports_model_selection is expected
 
 
@@ -529,8 +540,10 @@ def test_reject_model_passes_none_through_regardless_of_capability() -> None:
 
 
 def test_reject_model_refuses_a_model_on_a_backend_that_declares_it_cannot() -> None:
+    backend = VibeBackend()
+    backend.capabilities = backend.capabilities._replace(supports_model_selection=False)
     with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
-        backends.reject_model(VibeBackend(), "mistral-medium")
+        backends.reject_model(backend, "mistral-medium")
 
 
 def test_reject_model_is_fine_where_supported() -> None:
@@ -2490,11 +2503,12 @@ def test_vibe_refuses_reasoning_effort_at_every_level_on_start_and_resume(level:
         resume(VibeBackend(), reasoning_effort=level)
 
 
-def test_vibe_refuses_a_model_at_start_and_resume() -> None:
-    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
-        start(VibeBackend(), model="mistral-medium")
-    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
-        resume(VibeBackend(), model="mistral-medium")
+def test_vibe_carries_model_in_qualified_acp_context_at_start_and_resume() -> None:
+    for invocation in (start_invocation(VibeBackend(), model="mistral-medium"),
+                       resume_invocation(VibeBackend(), model="mistral-medium")):
+        assert invocation.control_pipe
+        assert invocation.control_context["model"] == "mistral-medium"
+        assert "mistral-medium" not in invocation.argv
 
 
 

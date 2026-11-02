@@ -128,8 +128,8 @@ async def test_list_backends_describes_every_one(monkeypatch) -> None:
     assert by_name["opencode"]["capabilities"]["os_sandbox"] is False
     assert by_name["opencode"]["capabilities"]["reports_cost_usd"] is True
     assert by_name["claude"]["capabilities"]["os_sandbox"] is False
-    # vibe is the one backend with no model-selection flag at all, and no reasoning effort control.
-    assert by_name["vibe"]["capabilities"]["supports_model_selection"] is False
+    # Vibe selects configured model aliases through qualified ACP; effort stays unsupported.
+    assert by_name["vibe"]["capabilities"]["supports_model_selection"] is True
     assert by_name["claude"]["capabilities"]["supports_model_selection"] is True
     assert by_name["codex"]["capabilities"]["supports_model_selection"] is True
     assert by_name["opencode"]["capabilities"]["supports_model_selection"] is True
@@ -205,9 +205,12 @@ async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path)
 
 
 @pytest.mark.usefixtures("fake_backend_clis")
-async def test_model_on_vibe_fails_rather_than_being_ignored(git_repo: Path) -> None:
-    """vibe has no model-selection flag at all — a silent no-op is exactly what this repo forbids."""
-    with pytest.raises(MCPError, match="no model selection flag"):
+async def test_model_on_unqualified_vibe_fails_before_task_creation(git_repo: Path, monkeypatch) -> None:
+    from harflow_mcp.backends import vibe_qualification
+    def refuse(*_):
+        raise backends.UnsupportedCapability("unqualified Vibe version")
+    monkeypatch.setattr(vibe_qualification, "qualify", refuse)
+    with pytest.raises(MCPError, match="unqualified Vibe version"):
         await call(
             "start_task", prompt="x", repo_path=str(git_repo), backend="vibe",
             model="mistral-medium",
@@ -215,18 +218,23 @@ async def test_model_on_vibe_fails_rather_than_being_ignored(git_repo: Path) -> 
     assert (await call("list_tasks")).structured_content["result"] == []
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_model_on_vibe_resume_surfaces_as_invalid_params_not_an_internal_error(
-    fake_task: Task,
+    fake_task: Task, monkeypatch,
 ) -> None:
     """Exercises the resume_task except block: build_resume_argv raises UnsupportedCapability from
     inside the argv builder, which must surface as INVALID_PARAMS, not an unhandled tool failure."""
+    from harflow_mcp.backends import vibe_qualification
+    def refuse(*_):
+        raise backends.UnsupportedCapability("unqualified Vibe version")
+    monkeypatch.setattr(vibe_qualification, "qualify", refuse)
     fake_task.backend = "vibe"
     fake_task.model = "mistral-medium"
     fake_task.status = "completed"
     fake_task.done.set()
     server._reg().persist(fake_task)
 
-    with pytest.raises(MCPError, match="no model selection flag"):
+    with pytest.raises(MCPError, match="unqualified Vibe version"):
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
 
 

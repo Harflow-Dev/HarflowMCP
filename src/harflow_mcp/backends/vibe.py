@@ -101,19 +101,14 @@ behavior. See docs/backend-cli-facts.md for current and historical qualification
   sets — so `per_command_deny=False`, `commit_push_blocked=False`,
   `direct_commit_commands_denied=False`.
 
-**Why model and reasoning effort are unsupported**
-vibe has no `--model` flag and no effort flag at all — both are config-only
-(`[[models]].thinking`, vocabulary `off/low/medium/high/max`). Resolving either safely would require
-reading vibe's config-layer precedence (lowest to highest: schema defaults, GrowthBook experiments,
-user TOML, **project TOML** (outranks the user's own, and `--trust` honours it), `VIBE_*` env vars,
-runtime overrides, **agent-profile overrides** (always in effect here, since `--agent` is always
-passed), enforced admin config) — several of which outrank an env override and are not inspectable
-from here. A silent no-op — the override landing on the wrong model, or being overridden by a layer
-harflow_mcp cannot see — is exactly the failure mode this repo exists to prevent, so both are refused
-outright (`supports_model_selection=False`,
-`reasoning_effort=ReasoningEffort(accepts_parameter=False, ...)`) rather than attempted unsafely. A
-faithful effort translation, if this is ever revisited, is `low->low, medium->medium, high->high,
-xhigh->max` — vibe's own OpenAI-responses backend maps its `max` to `xhigh`.
+**ACP models and permissions**
+Explicit configured-model aliases, caller approvals and command grants use the
+qualified Vibe 3.0.3 ACP protocol, which reports the selected model/mode before
+prompting. Ordinary option-free launches retain the measured programmatic path.
+The ACP implementation lives in vibe_acp.py; it verifies the actual Python
+launcher/runtime separately from the Rust headless CLI. Reasoning-effort overrides
+remain unsupported: no qualified per-request translation has been established.
+
 """
 
 from __future__ import annotations
@@ -124,6 +119,7 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any
+from dataclasses import replace
 
 from . import normalize as nz
 from .mcp_approval import VibeApproval
@@ -401,7 +397,7 @@ class VibeBackend(ExtraPathsUnsupported):
         reports_cost_usd=False,
         os_sandbox=False,
         per_command_deny=False,
-        supports_model_selection=False,
+        supports_model_selection=True,
         reasoning_effort=ReasoningEffort(
             accepts_parameter=False,
             levels=(),
@@ -416,6 +412,7 @@ class VibeBackend(ExtraPathsUnsupported):
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
         supports_live_input=False,
+        supports_caller_approvals=True,
     )
 
     def build_start_argv(
@@ -434,11 +431,18 @@ class VibeBackend(ExtraPathsUnsupported):
             raise ValueError("vibe mints its own session id; one cannot be supplied")
         argv = [
             BINARY,
-            *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
+            *self._options(repo, freedom, None, max_turns, reasoning_effort, network),
         ]
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
         invocation = self._prompt_invocation(argv, prompt)
+        if model is not None:
+            from .vibe_qualification import qualify
+            from .vibe_acp import prepare
+            version = qualify(self, "model_selection")
+            parts = self._acp_parts(invocation)
+            parts["model"] = model
+            invocation = prepare(invocation, parts, freedom, version)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -458,10 +462,17 @@ class VibeBackend(ExtraPathsUnsupported):
             raise ValueError("resuming vibe needs the session id its first run reported")
         argv = [
             BINARY,
-            *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
+            *self._options(repo, freedom, None, max_turns, reasoning_effort, network),
         ]
         argv += ["--resume", session_id]
         invocation = self._prompt_invocation(argv, prompt)
+        if model is not None:
+            from .vibe_qualification import qualify
+            from .vibe_acp import prepare
+            version = qualify(self, "model_selection")
+            parts = self._acp_parts(invocation)
+            parts["model"] = model
+            invocation = prepare(invocation, parts, freedom, version)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -510,8 +521,19 @@ class VibeBackend(ExtraPathsUnsupported):
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.control_pipe:
+            from .vibe_acp import assert_safe
+            check_freedom(freedom)
+            check_network(self, freedom, network)
+            problem = assert_safe(invocation, freedom)
+            if problem:
+                raise UnsafeInvocationError(problem)
+            if invocation.allowed_commands:
+                from .vibe_commands import assert_safe as assert_commands
+                assert_commands(invocation, freedom)
+            return
         if isinstance(invocation, Invocation) and invocation.allowed_commands:
-            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
+            raise UnsupportedCapability("Vibe command grants require qualified ACP transport")
         if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
             raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # One-shot stdin is closed after delivery, never a live conversation pipe.
@@ -679,7 +701,178 @@ class VibeBackend(ExtraPathsUnsupported):
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),
         )
 
+    def qualification_version(self, observed):
+        from .vibe_qualification import parse_version
+        return parse_version(observed)
+
+    def qualification_features(self):
+        from .vibe_qualification import feature_specs
+        return feature_specs()
+
+    def caller_approval_support(self):
+        from .vibe_acp import support
+        return support()
+
+    def validate_caller_approvals(self, enabled, freedom, max_turns, native=False):
+        from .vibe_acp import validate
+        validate(enabled, freedom, max_turns, native)
+
+    def qualify_caller_approvals(self):
+        from .vibe_qualification import qualify
+        return qualify(self, "caller_approval_tools")
+
+    def validate_caller_write_approvals(self, write, enabled, version=None):
+        if type(write) is not bool:
+            raise ValueError("caller_write_approvals must be a boolean")
+        if write and not enabled:
+            raise ValueError("caller_write_approvals requires caller_approvals")
+        if write and version not in (None, "3.0.3"):
+            raise UnsupportedCapability("Vibe write approvals require qualified Vibe 3.0.3")
+
+    def _acp_parts(self, invocation):
+        if invocation.control_pipe:
+            ctx = invocation.control_context or {}
+            return {"repo": ctx["cwd"], "prompt": ctx["prompt"], "session_id": ctx.get("session_id"),
+                    "model": ctx.get("model"), "max_turns": ctx.get("max_turns")}
+        seen = self._parse_options(invocation.argv[1:-1], invocation.argv)
+        prompt = invocation.argv[-1].removeprefix("--prompt=")
+        if invocation.stdin_mode == "pipe_once":
+            prompt = invocation.initial_input.decode("utf-8")
+        return {"repo": self._exactly_one(seen, "--workdir", invocation.argv), "prompt": prompt,
+                "session_id": next(iter(seen.get("--resume", [])), None), "model": None,
+                "max_turns": int(seen["--max-turns"][0]) if "--max-turns" in seen else None}
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns, version=None, write=False):
+        from .vibe_acp import prepare
+        return prepare(invocation, self._acp_parts(invocation), freedom, version, write, caller_approvals=True)
+
+    def allowed_commands_support(self):
+        from .vibe_commands import GRAMMAR
+        return {"supported": True, "versions": ["3.0.3"], "platforms": ["darwin"],
+                "transport": "vibe-acp", "freedoms": ["write_in_repo", "publish"], "grammar": GRAMMAR,
+                "reason": "Exact native approval requests are answered once; native deny policies remain effective."}
+
+    def validate_allowed_commands(self, patterns, freedom, repo):
+        if patterns:
+            from .vibe_commands import validate_all
+            validate_all(patterns, freedom, repo)
+
+    def qualify_allowed_commands(self):
+        from .vibe_qualification import qualify
+        return qualify(self, "allowed_commands")
+
+    def configure_allowed_commands(self, invocation, patterns, freedom, repo, version=None):
+        if not patterns:
+            return invocation
+        from .vibe_commands import configure
+        from .vibe_acp import prepare
+        parts = self._acp_parts(invocation)
+        configured = configure(invocation, patterns, freedom, repo, version)
+        return prepare(configured, parts, freedom, version, configured.caller_write_approvals)
+
+    def allowed_command_notices(self, patterns):
+        from .claude_commands import bare_program_notice
+        notice = bare_program_notice(patterns)
+        return (notice,) if notice else ()
+
+    def allowed_commands_enforcement(self, enforcement, patterns):
+        if not patterns:
+            return enforcement
+        return replace(enforcement, mechanism=enforcement.mechanism + " with ACP exact command grants",
+                       caveats=(*enforcement.caveats, "Dispatch command grants answer matching ACP requests once. They do not edit Vibe policy, override native never denials, or confine programs run by a granted command."))
+
+    def approval_enforcement(self, enforcement, version, enabled, write):
+        if not enabled:
+            return enforcement
+        from .vibe_acp import TOOLS, WRITE_TOOLS
+        tools = TOOLS if write else set(TOOLS) - set(WRITE_TOOLS)
+        return replace(enforcement, mechanism="vibe-acp verified permission mode",
+                       caller_approval_tools=tuple(sorted(tools)),
+                       caveats=(*enforcement.caveats, self.approval_notice(write)))
+
+    def approval_transport(self):
+        return "vibe_acp"
+
+    def approval_limitations(self, write):
+        return "Exact original Vibe action only. Native policies remain effective; there is no bridge OS sandbox. Only one-shot approval choices are sent. Project trust for the exact cwd can be persisted by Vibe."
+
+    def approval_notice(self, write):
+        return "Vibe ACP verifies its version, session and permission mode before prompting. Approvals apply to the exact original input once; no reusable grant is installed. Vibe may persist trust for the exact working directory."
+
+    def approval_frame_kind(self, event):
+        from .vibe_acp import frame_kind
+        return frame_kind(event)
+
+    def approval_request_key(self, event):
+        from .vibe_acp import request_key
+        return request_key(event)
+
+    def approval_execution_active(self, acc):
+        from .vibe_acp import state_for
+        state = state_for(acc)
+        return state is not None and state.admissible
+
+    def approval_context(self, acc):
+        from .vibe_acp import state_for
+        state = state_for(acc)
+        return {"state": state} if state else {}
+
+    def approval_stream_version(self, acc):
+        from .vibe_acp import state_for
+        state = state_for(acc)
+        return state.observed_version if state else None
+
+    def check_approval_event(self, event, qualification=None):
+        from .vibe_acp import step
+        state = (qualification or {}).get("state")
+        if state:
+            step(state, event)
+
+    def consume_granted_approval(self, event, qualification=None):
+        from .vibe_acp import consume_granted
+        return consume_granted(event, qualification)
+
+    def decode_approval_request(self, event, qualification=None):
+        from .vibe_acp import decode
+        return decode(event, qualification)
+
+    def encode_approval_response(self, request, decision):
+        from .vibe_acp import encode
+        return encode(request, decision)
+
+    def note_approval_answer(self, acc, row, effective, written):
+        from .vibe_acp import note_answer
+        note_answer(acc, row, effective, written)
+
+    def observed_approval_outcomes(self, event, acc):
+        from .vibe_acp import outcomes, state_for
+        return outcomes(event, state_for(acc))
+
+    def approval_paths(self, decoded):
+        from .vibe_acp import change_paths
+        return change_paths(decoded.get("action") or {})
+
+    def approval_write_tools(self):
+        from .vibe_acp import WRITE_TOOLS
+        return frozenset(WRITE_TOOLS)
+
+    def protected_config_paths(self, repo):
+        from .vibe_acp import protected_paths
+        return protected_paths(repo)
+
+    def control_pipe_finished(self, acc):
+        from .vibe_acp import finished
+        return finished(acc)
+
+    def outgoing_frames(self, phase, acc):
+        from .vibe_acp import outgoing_frames
+        return outgoing_frames(phase, acc) if acc is not None else []
+
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
+        from . import vibe_acp
+        if vibe_acp.state_for(acc) is not None:
+            vibe_acp.ingest(event, acc)
+            return
         diagnostic = self.usage_limit_diagnostic(event)
         if diagnostic is None:
             from .vibe_provider_errors import structured_payment_error
@@ -696,12 +889,23 @@ class VibeBackend(ExtraPathsUnsupported):
         turn_id = event.get("turnId")
         current_turn_id = acc.stream_state.get("current_turn_id")
 
+        if entry_type == "effect":
+            from .vibe_denials import effect_error
+            if (current_turn_id is not None and turn_id == current_turn_id
+                    and session_id == acc.session_id and effect_error(event) is not None):
+                if _record_denial(event, acc):
+                    acc.summary = None
+                    acc.saw_final_message = False
+                    _record_refusal_warning(acc, event)
+            return
+
         if entry_type == "callback":
             # Gated on an established, matching live turn — exactly like assistant messages below.
             # Without this, a callback replayed from prior history on a --resume run (no turn_start
             # yet, or one carrying a stale/foreign turnId) would be reported as a denial of the *new*
             # task rather than ignored as history.
-            if current_turn_id is None or not _is_live_turn_id(turn_id) or turn_id != current_turn_id:
+            if (current_turn_id is None or not _is_live_turn_id(turn_id) or turn_id != current_turn_id
+                    or session_id is not None and session_id != acc.session_id):
                 return
             # Programmatic mode auto-denies every approval request, so a callback is a *refusal* that
             # already happened. Measured: `git commit` outside the user's bash allowlist produced one
@@ -717,7 +921,8 @@ class VibeBackend(ExtraPathsUnsupported):
                 # so a `selection` callback after an answer produced `failed` with nothing on
                 # `denials` to explain it — worse than the bug being fixed.
                 return
-            _record_denial(event, acc)
+            if not _record_denial(event, acc):
+                return
             # Withdraw any close this turn had already recorded, the same way the stop-event branch
             # below does — because a message that arrived *before* a refusal was narration of work
             # the agent then never got to do, not an answer. Measured on a dispatch that changed
@@ -747,7 +952,7 @@ class VibeBackend(ExtraPathsUnsupported):
             return
 
         if entry_type != "message":
-            # reasoning, checkpoint, effect, and anything a future vibe adds: non-fatal, ignored.
+            # reasoning, checkpoint, and anything a future vibe adds: non-fatal, ignored.
             return
 
         role = event.get("role")
@@ -775,6 +980,7 @@ class VibeBackend(ExtraPathsUnsupported):
             acc.is_error = None
             acc.notices = []
             acc.denials = []
+            acc.stream_state.pop("vibe_denial_ids", None)
             return
 
         if role != "assistant":
@@ -820,7 +1026,17 @@ class VibeBackend(ExtraPathsUnsupported):
         acc.summary = text
         acc.saw_final_message = True
 
+    def classify_denials(self, denials, acc, freedom=None):
+        from . import vibe_acp
+        if vibe_acp.state_for(acc) is not None:
+            return vibe_acp.classify_denials(denials, acc)
+        from .vibe_denials import classify_one
+        return [classify_one(d) if isinstance(d, dict) else d for d in denials]
+
     def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        from . import vibe_acp
+        if vibe_acp.state_for(acc) is not None:
+            return vibe_acp.normalize(event, acc)
         if not isinstance(event, dict):
             return []
         # Gate on EVERY entry type, not just messages: replayed history (turnId null, or a stale
@@ -949,6 +1165,11 @@ class VibeBackend(ExtraPathsUnsupported):
         return None
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        from .vibe_acp import state_for
+        state = state_for(acc)
+        if state is not None:
+            return "completed" if (exit_code == 0 and state.failed is None and state.terminal is not None
+                and state.terminal.get("stop_reason") == "end_turn" and acc.failure_diagnostic is None) else "failed"
         if acc.failure_diagnostic is not None:
             return "failed"
         # No terminal event exists, so the exit code is the authority and the closing message is
@@ -988,14 +1209,15 @@ def _is_approval_callback(event: dict[str, Any]) -> bool:
     return isinstance(detail, dict) and detail.get("kind") == "approval"
 
 
-def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
-    """Normalise one auto-denied approval callback onto `acc.denials`."""
-    if not _is_approval_callback(event):
-        return
+def _record_denial(event: dict[str, Any], acc: Accumulator) -> bool:
+    """Record a callback or structured denied effect; return whether it is a new refusal."""
+    from .vibe_denials import effect_error, identity, metadata
+    if not _is_approval_callback(event) and effect_error(event) is None:
+        return False
     detail = event.get("detail")
     detail = detail if isinstance(detail, dict) else {}
 
-    effect = detail.get("effect")
+    effect = detail.get("effect") if event.get("type") == "callback" else detail
     effect = effect if isinstance(effect, dict) else {}
     tool = effect.get("toolName")
     command = effect.get("input")
@@ -1012,7 +1234,24 @@ def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
     # of the same `kind`, so dropping the entry here would leave that outcome with an empty
     # `permission_denials` — the payload contradicting the signal the status was derived from. The fallback repeats only
     # what was actually observed rather than inventing a tool, command or title for it.
+    denial.update(metadata(event))
+    entry_id = identity(event)
+    identities = acc.stream_state.setdefault("vibe_denial_ids", {})
+    if entry_id is not None and entry_id in identities:
+        existing = acc.denials[identities[entry_id]]
+        conflicts = any(key in existing and key in denial and existing[key] != denial[key]
+                        for key in ("tool", "command", "tool_input"))
+        if not conflicts:
+            existing.update({key: value for key, value in denial.items() if key not in existing})
+            return False
+        # A reused identifier with conflicting action metadata cannot enrich an earlier action.
+        denial.pop("error_code", None)
+        denial.pop("refusal_text", None)
+        denial.pop("required_permissions", None)
+    if entry_id is not None:
+        identities[entry_id] = len(acc.denials)
     acc.denials.append(denial or {"kind": "approval"})
+    return True
 
 
 def _refusal_warning_text(event: dict[str, Any]) -> str:

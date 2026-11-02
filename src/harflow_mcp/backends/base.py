@@ -242,9 +242,8 @@ class Capabilities(NamedTuple):
     """Whether individual commands (e.g. `git commit`) can be denied."""
 
     supports_model_selection: bool
-    """Whether this backend has a flag to choose the model at all. False means `model` is refused
-    outright rather than silently ignored — see `reject_model`. vibe is the first backend where this
-    is False: model choice is config-only there, with no CLI flag."""
+    """Whether the backend can select a model through a qualified flag or protocol.
+    False means `model` is refused rather than silently ignored — see `reject_model`."""
 
     reasoning_effort: ReasoningEffort
 
@@ -656,6 +655,14 @@ class ExtraPathsUnsupported:
         "cancellation" or "resolved" (the harness closed or answered a request itself), else None."""
         return None
 
+    def consume_granted_approval(self, event, qualification=None):
+        """Queue a response covered by immutable dispatch-time grants, if supported.
+
+        Return True only after binding the exact request and queuing its one-shot
+        response for outgoing_frames. Unmatched requests use the caller ledger.
+        """
+        return False
+
     def approval_request_key(self, event):
         """The string stored as a ledger row's `native_request_id` for a request, cancellation or
         resolved event, or None. Typed by the backend so that, for example, an integer and a string
@@ -686,6 +693,10 @@ class ExtraPathsUnsupported:
     def approval_limitations(self, write):
         """Backend-specific limitation text reported by `preview_permissions`."""
         return "Caller approvals are not available for this backend."
+
+    def approval_execution_active(self, acc):
+        """Whether a native lifecycle still admits sending a caller decision."""
+        return True
 
     def approval_context(self, acc):
         """Backend state handed to `decode_approval_request` and `check_approval_event` as `qualification` entries."""
@@ -813,6 +824,7 @@ class Backend(Protocol):
     def encode_approval_response(self, request: dict[str, Any], decision: str) -> bytes: ...
     def approval_outcomes(self, event: dict[str, Any]) -> list[tuple[str, str]]: ...
     def approval_frame_kind(self, event: dict[str, Any]) -> str | None: ...
+    def consume_granted_approval(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> bool: ...
     def approval_request_key(self, event: dict[str, Any]) -> str | None: ...
     def group_report_output_support(self) -> dict[str, Any]: ...
     def qualify_group_report_output(self) -> dict[str, Any]: ...
@@ -825,6 +837,7 @@ class Backend(Protocol):
     def protected_config_paths(self, repo: Path) -> list[Path]: ...
     def approval_transport(self) -> str | None: ...
     def approval_limitations(self, write: bool) -> str: ...
+    def approval_execution_active(self, acc: Accumulator) -> bool: ...
     def approval_context(self, acc: Accumulator) -> dict[str, Any]: ...
     def observed_approval_outcomes(self, event: dict[str, Any], acc: Accumulator) -> list[tuple[str, str]]: ...
     def workflow_caller_approvals_supported(self) -> bool: ...

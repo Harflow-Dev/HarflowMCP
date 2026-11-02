@@ -3262,7 +3262,10 @@ class TaskRegistry:
                 task.pump_wake.clear()
                 stopping = task.cancel_requested or self._stop_reason(task) is not None
                 pending = await approval_runtime.pump(self, task)
-                if stopping:
+                # Admission/ledger checks may yield while cancellation or a
+                # terminal frame arrives. Recheck before any queued protocol
+                # response (including a dispatch grant) reaches the child.
+                if stopping or task.cancel_requested or self._stop_reason(task) is not None:
                     break
                 self._write_outgoing_frames(task, "turn")
                 if not pending and backend.control_pipe_finished(task.acc):

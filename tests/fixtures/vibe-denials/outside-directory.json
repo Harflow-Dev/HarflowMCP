@@ -1,0 +1,138 @@
+{
+  "version": "3.0.3",
+  "source": "Captured isolated HOME/VIBE_HOME loopback scripted provider; identifiers, timestamps and temporary paths sanitized.",
+  "entries": [
+    {
+      "id": "approval-local-call",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "type": "callback",
+      "callbackId": "approval-local-call",
+      "title": "Approve file_system.write_file",
+      "detail": {
+        "kind": "approval",
+        "effect": {
+          "toolName": "file_system.write_file",
+          "display": {
+            "summary": "Writing /fixture/outside-file",
+            "content": "blocked",
+            "suffix": "",
+            "verb": "Creating",
+            "message": "/fixture/outside-file",
+            "settledVerb": "Created",
+            "settledMessage": "/fixture/outside-file",
+            "statusText": "Writing file"
+          },
+          "kind": "file_write",
+          "input": {
+            "filePath": "/fixture/outside-file",
+            "content": "blocked"
+          }
+        },
+        "requiredPermissions": [
+          {
+            "scope": "outside_directory",
+            "invocationPattern": "/fixture/outside-file",
+            "sessionPattern": "vibe-path:exact:/fixture/outside-file",
+            "label": "outside workdir (/fixture/outside-file)",
+            "pathScopeRoot": null
+          }
+        ],
+        "choices": [
+          "approve",
+          "approve_for_session",
+          "approve_permanently",
+          "deny",
+          "cancel_turn"
+        ],
+        "pathScopeChoices": [
+          "exact"
+        ],
+        "relatedEntryId": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+        "reason": null
+      },
+      "state": {
+        "status": "answered",
+        "output": {
+          "type": "approval",
+          "decision": {
+            "type": "deny"
+          },
+          "feedback": null
+        }
+      }
+    },
+    {
+      "id": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": null,
+      "type": "effect",
+      "title": "file_system.write_file",
+      "detail": {
+        "toolName": "file_system.write_file",
+        "display": {
+          "summary": "Writing /fixture/outside-file",
+          "content": "blocked",
+          "suffix": "",
+          "verb": "Creating",
+          "message": "/fixture/outside-file",
+          "settledVerb": "Created",
+          "settledMessage": "/fixture/outside-file",
+          "statusText": "Writing file"
+        },
+        "kind": "file_write",
+        "input": {
+          "filePath": "/fixture/outside-file",
+          "content": "blocked"
+        }
+      },
+      "state": {
+        "status": "failed",
+        "outputText": "",
+        "approvalSource": "user",
+        "display": {
+          "success": false,
+          "verb": "",
+          "message": "Tool execution denied by approval callback",
+          "warnings": [],
+          "approvalNote": null,
+          "suffix": ""
+        },
+        "error": {
+          "message": "Tool execution denied by approval callback",
+          "code": "tool_denied",
+          "details": null
+        },
+        "durationMs": 0,
+        "decision": "skip",
+        "output": {
+          "type": "failure",
+          "content": [],
+          "_meta": {
+            "approval": {
+              "approvalSource": "user",
+              "approvalType": "ask",
+              "decision": "skip"
+            }
+          },
+          "error": {
+            "code": "tool_denied",
+            "message": "Tool execution denied by approval callback",
+            "retryable": false
+          }
+        },
+        "approvalType": "ask"
+      }
+    }
+  ]
+}

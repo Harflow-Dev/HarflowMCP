@@ -188,9 +188,16 @@ def test_bad_names_rejected(storage, name):
 
 def test_invalid_capability_rejected():
     d = definition()
-    d["orchestrator"] = {"backend": "vibe", "model": "unsupported"}
+    d["orchestrator"] = {"backend": "vibe", "reasoning_effort": "high"}
     with pytest.raises(w.WorkflowError):
         w.validate_definition(d)
+
+
+def test_vibe_configured_model_alias_is_saved_for_dispatch_qualification():
+    d = definition()
+    d["orchestrator"] = {"backend": "vibe", "model": "configured-alias"}
+    normalized = w.validate_definition(d)
+    assert normalized["orchestrator"]["model"] == "configured-alias"
 
 
 def test_omitted_positions_are_spaced_and_explicit_positions_preserved():

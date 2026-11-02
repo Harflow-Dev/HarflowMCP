@@ -489,6 +489,20 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
     """Consume control events separately; never emit raw actions in shared events/tails."""
     kind = backend.approval_frame_kind(event)
     if kind == "request":
+        if getattr(task, "allowed_commands", None):
+            if not await _check_version(registry, task, backend, event):
+                return False
+            qualification = {"version": task.caller_approval_version or task.allowed_commands_version,
+                             "observed": backend.approval_stream_version(task.acc),
+                             "write": task.caller_write_approvals, **_context(backend, task.acc)}
+            try:
+                consumed = getattr(backend, "consume_granted_approval", lambda *_: False)(event, qualification)
+            except ApprovalRefused as exc:
+                await _stop_refused(registry, task, exc)
+                return False
+            if consumed:
+                task.pump_wake.set()
+                return True
         if not task.caller_approvals:
             if getattr(task, "allowed_commands", None):
                 await _check_version(registry, task, backend, event)
@@ -575,7 +589,7 @@ async def pump(registry: Any, task: Any) -> bool:
     for row in records:
         if row["generation"] != task.approval_generation or row["disposition"] != "pending":
             continue
-        if task.cancel_requested or task.proc is None or task.proc.returncode is not None or task.input_closed or getattr(getattr(task, "acc", None), "error_result_seen", False):
+        if task.cancel_requested or task.proc is None or task.proc.returncode is not None or task.input_closed or getattr(getattr(task, "acc", None), "error_result_seen", False) or not getattr(get(task.backend), "approval_execution_active", lambda _acc: True)(getattr(task, "acc", None)):
             await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "cancelled" if task.cancel_requested else "invalidated", task.approval_generation)
             return False
         expired = row["deadline"] <= time.time()
@@ -612,7 +626,7 @@ async def pump(registry: Any, task: Any) -> bool:
             if current is not None and current["generation"] == task.approval_generation and (current["execution_outcome"] != "unknown" or current["disposition"] != "pending"):
                 continue
             raise
-        if task.cancel_requested or task.proc.returncode is not None or task.input_closed or getattr(getattr(task, "acc", None), "error_result_seen", False):
+        if task.cancel_requested or task.proc.returncode is not None or task.input_closed or getattr(getattr(task, "acc", None), "error_result_seen", False) or not getattr(get(task.backend), "approval_execution_active", lambda _acc: True)(getattr(task, "acc", None)):
             await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "cancelled" if task.cancel_requested else "invalidated", task.approval_generation)
             return False
         effective = row.get("effective_decision") or row["decision"]

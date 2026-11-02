@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support qualified Vibe 3.0.3 ACP caller approvals, exact command grants, configured-model selection and start/resume lifecycle; retain structured refusal reasons and permission scopes without rewriting native policy lists (#35, #39).
+
 - Observe up to eight worktree roots per task using explicit `observe_repos` and structured command/edit discovery; retain original dispatch heads, branch-change comparison provenance, local-ref freshness limits and correlated publication command evidence (#24). Git observation schema v2 remains additive inside public wire v1.
 - Report non-Git launch directories neutrally and check explicit observation targets independently; unknown repository branch notices name the observed probe failure (#106).
 

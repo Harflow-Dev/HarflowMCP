@@ -1,0 +1,72 @@
+{
+  "version": "3.0.3",
+  "source": "Captured isolated HOME/VIBE_HOME loopback scripted provider; identifiers, timestamps and temporary paths sanitized.",
+  "entries": [
+    {
+      "id": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": null,
+      "type": "effect",
+      "title": "file_system.bash",
+      "detail": {
+        "toolName": "file_system.bash",
+        "display": {
+          "summary": "bash: touch",
+          "content": null,
+          "suffix": "",
+          "verb": "Running",
+          "message": "touch",
+          "settledVerb": "Ran",
+          "settledMessage": "touch",
+          "statusText": "Running command"
+        },
+        "kind": "shell",
+        "input": {
+          "command": "touch"
+        }
+      },
+      "state": {
+        "status": "failed",
+        "outputText": "",
+        "error": {
+          "message": "Command denied: 'touch' is not allowed as a standalone command. Do not attempt to run this command.",
+          "code": "tool_denied",
+          "details": null
+        },
+        "durationMs": 0,
+        "approvalType": "never",
+        "decision": "skip",
+        "output": {
+          "type": "failure",
+          "content": [],
+          "_meta": {
+            "approval": {
+              "approvalSource": "never",
+              "approvalType": "never",
+              "decision": "skip"
+            }
+          },
+          "error": {
+            "code": "tool_denied",
+            "message": "Command denied: 'touch' is not allowed as a standalone command. Do not attempt to run this command.",
+            "retryable": false
+          }
+        },
+        "approvalSource": "never",
+        "display": {
+          "success": false,
+          "verb": "",
+          "message": "Command denied: 'touch' is not allowed as a standalone command. Do not attempt to run this command.",
+          "warnings": [],
+          "approvalNote": null,
+          "suffix": ""
+        }
+      }
+    }
+  ]
+}

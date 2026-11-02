@@ -1,0 +1,136 @@
+{
+  "version": "3.0.3",
+  "source": "Captured isolated HOME/VIBE_HOME loopback scripted provider; identifiers, timestamps and temporary paths sanitized.",
+  "entries": [
+    {
+      "id": "approval-local-call",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "type": "callback",
+      "callbackId": "approval-local-call",
+      "title": "Approve file_system.write_file",
+      "detail": {
+        "kind": "approval",
+        "effect": {
+          "toolName": "file_system.write_file",
+          "display": {
+            "summary": "Writing .env",
+            "content": "blocked",
+            "suffix": "",
+            "verb": "Creating",
+            "message": ".env",
+            "settledVerb": "Created",
+            "settledMessage": ".env",
+            "statusText": "Writing file"
+          },
+          "kind": "file_write",
+          "input": {
+            "filePath": "/fixture/repo/.env",
+            "content": "blocked"
+          }
+        },
+        "requiredPermissions": [
+          {
+            "scope": "file_pattern",
+            "invocationPattern": "/fixture/repo/.env",
+            "sessionPattern": "/fixture/repo/.env",
+            "label": "accessing sensitive files (write_file)",
+            "pathScopeRoot": null
+          }
+        ],
+        "choices": [
+          "approve",
+          "approve_for_session",
+          "approve_permanently",
+          "deny",
+          "cancel_turn"
+        ],
+        "pathScopeChoices": [],
+        "relatedEntryId": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+        "reason": null
+      },
+      "state": {
+        "status": "answered",
+        "output": {
+          "type": "approval",
+          "decision": {
+            "type": "deny"
+          },
+          "feedback": null
+        }
+      }
+    },
+    {
+      "id": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": null,
+      "type": "effect",
+      "title": "file_system.write_file",
+      "detail": {
+        "toolName": "file_system.write_file",
+        "display": {
+          "summary": "Writing .env",
+          "content": "blocked",
+          "suffix": "",
+          "verb": "Creating",
+          "message": ".env",
+          "settledVerb": "Created",
+          "settledMessage": ".env",
+          "statusText": "Writing file"
+        },
+        "kind": "file_write",
+        "input": {
+          "filePath": "/fixture/repo/.env",
+          "content": "blocked"
+        }
+      },
+      "state": {
+        "status": "failed",
+        "outputText": "",
+        "display": {
+          "success": false,
+          "verb": "",
+          "message": "Tool execution denied by approval callback",
+          "warnings": [],
+          "approvalNote": null,
+          "suffix": ""
+        },
+        "output": {
+          "type": "failure",
+          "content": [],
+          "_meta": {
+            "approval": {
+              "approvalSource": "user",
+              "approvalType": "ask",
+              "decision": "skip"
+            }
+          },
+          "error": {
+            "code": "tool_denied",
+            "message": "Tool execution denied by approval callback",
+            "retryable": false
+          }
+        },
+        "decision": "skip",
+        "approvalType": "ask",
+        "error": {
+          "message": "Tool execution denied by approval callback",
+          "code": "tool_denied",
+          "details": null
+        },
+        "approvalSource": "user",
+        "durationMs": 0
+      }
+    }
+  ]
+}

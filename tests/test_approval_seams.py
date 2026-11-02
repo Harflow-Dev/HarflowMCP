@@ -65,7 +65,7 @@ def test_claude_preview_transport_and_limitations_text_is_unchanged():
 
 # --- fail-closed defaults -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", ["opencode", "vibe", "antigravity", "cursor"])
+@pytest.mark.parametrize("name", ["opencode", "antigravity", "cursor"])
 def test_backends_without_the_seams_default_closed(name):
     backend = get(name)
     assert backend.approval_frame_kind({"type": "control_request", "request_id": "x"}) is None
@@ -731,3 +731,96 @@ def test_control_context_and_identity_markers_round_trip_through_a_supervised_la
     assert request["control_context"] == {"a": 1} and request["identity_markers"] == ["codex", "app-server"]
     with pytest.raises(ValueError, match="control_context requires control_pipe"):
         Invocation(["x"], control_context={"a": 1})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_grant_consumes_exact_request_before_caller_ledger(runtime):
+    directory, registry = runtime
+
+    class Granted(ExtraPathsUnsupported):
+        name = "granted"
+        def approval_frame_kind(self, event):
+            return "request"
+        def approval_stream_version(self, acc):
+            return "measured"
+        def consume_granted_approval(self, event, qualification=None):
+            assert qualification["version"] == "measured"
+            self.queued = event["id"]
+            return True
+
+    backend = Granted()
+    task = runtime_task(directory)
+    task.caller_approvals = True
+    task.allowed_commands = ("make test",)
+    task.allowed_commands_version = task.caller_approval_version = "measured"
+    task.pump_wake = asyncio.Event()
+    assert await approval_runtime.observe(registry, task, backend, {"id": "exact"}) is True
+    assert backend.queued == "exact" and task.pump_wake.is_set()
+    assert approvals.rows(directory, task.task_id) == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_grant_protocol_refusal_never_reaches_caller_ledger(runtime):
+    from harflow_mcp.backends.base import ApprovalRefused
+    directory, registry = runtime
+
+    class Invalid(ExtraPathsUnsupported):
+        name = "invalid"
+        def approval_frame_kind(self, event):
+            return "request"
+        def approval_stream_version(self, acc):
+            return "measured"
+        def consume_granted_approval(self, event, qualification=None):
+            raise ApprovalRefused("Grant binding changed")
+
+    task = runtime_task(directory)
+    task.caller_approvals = True
+    task.allowed_commands = ("make test",)
+    task.allowed_commands_version = "measured"
+    assert await approval_runtime.observe(registry, task, Invalid(), {"id": "changed"}) is False
+    assert registry.stopped == 1
+    assert approvals.rows(directory, task.task_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_approval_pump_prevents_queued_grant_frames(state_workspace, monkeypatch):
+    sink = state_workspace / "stdin.txt"
+    backend = _double(sink, "cat > SINK", finished=False,
+                      turn=lambda: [b'{"allow_once":true}\n'], name="cancel-before-grant")
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    async def cancel_during_pump(registry, task):
+        task.cancel_requested = True
+        await asyncio.sleep(0)
+        return False
+    monkeypatch.setattr(approval_runtime, "pump", cancel_during_pump)
+    registry = TaskRegistry(log_dir=state_workspace / "state" / "tasks", owner=OWNER)
+    task = await registry.start("cancel before dispatch grant", state_workspace, backend=backend)
+    await _settled(task)
+    assert not sink.exists() or sink.read_text() == ""
+    assert task.input_closed
+
+
+@pytest.mark.asyncio
+async def test_native_terminal_during_delivery_checks_prevents_reserved_answer(runtime, monkeypatch):
+    directory, registry = runtime
+    task = runtime_task(directory)
+    task.proc = SimpleNamespace(pid=os.getpid(), returncode=None)
+    task.input_closed, task.backend = False, 'claude'
+    task.acc.stream_state['execution_active'] = True
+    backend = get('claude')
+    monkeypatch.setattr(backend, 'approval_execution_active', lambda acc: acc.stream_state['execution_active'])
+    await approval_runtime.observe(registry, task, backend, event('Bash', {'command': 'make test'}))
+    row, = approvals.rows(directory, task.task_id)
+    approvals.reserve(directory, task.task_id, row['request_id'], row['action_digest'], row['owner_revision'], 'approve', row['generation'])
+    writes = []
+    monkeypatch.setattr(approval_runtime.identity, 'identity_check', lambda _: 'alive')
+    monkeypatch.setattr('harflow_mcp.tasks._write_stdin', lambda _, wire: writes.append(wire) or True)
+    def terminal_during_check(*_):
+        task.acc.stream_state['execution_active'] = False
+        return dict(CONTEXT)
+    monkeypatch.setattr(approval_runtime, 'context', terminal_during_check)
+    assert await approval_runtime.pump(registry, task) is False
+    assert writes == []
+    final, = approvals.rows(directory, task.task_id)
+    assert final['disposition'] == 'invalidated'
+    assert final['delivered_decision'] is None

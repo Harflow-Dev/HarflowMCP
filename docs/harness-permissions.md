@@ -195,8 +195,8 @@ specificity. Compound commands still need approval for their individual operatio
 
 Prefer `allowed_commands` over `unrestricted` when a task only needs to run specific commands, such as a test
 runner or build, that `write_in_repo` would otherwise refuse with "This command requires approval". It is a bounded
-list of Bash command patterns for one run, supported on Claude Code 2.1.310 and 2.1.312 (see `capabilities.allowed_commands` in
-`list_backends`) at `write_in_repo` and `publish` only. Every other backend and access level refuses the field.
+list of Bash command patterns for one run, supported on Claude Code 2.1.310 and 2.1.312 and Vibe 3.0.3/macOS through ACP (see `capabilities.allowed_commands` in
+`list_backends`) at `write_in_repo` and `publish` only. Other backends and access levels refuse the field. The following argv details describe Claude; [Vibe ACP grants](#vibe-acp-permissions-and-models) answer matching native requests once instead of changing policy lists.
 
 ```sh
 harflow-ctl run --repo . --prompt "Run the unit tests and fix failures" \
@@ -273,8 +273,7 @@ allow-listed, so a headless run still refuses them as needing approval. `local_c
 `enforcement.merge_conclusion` records the grant, `requires: MERGE_HEAD`, `ordinary_commits: refused`,
 and `gate: path_wrapper`. Harflow prepends a `git` wrapper to that task's `PATH`. The wrapper refuses
 those two command forms unless `MERGE_HEAD` exists and execs the real git otherwise. It is not an OS
-boundary: an absolute git path, or a granted program that invokes git, is outside it. Codex, OpenCode,
-and Vibe refuse every `allowed_commands` grant, including this one. `git merge --continue` does not
+boundary: an absolute git path, or a granted program that invokes git, is outside it. Codex and OpenCode refuse every `allowed_commands` grant, including this one. Vibe uses ACP one-shot grant decisions and the same engine PATH gate, without a bridge-owned commit deny list. `git merge --continue` does not
 omit the commit deny.
 
 **Clean checkout preflight.** Initial dispatch with a `pull`, `switch` or `checkout` grant refuses
@@ -473,8 +472,7 @@ also depends on its supported schema. See [approval adapters](../src/harflow_mcp
 
 ## Candidate compatibility and verification
 
-Vibe candidates must omit `model` and `reasoning_effort`: this adapter refuses overrides because it
-cannot safely resolve their configuration precedence. Configure Vibe's model in the harness.
+Vibe candidates must omit `reasoning_effort`. On qualified Vibe 3.0.3/macOS, `model` selects a configured alias through ACP; the returned config and actual provider model were measured. Unknown aliases are refused before the prompt. Older/unqualified versions refuse explicit model selection.
 Turn caps are supported only by Claude and Vibe. OpenCode effort variants depend on the chosen
 model; inspect `opencode models --verbose`. Antigravity accepts the bridge's low/medium/high effort
 levels, but some model/effort combinations are refused by the CLI. Check all fallback candidates.
@@ -728,7 +726,7 @@ expired cannot be approved afterwards.
 
 **Current limits.** Not available: retrying a permission-blocked workflow node with a narrow grant
 (a caller-authorized `permission_grant` retry needs its own state machine), approval notifications,
-`allowed_commands` on non-Claude backends, approvals outside qualified Claude and Codex app-server transports, and approvals for native workflow children.
+`allowed_commands` outside qualified Claude/Vibe transports, approvals outside qualified Claude, Codex app-server and Vibe ACP transports, and approvals for native workflow children.
 
 Storage is bounded per task: 64 KiB canonical request payload, 16 pending requests, 128 lifetime
 records and a 2 MiB ledger, with 256 KiB reserved for decisions/outcomes. Full or invalid ledgers
@@ -869,9 +867,7 @@ harflow-ctl qualify codex --feature caller_approval_tools --json
 ```
 
 The command reports progress on stderr and exits nonzero for a failed requested feature.
-Vibe, opencode and Antigravity expose version-bound unsupported permission-feature results;
-this framework does not invent an approval transport or command-grant implementation for
-them. Future backends must declare their features and probes through the same seam.
+Vibe declares measured 3.0.3/macOS seeds for ACP approvals, grants and model selection; unknown versions/platforms fail closed for these optional features. ACP also verifies its own launcher/interpreter/package identity and initialization version before prompting. Opencode and Antigravity retain unsupported permission-feature results. Future backends must declare their features and probes through the same seam.
 
 Runtime protocol/version failures stop the task and invalidate the captured launch binary's
 qualification bundle. A requested action reporting success before an approval was sent also
@@ -891,3 +887,25 @@ unknown. An empty inventory does not prove absence of restrictions. Rules and no
 permission patterns and paths, but not other settings values. Caps, invalid files, unreadable files,
 symlinks and timeouts are reported as partial observations. Settings may change after the snapshot.
 A refusal does not identify the rule or source that caused it.
+
+
+## Vibe permission denials
+
+Vibe headless mode denies requests that need interactive approval. Harflow records matching-live-turn approval callbacks and failed effects with the structured `tool_denied` error code. Explicit effect identities join the callback and result into one denial; matching command text alone does not join separate actions. Results retain requested permission scopes and classify measured approval-policy and denylist refusal texts. Unknown texts remain `unclassified`; command output and assistant prose do not establish a permission refusal.
+
+A denial is evidence that an action was refused, not evidence that all requested work failed. A later assistant response may complete the turn; an observed nonzero exit, missing exit observation or turn-cap failure still takes precedence. Inspect the resulting work when a clean exit ends on a refusal.
+
+On qualified Vibe ACP runs, start a new execution with `resume_task` or `continue_task` to raise a fresh caller request or apply a dispatch grant. Review the applicable Vibe profile and user/project policy; changing configuration cannot retroactively approve a denied action. A policy or denylist refusal is not satisfied by an approval allowance. Scope metadata describes the observed request and never grants access.
+
+
+## Vibe ACP permissions and models
+
+On Vibe 3.0.3/macOS, caller approvals, `allowed_commands` and an explicit `model` use `vibe-acp` JSON-RPC. Ordinary tasks without these options retain `vibe -p`. Unknown versions keep that ordinary path but refuse the optional ACP features. Reasoning-effort overrides, native workflow approvals and extra writable path grants remain unsupported.
+
+The bridge verifies the ACP initialization version, session identity and effective permission mode before sending the exact prompt. Start and resume select the requested mode after session creation/loading; replayed history cannot create new actions or approvals. Configured model aliases are selected with a temporary child environment pin and verified in the response. The ACP model setter is avoided because it changes the saved default model. A turn cap is applied through the measured configuration seam; a cap stop is a failed cutoff, never a completed task or automatic continuation. Explicit ACP trust admits only the exact working directory and may persist that trust in Vibe's own store; inherited project configuration and MCP servers remain effective.
+
+Each permission request joins its tool-call ID to the preceding unique original input. Missing, conflicting or changed inputs stop approval. Caller decisions send only `allow_once`, `reject_once` or cancellation; session/permanent approval options are never selected. Write/edit requests additionally require `caller_write_approvals`, and engine/Git/Vibe configuration paths remain protected. Native policy can pre-approve tools, so enabling caller approvals does not force every action to ask. No OS sandbox or confinement is claimed.
+
+Dispatch command grants use the shared exact/prefix grammar at `write_in_repo` and `publish`. Native Vibe allowlists treat entries as prefixes; Harflow therefore leaves those lists and profiles untouched. It answers an ACP Bash request once only when its original input and command-pattern scopes match the saved grant. Additional arguments do not match an exact grant, and redirections/compound commands or extra path scopes do not receive a grant. A grant authorizes that native approval request; native `never` policies and denylist rules still refuse before any request. Matching dispatch grants are handled before the caller ledger; other requests reach the caller when enabled or are denied. Grants are rebuilt and revalidated on resume.
+
+Terminal protocol evidence, process exit and tool outcomes are separate. A written decision does not establish execution success; matching tool updates provide that evidence. Cancellation, expiry, protocol errors and process death never install reusable permissions or replay ambiguous answers. Cost remains unavailable; any reported usage comes only from structured ACP usage fields.

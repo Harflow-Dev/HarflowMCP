@@ -1,0 +1,72 @@
+{
+  "version": "3.0.3",
+  "source": "Captured isolated HOME/VIBE_HOME loopback scripted provider; identifiers, timestamps and temporary paths sanitized.",
+  "entries": [
+    {
+      "id": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": null,
+      "type": "effect",
+      "title": "file_system.bash",
+      "detail": {
+        "toolName": "file_system.bash",
+        "display": {
+          "summary": "bash: touch denied-file",
+          "content": null,
+          "suffix": "",
+          "verb": "Running",
+          "message": "touch denied-file",
+          "settledVerb": "Ran",
+          "settledMessage": "touch denied-file",
+          "statusText": "Running command"
+        },
+        "kind": "shell",
+        "input": {
+          "command": "touch denied-file"
+        }
+      },
+      "state": {
+        "status": "failed",
+        "outputText": "",
+        "display": {
+          "success": false,
+          "verb": "",
+          "message": "Tool execution denied by approval policy",
+          "warnings": [],
+          "approvalNote": null,
+          "suffix": ""
+        },
+        "output": {
+          "type": "failure",
+          "content": [],
+          "_meta": {
+            "approval": {
+              "approvalSource": "never",
+              "approvalType": "never",
+              "decision": "skip"
+            }
+          },
+          "error": {
+            "code": "tool_denied",
+            "message": "Tool execution denied by approval policy",
+            "retryable": false
+          }
+        },
+        "approvalSource": "never",
+        "durationMs": 0,
+        "decision": "skip",
+        "error": {
+          "message": "Tool execution denied by approval policy",
+          "code": "tool_denied",
+          "details": null
+        },
+        "approvalType": "never"
+      }
+    }
+  ]
+}

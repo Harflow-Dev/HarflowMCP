@@ -1,0 +1,72 @@
+{
+  "version": "3.0.3",
+  "source": "Captured isolated HOME/VIBE_HOME loopback scripted provider; identifiers, timestamps and temporary paths sanitized.",
+  "entries": [
+    {
+      "id": "effect-ca049508-4146-59f4-bfb4-f05b11a3c508",
+      "sessionId": "fixture-session",
+      "turnId": "fixture-turn",
+      "inputEntryId": "user-fixture-turn-1",
+      "createdAt": 1,
+      "updatedAt": 2,
+      "generationStatus": "completed",
+      "relatedEntryId": null,
+      "type": "effect",
+      "title": "file_system.bash",
+      "detail": {
+        "toolName": "file_system.bash",
+        "display": {
+          "summary": "bash: touch denied-file",
+          "content": null,
+          "suffix": "",
+          "verb": "Running",
+          "message": "touch denied-file",
+          "settledVerb": "Ran",
+          "settledMessage": "touch denied-file",
+          "statusText": "Running command"
+        },
+        "kind": "shell",
+        "input": {
+          "command": "touch denied-file"
+        }
+      },
+      "state": {
+        "status": "failed",
+        "outputText": "",
+        "decision": "skip",
+        "output": {
+          "type": "failure",
+          "content": [],
+          "_meta": {
+            "approval": {
+              "approvalSource": "never",
+              "approvalType": "never",
+              "decision": "skip"
+            }
+          },
+          "error": {
+            "code": "tool_denied",
+            "message": "Command denied: 'touch denied-file' matches denylist pattern 'touch'. Do not attempt to run this command.",
+            "retryable": false
+          }
+        },
+        "durationMs": 0,
+        "display": {
+          "success": false,
+          "verb": "",
+          "message": "Command denied: 'touch denied-file' matches denylist pattern 'touch'. Do not attempt to run this command.",
+          "warnings": [],
+          "approvalNote": null,
+          "suffix": ""
+        },
+        "approvalSource": "never",
+        "approvalType": "never",
+        "error": {
+          "message": "Command denied: 'touch denied-file' matches denylist pattern 'touch'. Do not attempt to run this command.",
+          "code": "tool_denied",
+          "details": null
+        }
+      }
+    }
+  ]
+}
