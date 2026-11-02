@@ -303,8 +303,13 @@ async def test_failed_approved_control_fallback_requires_new_consent(storage, tm
     assert recovery["failure_diagnostic"] == LIMIT["failure_diagnostic"]
     assert [c["candidate"]["model"] for c in recovery["choices"] if c["answer"] != "retry_current"] == ["remaining-fixture"]
     assert recovered["usage_recovery_history"][-1]["selection_failure"]
-    with pytest.raises(w.WorkflowError, match="Input decision_id .*not currently available from verified source"):
+    from harflow_mcp.workflow_interactions import InteractionAlreadyAnswered
+    before_retry = storage.get_run(run["workflow_run_id"])
+    with pytest.raises(InteractionAlreadyAnswered) as stale:
         storage.control(run["workflow_run_id"], "resume", "fallback", decision_id=old_decision)
+    assert stale.value.data["interaction"]["interaction_id"] == old_decision
+    assert stale.value.data["interaction"]["answer"] == "fallback"
+    assert storage.get_run(run["workflow_run_id"]) == before_retry
     assert not any(kwargs.get("model") == "remaining-fixture" for _, kwargs in registry.calls)
     registry.start = Registry.start.__get__(registry)
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
@@ -494,8 +499,13 @@ async def test_retry_current_repeated_limit_reissues_consent_without_auto_launch
     assert [c['answer'] for c in checkpoint['orchestrator_usage_recovery']['choices']] == ['retry_current']
     assert len(registry.calls) == 2
     assert 'orchestrator_recovery_candidate' not in checkpoint
-    with pytest.raises(w.WorkflowError, match='Input decision_id .*not currently available from verified source'):
+    from harflow_mcp.workflow_interactions import InteractionAlreadyAnswered
+    before_retry = storage.get_run(run['workflow_run_id'])
+    with pytest.raises(InteractionAlreadyAnswered) as stale:
         storage.control(run['workflow_run_id'], 'resume', 'retry_current', decision_id=run['input_decision_id'])
+    assert stale.value.data['interaction']['interaction_id'] == run['input_decision_id']
+    assert stale.value.data['interaction']['answer'] == 'retry_current'
+    assert storage.get_run(run['workflow_run_id']) == before_retry
 
 
 async def test_retry_current_config_removal_reoffers_current_configuration(storage, tmp_path):

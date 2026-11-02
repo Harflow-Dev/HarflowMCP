@@ -5,6 +5,7 @@ Authored snapshots remain JSON values; qualification never executes or migrates 
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime
 import math
 import re
@@ -433,6 +434,19 @@ def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
             validate_handover(value["interaction_handover"])
             if value.get("interaction_owner") != "monitor" or (value.get("interaction_caller") or {}).get("kind") not in {"external_parent", "managed_task"}:
                 raise ValueError("Handover requires qualified caller evidence and Monitor ownership")
+        if "interaction_history" in value:
+            history = value["interaction_history"]
+            if len(history) > 100 or len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > 256 * 1024 or any("interaction_id" not in item for item in history) or len({item["interaction_id"] for item in history}) != len(history):
+                raise ValueError("Malformed interaction_history budget or duplicate identity")
+            for item in history:
+                if set(item) - {"answer_truncated"} != {"interaction_id", "action", "answer", "answered_by", "answered_at", "workflow_run_id"}:
+                    raise ValueError("Malformed interaction_history receipt fields")
+                if "answer_truncated" in item and item["answer_truncated"] is not True:
+                    raise ValueError("Malformed interaction_history truncation marker")
+                if len(item["answer"].encode("utf-8")) > 64 * 1024:
+                    raise ValueError("Malformed interaction_history answer budget")
+                if not item["interaction_id"] or item["action"] not in {"resume", "recover", "revise_goal"} or item["answered_by"] not in {"caller", "monitor"} or item["answered_at"] <= 0:
+                    raise ValueError("Malformed interaction_history receipt")
         if "caller_record" in value:
             from .task_documents import qualify_payload as qualify_task_payload
             from .store import TaskRecord
@@ -485,7 +499,9 @@ OPTIONAL["inherited_context"] = _inherited_context
 
 def _message(value, path):
     from .workflow_messages import STATUSES
-    _shape(value, {"id": str, "seq": _counter, "status": str, "text": str, "delivery": str, "queued_at": NUMBER, "at": NUMBER, "delivery_task_id": str, "execution_id": str, "target": _object({"kind": str, "workflow_run_id": _id, "task_id": str, "node_id": str, "role": str})}, path)
+    _shape(value, {"id": str, "seq": _counter, "status": str, "text": str, "delivery": str, "responder": str, "queued_at": NUMBER, "at": NUMBER, "delivery_task_id": str, "execution_id": str, "target": _object({"kind": str, "workflow_run_id": _id, "task_id": str, "node_id": str, "role": str})}, path)
+    if "responder" in value and value["responder"] not in {"caller", "monitor"}:
+        raise ValueError("Malformed message responder")
     if not {"id", "seq", "target", "queued_at"}.issubset(value) or value.get("status") not in STATUSES or value.get("delivery") not in {"queue", "now"} or type(value.get("target")) is not dict or value["target"].get("kind") not in {"task", "workflow"}:
         raise ValueError("Malformed workflow message")
     if value["status"] in {"queued", "delivering", "undeliverable"} and type(value.get("text")) is not str:
@@ -497,3 +513,8 @@ def _message(value, path):
 
 
 OPTIONAL.update(messages=_array(_message), message_sequence=_counter)
+
+
+OPTIONAL["interaction_history"] = _array(_object({"interaction_id": str, "action": str, "answer": str, "answer_truncated": bool, "answered_by": str, "answered_at": NUMBER, "workflow_run_id": _id}))
+
+OPTIONAL["interaction_history_truncated"] = bool

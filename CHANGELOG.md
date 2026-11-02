@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Allow qualified caller and human Monitor responders to share workflow questions, recovery, goal revision and messages without transferring ownership; persist the first winning answer and return it to late responders (#102).
+- Add a read-only retained interaction event feed for native notifications covering pending requests, answers and observed task completion/failure.
+
 ## 0.0.6
 
 - Read an approval ledger that appears during an atomic replace, instead of treating that race as an unavailable ledger and cancelling the run.

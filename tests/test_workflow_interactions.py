@@ -21,7 +21,7 @@ def pending(tmp_path, monkeypatch):
     return storage, run
 
 
-@pytest.mark.parametrize("verdict,reason", [("alive", "start_time_match"), ("undecidable", "ps_failed"), ("undecidable", "markers_missing"), ("dead", "legacy_markers_not_seen")])
+@pytest.mark.parametrize("verdict,reason", [("undecidable", "ps_failed"), ("undecidable", "markers_missing"), ("dead", "legacy_markers_not_seen")])
 def test_monitor_refuses_alive_or_unknown(pending, monkeypatch, verdict, reason):
     storage, run = pending
     monkeypatch.setattr(identity, "check_detail", lambda evidence: (verdict, reason))
@@ -35,10 +35,10 @@ def test_dead_handover_and_returning_caller(pending, monkeypatch, reason):
     storage, run = pending
     monkeypatch.setattr(identity, "check_detail", lambda evidence: ("dead", reason))
     revised = goals.revise(storage, run["workflow_run_id"], "next", 1, interaction_owner="monitor")
-    assert revised["interaction_owner"] == "monitor"
-    assert revised["interaction_handover"]["responder"] == "monitor"
-    with pytest.raises(w.WorkflowError, match="original caller"):
-        goals.revise(storage, run["workflow_run_id"], "return", 2)
+    assert revised["interaction_owner"] == "caller"
+    assert "interaction_handover" not in revised
+    assert revised["interaction_history"][-1]["answered_by"] == "monitor"
+    assert goals.revise(storage, run["workflow_run_id"], "return", 2)["goal"] == "return"
 
 
 def test_bad_revision_does_not_claim_authority(pending, monkeypatch):
@@ -67,8 +67,8 @@ def test_live_client_survives_dead_server(pending):
     live = identity.capture(os.getpid(), [])
     run.update(interaction_caller={"kind": "external_parent", "identity": live}, supervisor_identity={"pid": 99999999, "start_time": "gone", "markers": []})
     assert i.owner_state(run)[0] == "alive"
-    with pytest.raises(w.WorkflowError, match="alive"):
-        i.authorize(storage, run, "monitor", "resume")
+    i.authorize(storage, run, "monitor", "resume")
+    assert i.projection(storage, run)["interaction_state"]["responders"] == ["caller", "monitor"]
 
 
 def test_missing_evidence_and_agent_responder_refused(pending, monkeypatch):
@@ -109,9 +109,8 @@ def test_child_inherits_root_after_handover(pending, monkeypatch):
     goals.revise(storage, run["workflow_run_id"], "next", 1, interaction_owner="monitor")
     child = {"workflow_run_id": "child", "status": "needs_input", "interaction_owner": "caller", "parent_link": {"root_workflow_run_id": run["workflow_run_id"]}}
     i.authorize(storage, child, "monitor", "resume")
-    with pytest.raises(w.WorkflowError):
-        i.authorize(storage, child, "caller", "resume")
-    assert i.projection(storage, child)["interaction_state"]["owner"] == "monitor"
+    i.authorize(storage, child, "caller", "resume")
+    assert i.projection(storage, child)["interaction_state"]["owner"] == "caller"
 
 
 @pytest.mark.parametrize("scheduler", ["alive", "undecidable"])
@@ -135,7 +134,8 @@ def test_recovery_handover_only_after_validation(pending, monkeypatch):
     monkeypatch.setattr(w, "_launch", lambda *args: None)
     run = storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", supervisor_identity={"pid": 7777, "start_time": "scheduler", "markers": []}), "prepare")
     accepted = workflow_recovery.request(storage, run, "restore", "monitor")
-    assert accepted["interaction_handover"]["action"] == "recover"
+    assert "interaction_handover" not in accepted
+    assert accepted["interaction_owner"] == "caller"
     assert accepted["scheduler_recovery"]["reason"] == "restore"
     assert accepted["resumed_at"] == accepted["updated_at"]
 
@@ -177,8 +177,11 @@ def test_omitted_responder_cannot_bypass_handover(pending, monkeypatch):
     storage, run = pending
     monkeypatch.setattr(identity, "check_detail", lambda evidence: ("dead", "pid_absent"))
     revised = goals.revise(storage, run["workflow_run_id"], "next", 1, interaction_owner="monitor")
+    i.authorize(storage, revised, None, "resume")
+    revised["interaction_owner"] = "monitor"
+    # Explicit Monitor ownership stays protected from caller/default authority.
     with pytest.raises(w.WorkflowError, match="original caller"):
-        i.authorize(storage, revised, None, "resume")
+        i.authorize(storage, revised, "caller", "resume")
 
 
 def _managed_record(storage, task_id, *, parent=None, prompt="", session="conversation"):

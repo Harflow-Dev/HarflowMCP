@@ -763,20 +763,31 @@ fields are private storage additions; no public event kind or wire requirement c
 
 ### Caller loss and workflow interaction handover
 
+The additive `workflow-shared-interactions.v1` capability qualifies shared answering.
 Workflow status/detail projections add `interaction_state`: `owner` (`caller` or
 `monitor`), `caller_state` (`alive`, `dead`, `unknown`), `monitor_available`, a
-human-readable `reason`, and nullable `handover`. A handover records `timestamp`,
-`reason`, `previous_owner`, `responder`, and `action`. These fields contain no
-process command lines. Full questions remain in `input_question` and
-`pending_inputs`; interaction metadata does not replace their existing fields.
-Availability is advisory; mutation rechecks authority and the current checkpoint.
+human-readable `reason`, nullable historical `handover`, and optional `responders`.
+A caller-owned run with qualified caller identity advertises `["caller", "monitor"]`;
+unknown identity does not widen eligibility. Explicit Monitor ownership retains its
+existing responder boundary. Full questions remain in `input_question` and
+`pending_inputs`; availability is advisory and every mutation rechecks authority.
 
-A verified human `--monitor` responder may take a pending interaction only after
-qualified caller identity confirms process absence or PID reuse. Unknown identity,
-failed probes and missing historical evidence refuse handover. The accepted action
-and root authority/audit are persisted under the tree mutation lock. Descendants
-inherit root authority, and returning callers cannot answer after handover. Existing
-scheduler recovery, permission, decision and goal revision gates still apply.
+A verified human `--monitor` responder can answer a live caller's pending interaction
+without changing `interaction_owner`. Exact input IDs, attention checkpoint tokens,
+expected goal revision, settlement, scheduler identity, takeover and permission gates
+still apply. Child questions route through their verified root. Automatic parent prose
+cannot grant human recovery or permission authority.
+
+The tree mutation lock serializes competing answers. A successful answer persists a
+receipt in `interaction_history` with identity, action, `answer`, `answered_by`
+(`caller` or `monitor`) and `answered_at` before scheduling. A competing external
+answer to the same accepted checkpoint receives `interaction_already_answered` with
+`data.interaction` containing the winner. Internal exact forwarded-delivery retries
+remain idempotent so interruption between child acceptance and root acknowledgement
+does not apply an answer twice. Approvals retain the existing action digest and owner
+revision reservation, refusal precedence and recorded `responder`; compatible refusals
+add the recorded winner. Messages remain independent queued messages, rather than
+competing answers to one decision. Later checkpoints remain shared.
 
 Admission captures the managed dispatching task's qualified process identity, or
 an external executable client ancestor before detaching. The stdio server and ctl
@@ -785,7 +796,7 @@ process themselves never establish caller loss. Known transparent `uv`, `uvx`,
 parent links. Shell/script/interpreter launchers and undecidable ancestry remain
 unknown; a client should launch Harflow directly or through a supported transparent
 launcher. Server death alone does not establish client death. Existing runs without
-admission evidence remain caller-owned. No live-caller opt-in is implemented.
+admission evidence retain conservative caller-only eligibility.
 
 `ctl-workflow-interaction-handover.json` is a synthetic public-response fixture
 showing a handed-over root and its audit; it does not certify a real caller loss.
@@ -1152,9 +1163,8 @@ Missing fields on older engines mean eligibility is unknown, not granted.
 These fields are advisory observations, not authority or durable grants. Every
 command rechecks current ownership, checkpoint, execution and takeover state.
 The Monitor always identifies itself with `--monitor`; it cannot impersonate a
-live caller. Only qualified caller death permits the existing atomic interaction
-handover for resume, recovery and goal revision, and for explicit queued message
-send/cancellation. Pause does not claim caller authority. Pending questions,
+live caller. Engines advertising shared responders allow qualified caller and Monitor
+controls without ownership transfer, including pause and message send/cancellation. Pending questions,
 optional-review consent and additional attempts retain their existing decision
 and reason requirements. Rendering these controls never claims ownership.
 
@@ -1168,7 +1178,7 @@ Consumers must require this capability before using the new modes. Public MCP eq
 The task forms route workflow-owned targets through their owning workflow, including builders.
 Workflow forms accept a run ID and an optional `task_id` (CLI `--task-id`). All forms preserve
 exact caller prose. `--monitor` / `interaction_owner: "monitor"` requires a verified human caller;
-workflow interaction ownership and proven-dead caller handover match the other workflow controls.
+workflow responder qualification matches the other shared workflow controls.
 Managed node callers cannot use messaging to change other assignments.
 
 `delivery` is `queue` by default or `now`. Queue never folds into the current live turn. Standalone
@@ -1379,7 +1389,8 @@ Recovery still requires the existing confirmed-death, ownership and sequence
 checks. Kind, mode or owner changes invalidate the token; a duplicate request
 never authorizes a newer owner or a failed-run recovery.
 
-A supplied token is always enforced. Initially stale requests return typed
+A supplied token is always enforced. An already accepted shared-answer token returns
+`interaction_already_answered` with its winner. Other initially stale requests return typed
 `attention_checkpoint_stale` before reconciliation, delivery preparation,
 interaction handover, instructions, grants or launches. Initially current
 requests reconcile every selected source hop under the tree mutation lock and
@@ -1415,3 +1426,37 @@ the existing marker. Reads never manufacture one. Inspect or cancel such a run,
 or use an authorized legacy caller continuation; do not edit persistence.
 Immediate queued messaging retains its existing no-answer/no-grant continuation
 authority and is separate from displayed recovery submission.
+
+### Native interaction notification feed
+
+Capability `interaction-events.v1` qualifies `harflow-ctl interaction-events --json`
+with optional opaque `--cursor` and `--limit` (1–100, default 50). This read-only
+feed supports macOS Notification Center; it neither subscribes a provider channel
+nor sends an external message. Direct callers only; managed callers remain refused.
+
+Each `events` row has a stable `event_id`, `interaction_id`, `kind` (`question`,
+`approval`, `recovery`, `task`), `state` (`pending`, `answered`, `completed`, `failed`),
+Unix `occurred_at`, display `title`, and nullable `workflow_run_id`,
+`source_workflow_run_id`, `task_id`. Pending rows include `question`; answered rows
+include `answer`, `answered_by` and optional action. Answers are display excerpts;
+the authoritative winning receipt remains available in workflow history or the
+approval request. Workflow resume/recovery answers are limited to 64 KiB UTF-8 before mutation.
+History is bounded to 100 receipts and 256 KiB; older answer excerpts carry
+`answer_truncated`, and `interaction_history_truncated` reports pruning. Task terminal events require observed completion/failure;
+unobserved recovery inference never fabricates a completion notification.
+
+Pages return `next_cursor`, `cycle_complete`, `history_incomplete` and `gaps`.
+A cursor traverses bounded source slices and per-source event keys. A completed
+cycle restarts with no cursor and replays retained stable IDs; consumers must
+persist deduplication per selected state root. This avoids unsafe global timestamp
+watermarks when atomic writes happen during a scan. Sources inserted before the
+cursor appear on the next cycle. The feed includes terminal sources and reconstructs
+approval pending episodes from retained ledgers, so pending and answered events
+between polls remain discoverable. It reports unavailable sources and retention
+loss explicitly; it cannot recover episodes removed by retention. Do not interpret
+an incomplete page as an empty history. The source scan creates no catalogs or event
+files; normal CLI state-root qualification still applies.
+
+Canonical `*-shared-*-synthetic.json` and `ctl-interaction-events-synthetic.json`
+fixtures demonstrate the additive fields and refusal envelope. They are synthetic
+contract specimens, not live execution or notification-delivery evidence.

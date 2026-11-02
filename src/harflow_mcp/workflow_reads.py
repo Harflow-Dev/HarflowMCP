@@ -130,7 +130,7 @@ async def bounded_caller(directory: Path):
         return detection.caller
 
 
-MANAGED_SUMMARY_FIELDS = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "attention_checkpoint_id", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source", "interaction_state", "messages", "monitor_controls")
+MANAGED_SUMMARY_FIELDS = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "attention_checkpoint_id", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source", "interaction_state", "interaction_history", "interaction_history_truncated", "messages", "monitor_controls")
 MANAGED_SUMMARY_DERIVED = ("technical_plan", "technical_plan_truncated", "technical_plan_execution_id", "activations")
 
 

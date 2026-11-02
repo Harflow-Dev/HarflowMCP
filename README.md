@@ -31,7 +31,7 @@ Workflow callers can see every pending child question in status and wait replies
 
 Permission features use cached, binary-bound qualification: measured versions seed the cache, and unseen versions run isolated no-paid behavior probes before use. `harflow-ctl qualify <backend>` explicitly reruns the probes; cached discovery reports per-feature results. Add `--qualification-only` to `permission-preview` or `workflow-preview NAME` to discover only the features requested by that launch without provider self-tests; `qualify --feature FEATURE` is repeatable. Ordinary permission previews may qualify requested features. Automatic probes currently require macOS isolation. See [qualification](docs/harness-permissions.md).
 
-Current seed measurements for these two features: `allowed_commands` is qualified on Claude Code 2.1.310 and 2.1.312; caller approvals are qualified on Claude Code 2.1.302 (Bash approvals) and 2.1.310/2.1.312, and on Codex through `codex app-server` for codex-cli 0.163.0 on macOS only (commands, and patches with `caller_write_approvals`); other backends refuse them. Approvals are not available to native workflow children, and a request unanswered after 1800 seconds (or at the node's attempt deadline) is rejected by Harflow, never approved. After a denial there is no approve-later path: recovery is always a new `resume_task` or `continue_task` execution guided by `denial_remedy` (`allowed_commands` covers only Bash `approval_required` and chained-command parts; a denied Read, Write or Edit needs a resumed run so the agent can raise a fresh request; a `deny_rule` cannot be lifted by grants). Workflow permission-grant retry and approval notifications are not available. On compatible engines the Mac Monitor can answer caller-owned requests; authority follows the existing inferred, cooperative same-user model and does not authenticate a human or the app. See [harness permissions](docs/harness-permissions.md#exact-action-caller-approvals).
+Current seed measurements for these two features: `allowed_commands` is qualified on Claude Code 2.1.310 and 2.1.312; caller approvals are qualified on Claude Code 2.1.302 (Bash approvals) and 2.1.310/2.1.312, and on Codex through `codex app-server` for codex-cli 0.163.0 on macOS only (commands, and patches with `caller_write_approvals`); other backends refuse them. Approvals are not available to native workflow children, and a request unanswered after 1800 seconds (or at the node's attempt deadline) is rejected by Harflow, never approved. After a denial there is no approve-later path: recovery is always a new `resume_task` or `continue_task` execution guided by `denial_remedy` (`allowed_commands` covers only Bash `approval_required` and chained-command parts; a denied Read, Write or Edit needs a resumed run so the agent can raise a fresh request; a `deny_rule` cannot be lifted by grants). Workflow permission-grant retry remains unavailable. On compatible engines the Mac Monitor can answer caller-owned requests; authority follows the existing inferred, cooperative same-user model and does not authenticate a human or the app. See [harness permissions](docs/harness-permissions.md#exact-action-caller-approvals).
 
 Vibe 3.0.1 headless dispatch uses its Rust CLI and the `ask` approval profile for `read_only`. This is an approval policy, not a write-tool exclusion: inherited policies or custom profiles can pre-approve writes. The retained `VIBE_CLI=python` selector is ignored by Vibe 3; interactive takeover inherits the user's environment.
 
@@ -104,11 +104,12 @@ Use `harflow-ctl version-info --json` to inspect runtime identity and compatibil
 Root workflow status and waits retain verified nested questions with their full source
 paths and usage-limit details, even when another child link is unavailable. Answers
 route by the current decision ID; unavailable decisions report specific retry guidance.
-Pending workflow questions, recovery and goal revision can pass to a verified human
-Monitor responder when the original caller's qualified process is confirmed gone.
-Live or unknown callers retain ownership. Caller identity is captured before
-launch detaches; unsupported launcher ancestry and older runs without evidence
-remain unknown. See [the interaction contract](docs/contracts.md#caller-loss-and-workflow-interaction-handover).
+Pending workflow questions, recovery and goal revision are answerable by both the qualified
+original caller and a verified human Monitor responder. The first valid answer wins, with its
+text, responder and time retained; answering in Harflow does not transfer ownership. Child
+questions still route through the root. Unknown caller identity retains conservative eligibility.
+The Mac app gates shared answering on the engine's advertised responders field. See
+[the interaction contract](docs/contracts.md#caller-loss-and-workflow-interaction-handover).
 
 - [Getting started](docs/getting-started.md)
 - [Workflows](docs/workflows.md), including acknowledged context sections and bounded instruction inspection

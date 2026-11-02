@@ -783,14 +783,24 @@ class WorkflowStore:
             yield
             return
         launches = []
+        answered_error = None
         with self.lock(f"tree-mutation:{root_id}"):
             _TREE_MUTATION.active = {"key": key, "launches": launches}
             try:
                 yield
+            except Exception as exc:
+                from .workflow_interactions import InteractionAlreadyAnswered
+                if not isinstance(exc, InteractionAlreadyAnswered):
+                    raise
+                # Reconciliation may durably finish a previously accepted child
+                # delivery before returning the competing caller its winner.
+                answered_error = exc
             finally:
                 del _TREE_MUTATION.active
         for storage, identifier in launches:
             _launch(storage, identifier)
+        if answered_error is not None:
+            raise answered_error
 
     @contextmanager
     @layout_operation
@@ -1352,6 +1362,12 @@ class WorkflowStore:
                 run["resumed_at"] = now
             run["sequence"] = run.get("sequence", 0) + 1
             run["finished_at_sequence"] = run["sequence"]
+            request = getattr(_TREE_MUTATION, "active", {}).get("interaction_request")
+            if request and request["interaction_id"] and request["action"] in {"resume", "recover"} and (event in {"control:resume", "control:recover"} or event in {"scheduler_recovery_requested", "forwarded_input_answered", "forwarded_attention_resumed", "forwarded_attention_receipt_acknowledged"}):
+                from .workflow_interactions import record_answer, answered
+                source_id = detail.get("source") if isinstance(detail, dict) else None
+                winner = answered(self.get_run(source_id, refresh_atomic=True), request["interaction_id"]) if source_id and source_id != run_id else None
+                record_answer(run, request["interaction_id"], request["action"], request["answer"], request["responder"], receipt=winner)
             self._record_notification_point(run, attention_before[0], event, checkpoint_before)
             run.pop("settling", None)
             run.pop("can_cancel_from_monitor", None)
@@ -1483,6 +1499,14 @@ class WorkflowStore:
     @layout_operation
     def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, attention_checkpoint_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False, _message_resume: bool = False) -> dict[str, Any]:
         from .workflow_attention import require_checkpoint, authoritative_chain, checkpoint_id
+        if not _internal and action in {"resume", "recover"} and isinstance(instructions, str):
+            from .workflow_interactions import ANSWER_BYTES
+            try:
+                size = len(instructions.encode("utf-8"))
+            except UnicodeEncodeError:
+                raise WorkflowError("Workflow answer must be valid UTF-8 text") from None
+            if size > ANSWER_BYTES:
+                raise WorkflowError("Workflow answer exceeds 64 KiB UTF-8")
         observed = self.get_run(run_id, refresh_atomic=True)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         guarded = attention_checkpoint_id is not None
@@ -1500,6 +1524,82 @@ class WorkflowStore:
             current = self.get_run(run_id, refresh_atomic=True)
             if ((current.get("parent_link") or {}).get("root_workflow_run_id") or run_id) != root_id:
                 raise WorkflowError("Workflow root changed before control")
+            from .workflow_interactions import answered, InteractionAlreadyAnswered, authorize
+            interaction_id = decision_id or attention_checkpoint_id
+            if not interaction_id and action in {"resume", "recover"} and not _internal and not _message_resume:
+                interaction_id = checkpoint_id(self, current)
+            # Exact internal forwarding replay is trusted only with its original delivery.
+            replay = _internal and _delivery is not None and (
+                current.get("accepted_inputs", {}).get(decision_id, {}).get("delivery") == _delivery
+                or current.get("forwarded_delivery_receipt") == _delivery)
+            prior_answer = answered(current, interaction_id) if interaction_id else None
+            known_delivery = current.get("input_deliveries", {}).get(interaction_id) or current.get("forwarded_delivery")
+            if known_delivery:
+                known_payload = known_delivery.get("payload", {})
+                if (known_payload.get("decision_id") != decision_id
+                        or attention_checkpoint_id is not None and known_payload.get("attention_checkpoint_id") != attention_checkpoint_id):
+                    # A later forwarded checkpoint may coexist with an older
+                    # receipt. It can never acknowledge or repair that receipt.
+                    known_delivery = None
+            accepted_delivery = None
+            if not prior_answer and interaction_id and not current.get("parent_link"):
+                # A crash may leave a prepared root delivery after its child committed.
+                # Consult only its verified active source, never an arbitrary history id.
+                delivery = known_delivery
+                source_id = (delivery or {}).get("payload", {}).get("source_id")
+                if source_id and source_id != run_id:
+                    from .workflow_inputs import verified_source
+                    if verified_source(self, current, source_id):
+                        prior_answer = answered(self.get_run(source_id, refresh_atomic=True), interaction_id)
+                        if prior_answer:
+                            accepted_delivery = delivery
+            if prior_answer and not replay:
+                if not _internal:
+                    authorize(self, current, interaction_owner, action)
+                original_payload = (known_delivery or {}).get("payload", {})
+                exact_retry = (not _internal and bool(known_delivery)
+                               and prior_answer["answered_by"] == (interaction_owner or "caller")
+                               and original_payload.get("instructions") == instructions
+                               and original_payload.get("additional_attempts") == additional_attempts
+                               and original_payload.get("decision_id") == decision_id
+                               and original_payload.get("allow_optional_review_skip", False) is allow_optional_review_skip
+                               and (original_payload.get("interaction_owner") or "caller") == (interaction_owner or "caller")
+                               and prior_answer["action"] == action)
+                if accepted_delivery:
+                    # Finish only the original durable delivery. Its exact source
+                    # replay cannot apply another answer or grant fresh attempts.
+                    payload = accepted_delivery["payload"]
+                    _TREE_MUTATION.active["interaction_request"] = {
+                        "interaction_id": interaction_id, "action": prior_answer["action"],
+                        "answer": payload["instructions"], "responder": prior_answer["answered_by"]}
+                    repaired = self._control(run_id, prior_answer["action"], payload["instructions"], payload["additional_attempts"],
+                                  decision_id=payload.get("decision_id"),
+                                  allow_optional_review_skip=payload.get("allow_optional_review_skip", False),
+                                  interaction_owner=payload.get("interaction_owner"))
+                    if exact_retry:
+                        return repaired
+                elif exact_retry:
+                    # An exact retry of the original authorized forwarding is an
+                    # acknowledgement, never another answer or attempt grant.
+                    result = copy.deepcopy(current)
+                    source_id = original_payload.get("source_id")
+                    if decision_id and source_id:
+                        from .workflow_inputs import verified_source
+                        from .workflow_invocation import publish_input
+                        if verified_source(self, current, source_id):
+                            publish_input(self, self.get_run(source_id, refresh_atomic=True))
+                            result = self.get_run(run_id, refresh_atomic=True)
+                    accepted = current.get("accepted_inputs", {}).get(decision_id)
+                    if accepted:
+                        result["input_delivery_receipt"] = {"workflow_run_id": original_payload["source_id"],
+                            "decision_id": decision_id, "accepted_at": accepted["accepted_at"],
+                            "delivery_id": known_delivery["id"]}
+                    return result
+                raise InteractionAlreadyAnswered(prior_answer)
+            if not _internal or interaction_id:
+                _TREE_MUTATION.active["interaction_request"] = {
+                    "interaction_id": interaction_id, "action": action,
+                    "answer": instructions, "responder": interaction_owner or "caller"}
             if guarded:
                 require_checkpoint(self, current, attention_checkpoint_id, action)
                 # Scheduler recovery has its own validation lifecycle; attention
@@ -1618,6 +1718,10 @@ class WorkflowStore:
                         r.pop('forwarded_delivery', None)
                     r['input_delivery_receipt'] = receipt
                     r.setdefault('accepted_inputs', {})[decision_id] = {'accepted_at': receipt['accepted_at']}
+                    from .workflow_interactions import answered, record_answer
+                    winner = answered(child, decision_id)
+                    if winner:
+                        record_answer(r, decision_id, 'resume', instructions, interaction_owner, receipt=winner)
                     if r.get('input_decision_id') == decision_id and (r.get('input_source') or {}).get('workflow_run_id') == source_id:
                         for key in ('input_question', 'input_question_items', 'input_decision_id', 'input_source', 'optional_review_skip_available'):
                             r.pop(key, None)

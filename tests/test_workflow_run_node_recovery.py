@@ -939,7 +939,8 @@ def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, 
         return
     with pytest.raises(w.WorkflowError, match='original caller'):
         restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='caller', **options)
-    with pytest.raises(w.WorkflowError, match='pending'):
+    expected = 'already been answered' if failure_target in {'child-after-write', 'parent'} else 'pending'
+    with pytest.raises(w.WorkflowError, match=expected):
         restarted.control(parent['workflow_run_id'], 'resume', 'changed answer', 3, interaction_owner='monitor', **options)
     if failure_target == 'parent':
         # A child may already publish its next checkpoint before parent acknowledgment.

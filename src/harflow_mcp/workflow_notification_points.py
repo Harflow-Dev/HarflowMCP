@@ -1,4 +1,4 @@
-"""Durable notification points for root workflow runs.
+"""Durable notification points for workflow runs.
 
 A point records that a root run reached something a subscriber may care about: it settled
 (`workflow.settled`) or needs the caller (`workflow.attention`). Points are computed inside
@@ -236,6 +236,9 @@ def build_snapshot(run: dict[str, Any], scale: int = 1) -> dict[str, Any]:
         "name": run.get("name"),
         "kind": run.get("kind"),
         "goal_revision": run.get("goal_revision"),
+        "last_interaction": ({**run["interaction_history"][-1],
+            "answer": _text(run["interaction_history"][-1]["answer"], REASON_LIMIT // scale)[0]}
+            if run.get("interaction_history") else None),
         "definition": {
             "workflow_id": definition.get("workflow_id"),
             "revision": run.get("revision"),
@@ -369,7 +372,10 @@ def _enforce_total_bound(run: dict[str, Any], fresh: dict[str, Any] | None = Non
 
 
 def record_point(run: dict[str, Any], event: str) -> None:
-    """Append this mutation's notification point to a root run, in two guarded steps.
+    """Append this mutation's notification point, retaining child episodes for the native feed.
+
+    Outbound subscriptions still select only roots. Child-local snapshots preserve siblings that
+    are answered before the root promotes their question to its visible attention checkpoint.
 
     The identity (pure field reads) goes in first; the snapshot is attached afterwards, and a
     snapshot failure leaves the identity with `snapshot: null, snapshot_error: true`. If even the
@@ -378,7 +384,7 @@ def record_point(run: dict[str, Any], event: str) -> None:
     """
     point: dict[str, Any] | None = None
     try:
-        key = point_key(run, event)
+        key = point_key(dict(run, parent_link=None), event)
         if key is None or key == _latest_key(run):
             return
         kind = event_for(key)

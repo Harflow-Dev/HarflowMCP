@@ -66,8 +66,7 @@ def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     status = run.get("status")
     monitor_owned = run.get("interaction_owner", "caller") == "monitor"
     state, owner_reason = owner_state(run, storage)
-    ownership_reason = "" if monitor_owned or state == "dead" else (
-        "Original caller is alive" if state == "alive" else "Original caller ownership is uncertain: " + owner_reason)
+    ownership_reason = "" if monitor_owned or state in {"alive", "dead"} else "Original caller ownership is uncertain: " + owner_reason
     delegation_reason = "" if run.get("execution_contract") == "delegation" and run.get("kind") != "builder" else "This control requires a delegation workflow"
     common = delegation_reason or ownership_reason or _continuation_reason(storage, run)
     set_action("resume", common or ("Only paused/attention/input workflows can resume" if status not in {"paused", "needs_input", "needs_attention"} else ""))
@@ -96,9 +95,8 @@ def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
         for action in ("resume", "recover"):
             if controls[action]["allowed"]:
                 set_action(action, reason)
-    # Pause does not claim caller authority: only resume/recover/goal revision
-    # (and explicit messaging) support the qualified dead-caller handover.
-    set_action("pause", ("Workflow interaction belongs to its original caller" if not monitor_owned else "")
+    # Shared controls preserve interaction ownership and recheck qualification at mutation.
+    set_action("pause", ownership_reason
                or ("Workflow is not running" if status not in {"starting", "running"} else ""))
     allowed, reason = eligibility(storage, run)
     set_action("cancel", "" if allowed else reason)

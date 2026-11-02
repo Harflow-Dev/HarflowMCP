@@ -1689,8 +1689,12 @@ async def test_reasked_caller_question_has_new_identity_and_authored_items(stora
     assert second['input_decision_id'] != first
     assert second['input_question'] == 'Second clarification?'
     assert first in second['accepted_inputs']
-    with pytest.raises(w.WorkflowError, match='decision_id'):
+    from harflow_mcp.workflow_interactions import InteractionAlreadyAnswered
+    with pytest.raises(InteractionAlreadyAnswered) as refusal:
         storage.control(run['workflow_run_id'], 'resume', instructions='Stale answer', decision_id=first)
+    assert refusal.value.data['interaction']['answer'] == 'First answer'
+    assert refusal.value.data['interaction']['answered_by'] == 'caller'
+    assert storage.get_run(run['workflow_run_id'])['input_decision_id'] == second['input_decision_id']
 
 
 @pytest.mark.parametrize('items', ['one item', [None], [''], [12]])

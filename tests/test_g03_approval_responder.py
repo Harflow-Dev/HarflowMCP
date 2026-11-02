@@ -341,3 +341,20 @@ async def test_undecidable_lineage_refuses_without_mutation(tmp_path: Path, monk
         await approval_runtime.respond_request(registry, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve")
     assert raised.value.reason == "caller_undecidable"
     assert approvals.get(directory, "task-1", row["request_id"])["decision"] is None
+
+
+@pytest.mark.parametrize('winner,loser', [('caller', 'monitor'), ('monitor', 'caller')])
+def test_reservation_keeps_timestamp_and_winner_on_stale_revision(tmp_path, winner, loser):
+    directory = _state(tmp_path)
+    row = _admit(directory)
+    accepted = approvals.reserve(directory, 'task-1', row['request_id'], row['action_digest'],
+                                 row['owner_revision'], 'approve', row['generation'], responder=winner)
+    assert accepted['decided_at'] > 0
+    assert approvals.get(directory, 'task-1', row['request_id'])['decided_at'] == accepted['decided_at']
+    with pytest.raises(approvals.ApprovalError) as refused:
+        approvals.reserve(directory, 'task-1', row['request_id'], row['action_digest'],
+                          row['owner_revision'], 'reject', row['generation'], responder=loser)
+    assert refused.value.reason == 'not_current'
+    assert refused.value.data['interaction'] == {
+        'interaction_id': row['request_id'], 'action': 'approval', 'answer': 'approve',
+        'answered_by': winner, 'answered_at': accepted['decided_at'], 'task_id': 'task-1'}

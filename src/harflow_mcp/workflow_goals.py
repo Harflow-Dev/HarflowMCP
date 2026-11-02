@@ -104,6 +104,11 @@ def revise(store: Any, run_id: str, goal: str, expected_revision: int, *, intera
             raise WorkflowError("Revise the root workflow goal")
         from .workflow_interactions import authorize
         authorize(store, run, interaction_owner, "revise_goal")
+        from .workflow_interactions import answered, record_answer, InteractionAlreadyAnswered
+        interaction_id = "goal:" + str(expected_revision)
+        receipt = answered(run, interaction_id)
+        if receipt:
+            raise InteractionAlreadyAnswered(receipt)
         if run.get("status") not in {"paused", "needs_input"}:
             raise WorkflowError("Goal revision requires a paused or awaiting-input checkpoint")
         if run.get("goal_revision", 0) != expected_revision:
@@ -123,6 +128,7 @@ def revise(store: Any, run_id: str, goal: str, expected_revision: int, *, intera
                 token.pop(key, None)
             token["requires_assignment"] = True
         run["sessions"] = {}
+        record_answer(run, interaction_id, "revise_goal", goal, interaction_owner)
     return store.update_run(run_id, change, "goal_revised", {"expected_revision": expected_revision})
 
 

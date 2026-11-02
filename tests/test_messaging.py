@@ -314,7 +314,7 @@ def test_terminal_now_is_truthfully_undeliverable(storage, tmp_path, status):
     assert response['reason'] == storage.get_run(rid)['messages'][0]['reason']
 
 
-async def test_builder_now_rechecks_handover_at_atomic_feedback_mutation(storage, tmp_path, monkeypatch):
+async def test_builder_now_rechecks_explicit_handover_at_atomic_feedback_mutation(storage, tmp_path, monkeypatch):
     from harflow_mcp import identity
     run = storage.create_run(w.validate_definition(graph()), 'builder request', tmp_path, kind='builder', freedom='read_only')
     rid = run['workflow_run_id']
@@ -327,7 +327,12 @@ async def test_builder_now_rechecks_handover_at_atomic_feedback_mutation(storage
         original(store, value, responder, action)
         if responder == 'caller' and not interleaved:
             interleaved.append(True)
-            m.send(storage, rid, 'Monitor claimed ownership', interaction_owner='monitor')
+            # Shared answering no longer transfers ownership; explicitly seed the
+            # separate historical handover boundary this atomic-refusal test covers.
+            store.update_run(rid, lambda current: current.update(
+                interaction_owner='monitor', interaction_handover={
+                    'timestamp': 1.0, 'reason': 'pid_absent', 'previous_owner': 'caller',
+                    'responder': 'monitor', 'action': 'message'}), 'fixture_explicit_handover')
     monkeypatch.setattr(m, '_authorize', handover_after_outer_authorization)
     launched = []
     monkeypatch.setattr(w, '_launch', lambda *args: launched.append(args))

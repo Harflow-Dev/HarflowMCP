@@ -46,7 +46,7 @@ def send(storage, run_id: str, text: str, *, task_id: str | None = None,
     if delivery not in {"queue", "now"}:
         raise inbox.SendRefused("delivery must be queue or now", code="invalid_delivery")
     message = {"id": uuid.uuid4().hex, "status": "queued", "text": text,
-               "delivery": delivery, "queued_at": time.time()}
+               "delivery": delivery, "queued_at": time.time(), "responder": interaction_owner}
     def queue(run):
         _authorize(storage, run, interaction_owner, "message")
         target = {"kind": "workflow", "workflow_run_id": run_id}

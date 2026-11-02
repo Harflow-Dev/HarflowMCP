@@ -46,21 +46,41 @@ class ApprovalError(ValueError):
         if reason not in self.REASONS:
             raise ValueError("Unknown approval error reason")
         self.reason = reason
+        self.data = {"reason": reason}
+
+
+def answer_receipt(row: dict[str, Any]) -> dict[str, Any] | None:
+    if row.get("decision") not in {"approve", "reject"} or row.get("responder") not in RESPONDERS or not row.get("decided_at"):
+        return None
+    return {"interaction_id": row["request_id"], "action": "approval", "answer": row["decision"],
+            "answered_by": row["responder"], "answered_at": row["decided_at"], "task_id": row["task_id"]}
+
+
+def stale_refusal(row: dict[str, Any]) -> ApprovalError:
+    error = ApprovalError("not_current", "Stale approval action, revision or owner generation")
+    receipt = answer_receipt(row)
+    if receipt:
+        error.data["interaction"] = receipt
+    return error
 
 
 def state_refusal(row: dict[str, Any], now: float) -> ApprovalError | None:
     """Why a decision on `row` can no longer be taken, by fixed precedence: a settled disposition (`expired` when the
     system expired it, else `settled`), a Harflow system rejection (`settled`), a passed deadline (`expired`), then a
     recorded decision or delivery already under way (`already_answered`). None when the row still awaits a decision."""
+    error = None
     if row["disposition"] != "pending":
-        return ApprovalError("expired" if row["disposition"] == "expired" else "settled", "Approval request is already settled")
-    if row.get("system_rejection"):
-        return ApprovalError("settled", "Approval request was rejected by Harflow and cannot be decided")
-    if row["deadline"] <= now:
-        return ApprovalError("expired", "Approval request is expired")
-    if row["delivery"] != "pending":
-        return ApprovalError("already_answered", "Approval request is already answered")
-    return None
+        error = ApprovalError("expired" if row["disposition"] == "expired" else "settled", "Approval request is already settled")
+    elif row.get("system_rejection"):
+        error = ApprovalError("settled", "Approval request was rejected by Harflow and cannot be decided")
+    elif row["deadline"] <= now:
+        error = ApprovalError("expired", "Approval request is expired")
+    elif row["delivery"] != "pending":
+        error = ApprovalError("already_answered", "Approval request is already answered")
+    receipt = answer_receipt(row)
+    if error is not None and receipt:
+        error.data["interaction"] = receipt
+    return error
 
 
 def canonical(value: Any) -> bytes:
@@ -94,6 +114,8 @@ def _qualified(data: Any, task_id: str) -> bytes:
             if (not isinstance(row, dict) or row.get("task_id") != task_id or
                     not isinstance(row.get("action"), dict) or row.get("action_digest") != digest(row["action"])):
                 raise ValueError("Invalid approval action snapshot")
+            if "decided_at" in row and (type(row["decided_at"]) not in (int, float) or row["decided_at"] <= 0):
+                raise ValueError("Invalid approval answer timestamp")
         return canonical(data)
     except (TypeError, UnicodeError, RecursionError) as exc:
         raise ValueError("Invalid approval ledger") from exc
@@ -305,12 +327,14 @@ def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, 
         if row is None:
             raise ApprovalError("not_current", "Approval request not found")
         if row["action_digest"] != action_digest or row["owner_revision"] != owner_revision or row["generation"] != generation:
+            if row["action_digest"] == action_digest and row["generation"] == generation:
+                raise stale_refusal(row)
             raise ApprovalError("not_current", "Stale approval action, revision or owner generation")
         refusal = state_refusal(row, time.time())
         if refusal is not None:
             raise refusal
         # `decided_by` keeps its meaning (any human decision is "caller"); `responder` is the authorizing channel.
-        row.update(decision=decision, decided_by="caller", responder=responder, delivery="reserved", owner_revision=owner_revision + 1)
+        row.update(decision=decision, decided_by="caller", responder=responder, decided_at=time.time(), delivery="reserved", owner_revision=owner_revision + 1)
         result = copy.deepcopy(row)
     return result
 

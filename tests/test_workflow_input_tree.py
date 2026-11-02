@@ -533,26 +533,23 @@ def test_monitor_answers_depth_two_after_qualified_caller_death(store, tmp_path,
     monkeypatch.setattr(workflows, '_launch', lambda storage, identifier: launches.append(identifier))
     result = store.control(root['workflow_run_id'], 'resume', 'human answer', decision_id='nested', interaction_owner='monitor')
     persisted = store.get_run(root['workflow_run_id'], refresh_atomic=True)
-    assert persisted['interaction_owner'] == 'monitor'
-    assert persisted['interaction_handover'] == result['interaction_handover']
-    assert persisted['interaction_handover']['reason'] == reason
-    assert persisted['interaction_handover']['action'] == 'resume'
-    assert persisted['interaction_handover']['previous_owner'] == 'caller'
-    assert persisted['interaction_handover']['responder'] == 'monitor'
-    assert persisted['interaction_handover']['timestamp'] > 0
+    assert persisted['interaction_owner'] == 'caller'
+    assert 'interaction_handover' not in persisted
+    assert persisted['interaction_history'][-1]['answered_by'] == 'monitor'
+    assert persisted['interaction_history'][-1]['workflow_run_id'] == child['workflow_run_id']
     assert store.get_run(child['workflow_run_id'])['instructions'] == 'human answer'
     assert launches == [root['workflow_run_id']]
     for descendant in (parent, child):
         current = store.get_run(descendant['workflow_run_id'])
-        assert workflow_interactions.projection(store, current)['interaction_state']['owner'] == 'monitor'
+        assert workflow_interactions.projection(store, current)['interaction_state']['owner'] == 'caller'
     # The original caller returning cannot replay or replace the accepted answer.
     for responder in ('caller', None):
-        with pytest.raises(workflows.WorkflowError, match='original caller|retry its original answer and grants'):
+        with pytest.raises(workflows.WorkflowError, match='already been answered'):
             store.control(root['workflow_run_id'], 'resume', 'human answer', decision_id='nested', interaction_owner=responder)
     assert len(launches) == 1
 
 
-@pytest.mark.parametrize('verdict,reason', [('alive', 'start_time_match'), ('undecidable', 'ps_failed'), ('dead', 'legacy_markers_not_seen')])
+@pytest.mark.parametrize('verdict,reason', [('undecidable', 'ps_failed'), ('dead', 'legacy_markers_not_seen')])
 def test_monitor_cannot_answer_depth_two_while_caller_alive_or_unknown(store, tmp_path, monkeypatch, verdict, reason):
     from harflow_mcp import identity
     root, parent, child = caller_owned_nested_question(store, tmp_path)
@@ -601,12 +598,11 @@ def test_returning_caller_cannot_answer_new_decision_after_monitor_handover(stor
     monkeypatch.setattr(workflows, '_launch', lambda storage, identifier: launches.append(identifier))
     store.control(root['workflow_run_id'], 'resume', 'human answer', decision_id='nested', interaction_owner='monitor')
     store.update_run(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='new-question', input_question='Another question'), 'fixture')
-    with pytest.raises(workflows.WorkflowError, match='original caller'):
-        store.control(root['workflow_run_id'], 'resume', 'returning caller answer', decision_id='new-question', interaction_owner=responder)
+    store.control(root['workflow_run_id'], 'resume', 'returning caller answer', decision_id='new-question', interaction_owner=responder)
     persisted = store.get_run(child['workflow_run_id'])
-    assert 'new-question' not in persisted.get('accepted_inputs', {})
-    assert persisted['status'] == 'needs_input'
-    assert len(launches) == 1
+    assert 'new-question' in persisted['accepted_inputs']
+    assert persisted['status'] == 'running'
+    assert len(launches) == 2
 
 
 @pytest.mark.parametrize('protected', [False, True])
@@ -640,7 +636,7 @@ def test_internal_child_answer_after_monitor_handover_uses_root_authority(store,
         assert persisted['instructions'] == delivery['payload']['instructions']
         assert persisted['interaction_owner'] == 'caller'
         # The retained child owner is historical; its authority comes from root.
-        assert store.get_run(root['workflow_run_id'])['interaction_owner'] == 'monitor'
+        assert store.get_run(root['workflow_run_id'])['interaction_owner'] == 'caller'
 
 
 @pytest.mark.parametrize('status', ['paused', 'needs_attention', 'needs_input'])

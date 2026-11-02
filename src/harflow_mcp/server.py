@@ -941,7 +941,7 @@ async def respond_approval_request(task_id: str, request_id: str, action_digest:
     try:
         return await respond_request(_reg(), task_id, request_id, action_digest, owner_revision, decision, interaction_owner)
     except (OSError, ValueError) as exc:
-        raise MCPError(INVALID_PARAMS, str(exc)) from None
+        raise MCPError(INVALID_PARAMS, str(exc), data=getattr(exc, "data", None)) from None
 
 
 @mcp.tool()
@@ -2638,7 +2638,7 @@ async def _workflow_dispatch(action: str, **kwargs: Any) -> Any:
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         from .workflow_attention import CheckpointError
-        data = {"code": exc.code} if isinstance(exc, CheckpointError) else None
+        data = getattr(exc, "data", None) or ({"code": exc.code} if isinstance(exc, CheckpointError) else None)
         if hasattr(exc, "missing_references"):
             data = {"missing_references": exc.missing_references,
                     "missing_references_truncated": exc.missing_references_truncated}

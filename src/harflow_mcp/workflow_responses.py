@@ -167,7 +167,7 @@ COMPACT_FIELDS = frozenset({
     "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling",
     "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract",
     "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count", "attention_checkpoint_id", "monitor_controls",
-    "resolved_from", "messages", "messages_truncated", "interaction_state", "workflow_id", "approval_summary",
+    "resolved_from", "messages", "messages_truncated", "interaction_state", "interaction_history", "interaction_history_truncated", "workflow_id", "approval_summary",
     "parent_workflow_run_id", "root_workflow_run_id", "parent_execution_id", "orchestrator_mode", "orchestrator_session_owner_run_id",
     "pending_inputs", "pending_attention", "input_delivery_receipt", "input_source", "tree_settling", "suspended_via_root",
     "checklist_disposition", "usage_limit_recovery", "on_demand_calls_count", "on_demand_state", "response_version", "details",
@@ -235,6 +235,11 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
         result["messages_truncated"] = len(result["messages"]) != len(run["messages"]) or any(m.get("text_truncated") for m in result["messages"])
     if "interaction_state" in run:
         result["interaction_state"] = copy.deepcopy(run["interaction_state"])
+    if "interaction_history" in run:
+        history = run["interaction_history"][-8:]
+        result["interaction_history"] = [{**item, "answer": item["answer"][:200],
+            "answer_truncated": item.get("answer_truncated", False) or len(item["answer"]) > 200} for item in history]
+        result["interaction_history_truncated"] = bool(run.get("interaction_history_truncated")) or len(history) != len(run["interaction_history"]) or any(item.get("answer_truncated") or len(item["answer"]) > 200 for item in history)
     result["finished_at"] = qualified_finished_at(run)
     definition = run.get("definition")
     if run.get("kind") != "builder" and isinstance(definition, dict) and (definition.get("workflow_id") or definition.get("name")):

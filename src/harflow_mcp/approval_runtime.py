@@ -301,6 +301,8 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     if raw["interaction_owner"] != ctx["interaction_owner"] or raw["root_workflow_run_id"] != ctx["root_workflow_run_id"]:
         raise ApprovalError("not_current", "Approval workflow ownership has changed")
     if raw["action_digest"] != action_digest or raw["owner_revision"] != owner_revision:
+        if raw["action_digest"] == action_digest:
+            raise approvals.stale_refusal(raw)
         raise ApprovalError("not_current", "Stale approval action, revision or owner generation")
     refusal = approvals.state_refusal(raw, time.time())
     if refusal is not None:

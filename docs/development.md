@@ -57,3 +57,12 @@ exec authority. The selected policy preserves launch/configuration behavior and 
 persistence and uncertain effective authority through conservative reports. Qualified bounded modes
 keep their existing version and configuration gates; no additional mode is enabled by this correction. See
 [measured facts](backend-cli-facts.md#ordinary-codex-exec-authority).
+
+## Shared interaction regression checks
+
+Shared caller/Monitor answering is covered by `test_workflow_shared_interactions.py`,
+`test_workflow_interactions.py`, `test_workflow_input_tree.py` and
+`test_g03_approval_responder.py`. Native notification discovery is exercised through
+`test_interaction_events.py` against isolated retained state; these tests never post
+macOS notifications or send provider messages. Contract fixtures include explicit
+synthetic shared-answer specimens and actual isolated approval CLI output.

@@ -130,6 +130,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     notification_p.add_argument('workflow_run_id')
     notification_p.add_argument('--json', action='store_true')
 
+    interaction_p = sub.add_parser('interaction-events', help='read bounded durable interaction and task completion events; direct callers only')
+    interaction_p.add_argument('--cursor')
+    interaction_p.add_argument('--limit', type=int, default=50)
+    interaction_p.add_argument('--json', action='store_true')
+
     hits_p = sub.add_parser('limit-hits', help='latest provider usage-limit hit per backend and requested model from persisted task records; direct callers only')
     hits_p.add_argument('--backend')
     hits_p.add_argument('--model', help='requested model (a task on the backend default has none)')
@@ -1890,12 +1895,24 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except approvals.ApprovalError as exc:
-            return _fail(args, "approval_error", str(exc), {"reason": exc.reason})
+            return _fail(args, "approval_error", str(exc), getattr(exc, "data", {"reason": exc.reason}))
         except id_resolution.IdResolutionError as exc:
             return _fail(args, exc.code, str(exc), exc.data)
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
+
+    if args.command == 'interaction-events':
+        from .takeover import caller_refusal
+        from .interaction_events import page
+        try:
+            if caller_refusal(default_log_dir()) is not None:
+                return _fail(args, 'unauthorized', 'Interaction events require a direct caller')
+            result = page(default_log_dir(), cursor=args.cursor, limit=args.limit)
+        except (OSError, ValueError) as exc:
+            return _fail(args, 'interaction_events_error', str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {'result': result})) if args.json else json.dumps(result, indent=2))
         return 0
 
     if args.command == 'workflow-notifications':

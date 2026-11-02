@@ -173,17 +173,13 @@ def authorize(storage: Any, run: dict[str, Any], responder: str | None, action: 
         responder = "caller"
     if responder == owner:
         return
-    if responder != "monitor" or owner != "caller" or action not in {"resume", "recover", "revise_goal", "message", "cancel_message"}:
+    if responder != "monitor" or owner != "caller" or action not in {"pause", "resume", "cancel", "recover", "revise_goal", "message", "cancel_message"}:
         raise WorkflowError("Workflow interaction belongs to its original caller")
     state, reason = owner_state(root, storage)
-    if state != "dead":
+    if state not in {"alive", "dead"}:
         raise WorkflowError("Workflow interaction belongs to its original caller; caller is " + state)
-    if not pending and root.get("status") not in {"needs_input", "needs_attention", "paused", "failed", "starting", "running", "cancelling"}:
-        raise WorkflowError("No pending workflow interaction can be handed over")
-    if root is not run:
-        raise WorkflowError("Claim the pending interaction through the root workflow")
-    run["interaction_owner"] = "monitor"
-    run["interaction_handover"] = {"timestamp": time.time(), "reason": reason, "previous_owner": "caller", "responder": "monitor", "action": action}
+    # Monitor is an additional responder, never a permanent ownership transfer.
+    # Its human-only transport check remains the public adapter's responsibility.
 
 
 def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
@@ -193,11 +189,65 @@ def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     pending = run.get("status") in {"needs_input", "needs_attention", "paused", "failed"} or bool(run.get("pending_inputs") or run.get("pending_attention"))
     if run.get("status") in {"starting", "running", "cancelling"} and root.get("supervisor_identity"):
         pending = pending or identity.check_detail(root["supervisor_identity"])[0] == "dead"
-    available = pending and (owner == "monitor" or state == "dead")
-    return {"interaction_state": {"owner": owner, "caller_state": state, "monitor_available": available, "reason": "" if available else reason if state != "alive" else "Original caller is alive", "handover": copy.deepcopy(root.get("interaction_handover"))}}
+    available = pending and (owner == "monitor" or state in {"alive", "dead"})
+    responders = ["monitor"] if owner == "monitor" else ["caller", "monitor"] if state in {"alive", "dead"} else ["caller"]
+    return {"interaction_state": {"owner": owner, "responders": responders, "caller_state": state, "monitor_available": available, "reason": "" if available else reason if state != "alive" else "Original caller is alive", "handover": copy.deepcopy(root.get("interaction_handover"))}}
 
 
 def validate_handover(value: Any) -> None:
     import math
     if type(value) is not dict or set(value) != {"timestamp", "reason", "previous_owner", "responder", "action"} or type(value["timestamp"]) not in (int, float) or not math.isfinite(value["timestamp"]) or value["timestamp"] <= 0 or value["previous_owner"] != "caller" or value["responder"] != "monitor" or value["action"] not in {"resume", "recover", "revise_goal", "message", "cancel_message"} or type(value["reason"]) is not str or value["reason"] not in {"pid_absent", "start_time_differs"}:
         raise ValueError("Malformed interaction_handover")
+
+
+HISTORY_LIMIT = 100
+HISTORY_BYTES = 256 * 1024
+ANSWER_BYTES = 64 * 1024
+HISTORICAL_ANSWER_BYTES = 2048
+
+
+from .workflows import WorkflowError
+
+
+class InteractionAlreadyAnswered(WorkflowError):
+    """A durable exact-checkpoint receipt won the tree's control CAS."""
+    code = "interaction_already_answered"
+
+    def __init__(self, receipt):
+        self.data = {"code": self.code, "interaction": copy.deepcopy(receipt)}
+        super().__init__("This stale workflow interaction has already been answered; refresh the workflow")
+
+
+def answered(run, interaction_id):
+    return next((item for item in reversed(run.get("interaction_history", []))
+                 if item["interaction_id"] == interaction_id), None)
+
+
+def record_answer(run, interaction_id, action, answer, responder, *, receipt=None):
+    if not interaction_id or answered(run, interaction_id):
+        return
+    receipt = copy.deepcopy(receipt) if receipt else {
+        "interaction_id": interaction_id, "action": action, "answer": answer or "",
+        "answered_by": responder or "caller", "answered_at": time.time(),
+        "workflow_run_id": run["workflow_run_id"],
+    }
+    history = run.setdefault("interaction_history", [])
+    history.append(receipt)
+    if receipt.get("answer_truncated"):
+        run["interaction_history_truncated"] = True
+    if len(history) > HISTORY_LIMIT:
+        run["interaction_history_truncated"] = True
+        del history[:-HISTORY_LIMIT]
+    # Keep the latest actionable receipt exact up to the input budget. Older
+    # display history is bounded in UTF-8 bytes, with explicit loss markers.
+    import json
+    for index, item in enumerate(history):
+        budget = ANSWER_BYTES if index == len(history) - 1 else HISTORICAL_ANSWER_BYTES
+        raw = item["answer"].encode("utf-8")
+        if len(raw) > budget:
+            item["answer"] = raw[:budget].decode("utf-8", errors="ignore")
+            item["answer_truncated"] = True
+            run["interaction_history_truncated"] = True
+    while len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > HISTORY_BYTES:
+        history.pop(0)
+        run["interaction_history_truncated"] = True

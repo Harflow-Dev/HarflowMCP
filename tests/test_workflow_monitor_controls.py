@@ -11,8 +11,8 @@ def _actionable_projection(storage, run):
     run["attention_checkpoint_id"] = workflow_attention.checkpoint_id(storage, run)
     return run
 
-@pytest.mark.parametrize('state,reason,allowed', [('alive','start_time_match',False), ('undecidable','ps_failed',False), ('dead','legacy_markers_not_seen',False), ('dead','pid_absent',True)])
-def test_caller_control_requires_qualified_death(pending, monkeypatch, state, reason, allowed):
+@pytest.mark.parametrize('state,reason,allowed', [('alive','start_time_match',True), ('undecidable','ps_failed',False), ('dead','legacy_markers_not_seen',False), ('dead','pid_absent',True)])
+def test_caller_control_requires_qualified_identity(pending, monkeypatch, state, reason, allowed):
     storage, run = pending
     _actionable_projection(storage, run)
     before = copy.deepcopy(run)
@@ -75,10 +75,9 @@ def test_message_handover_and_returning_caller_refusal(pending, monkeypatch):
     monkeypatch.setattr(identity, 'check_detail', lambda evidence:('dead','pid_absent'))
     storage.update_run(run['workflow_run_id'], lambda value:i.authorize(storage,value,'monitor','message',pending=True), 'message')
     claimed = storage.get_run(run['workflow_run_id'])
-    assert claimed['interaction_owner'] == 'monitor'
-    i.validate_handover(claimed['interaction_handover'])
-    with pytest.raises(workflows.WorkflowError, match='original caller'):
-        i.authorize(storage,claimed,'caller','message',pending=True)
+    assert claimed['interaction_owner'] == 'caller'
+    assert 'interaction_handover' not in claimed
+    i.authorize(storage,claimed,'caller','message',pending=True)
 
 
 @pytest.mark.parametrize('status', ['starting', 'running', 'cancelling'])

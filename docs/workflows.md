@@ -1969,17 +1969,15 @@ is exclusive to that verified source. Receipt replay requires the source to rema
 verified; stale or unavailable decisions must be re-read before retrying. An accepted
 answer does not grant extra retries, skip consent or recovery authority implicitly.
 
-A verified human Monitor caller may claim a pending interaction when the original
-caller's qualified process is confirmed gone. Root authority then becomes Monitor
-and the accepted mutation records the handover time, reason, previous owner and
-responder. Descendants inherit that authority; a returning caller cannot answer the
-same question again. Live callers retain authority; missing historical evidence,
-failed process probes, unsupported launcher ancestry and ambiguous managed task or
-session continuations remain unknown and refuse handover. Scheduler loss alone never
-proves caller loss. The optional live-caller sharing mode is not implemented.
-Existing decision, permission, recovery and goal revision safeguards still apply;
-workflow tasks continue to require responses through workflow controls. See the
-[public interaction contract](contracts.md#caller-loss-and-workflow-interaction-handover).
+A verified human Monitor caller and the qualified original caller may both answer
+pending questions, recovery and goal revision on caller-owned runs. The first valid
+answer wins under the root tree mutation lock; its text, responder and timestamp
+are retained. A late answer receives `interaction_already_answered` with the winner,
+while internal exact delivery retries remain idempotent. Answering from Harflow does
+not transfer ownership, so later questions remain available to both responders.
+Unknown identity remains conservative. Child answers still use the verified root;
+existing decision, permission, scheduler recovery and goal revision safeguards apply.
+See the [public interaction contract](contracts.md#caller-loss-and-workflow-interaction-handover).
 
 ### Continuing the checkpoint you inspected
 
