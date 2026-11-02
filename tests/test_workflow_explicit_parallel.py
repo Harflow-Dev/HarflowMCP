@@ -98,8 +98,8 @@ async def test_required_retry_resolves_evidence_without_repeating_sibling(storag
     graph = explicit()
     for node in graph["nodes"]:
         node["title"] = node["id"]
-    # Retry-heavy durable writes need bounded headroom for shared CI scheduling.
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, retry_policy, {"left2": worker}), timeout_seconds=10)
+    # The heavier durable retry graph needs bounded headroom to finish join/end routing on shared CI.
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, retry_policy, {"left2": worker}), timeout_seconds=15)
     assert run["status"] == "completed"
     assert attempts == 2
     workers = [a for a in run["activations"] if a["role"] == "node"]

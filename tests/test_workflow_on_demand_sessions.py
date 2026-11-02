@@ -1,8 +1,10 @@
 """Session selection and native reuse for on-demand calls."""
-import asyncio
 import copy
 
 import pytest
+
+from execution_helper import run_bounded, workflow_snapshot
+from test_workflow_delegation import DEFAULT_WORKFLOW_TIMEOUT_SECONDS
 
 from harflow_mcp import workflows as w
 from harflow_mcp.workflow_on_demand import validate_action
@@ -118,7 +120,12 @@ async def test_two_native_calls_reuse_the_issued_specialist_session(tmp_path, mo
     specialist.update(agent={"backend": "codex"}, execution_mode="headless")
     registry = RecordingRegistry(tmp_path, policy)
     run = storage.create_run(w.validate_definition(definition), "Review API", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed", observed.get("attention_reason")
     assert len(observed["on_demand_calls"]) == 2
@@ -184,7 +191,12 @@ async def test_selected_resume_failure_returns_checkpoint_without_silent_fresh_d
     definition["on_demand_nodes"][0].update(agent={"backend": "codex"}, execution_mode="headless")
     registry = ResumeUnavailableRegistry(tmp_path, policy)
     run = storage.create_run(w.validate_definition(definition), "Review API", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention", observed.get("attention_reason")
     assert len(observed["on_demand_calls"]) == 2
@@ -210,7 +222,12 @@ async def test_specialist_primary_unavailable_uses_fallback_once_and_returns_res
 
     registry = NativeOnDemandRegistry(tmp_path, policy)
     run = storage.create_run(w.validate_definition(definition), "Review API", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed", observed.get("attention_reason")
     assert len(observed["on_demand_calls"]) == 1

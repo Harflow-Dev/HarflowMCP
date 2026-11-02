@@ -1,7 +1,9 @@
 """Refusal reconciliation preserves harness evidence without rewriting worker results."""
-import asyncio
 import copy
 import json
+
+from execution_helper import run_bounded, workflow_snapshot
+from test_workflow_delegation import DEFAULT_WORKFLOW_TIMEOUT_SECONDS
 
 from harflow_mcp import workflow_delegation as d, workflow_inspection as inspection, workflows as w
 from test_workflow_delegation import storage  # noqa: F401
@@ -17,7 +19,12 @@ async def test_final_reviewer_receives_exact_denial_and_explicit_skip_context(st
     assert run['optional_review_skip_available'] is True
     storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER,
                     decision_id=run['input_decision_id'], allow_optional_review_skip=True)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="resumed workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run['workflow_run_id'], registry),
+    )
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed'
     source = refused(final)
@@ -133,7 +140,12 @@ async def test_final_reviewer_gets_protocol_retry_ancestor_skip_context(storage,
     run, registry = await run_flow(storage, tmp_path, definition(), Registry(storage.root, choose, outputs), guided=True)
     storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER,
                     decision_id=run['input_decision_id'], allow_optional_review_skip=True)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="resumed workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run['workflow_run_id'], registry),
+    )
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed'
     reviews = [a for a in final['activations'] if a['role'] == 'node' and a['node_id'] == 'right']

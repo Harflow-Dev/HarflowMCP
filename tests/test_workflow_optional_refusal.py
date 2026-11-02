@@ -1,9 +1,11 @@
 """Caller answers can discard an optional review refusal, without retrying it."""
-import asyncio
 import copy
 import json
 
 import pytest
+
+from execution_helper import run_bounded, workflow_snapshot
+from test_workflow_delegation import DEFAULT_WORKFLOW_TIMEOUT_SECONDS
 
 from harflow_mcp import workflow_delegation as d, workflows as w
 from test_workflow_delegation import Registry, run_flow, storage  # noqa: F401
@@ -50,7 +52,12 @@ async def test_answer_and_explicit_skip_complete_final_review_without_replay(sto
     choices = d.continuations(resumed, node, token, False, root=storage.root)
     assert any(c['kind'] == 'skip_optional_review' for c in choices)
     assert not any(c['kind'] == 'retry_execution' for c in choices)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="resumed workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run['workflow_run_id'], registry),
+    )
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed', final.get('attention_reason')
     workers = [a for a in final['activations'] if a['role'] == 'node']
@@ -128,7 +135,12 @@ async def test_settled_failed_refusal_can_be_discarded_with_answer(storage, tmp_
     token = next(t for t in resumed['pending'] if t['node_id'] == 'right')
     node = next(n for n in resumed['definition']['nodes'] if n['id'] == 'right')
     assert [c['kind'] for c in d.continuations(resumed, node, token, False, root=storage.root)] == ['skip_optional_review']
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="resumed workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run['workflow_run_id'], registry),
+    )
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed'
     refused = next(a for a in final['activations'] if a['role'] == 'node' and a['node_id'] == 'right')
@@ -153,7 +165,12 @@ async def test_skip_denied_protocol_repair_discards_its_failed_ancestor(storage,
     assert reviews[0]['node_result']['result']['failure_kind'] == 'protocol'
     assert reviews[1]['retry_of_execution_id'] == reviews[0]['id']
     storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'], allow_optional_review_skip=True)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="resumed workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run['workflow_run_id'], registry),
+    )
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed', final.get('attention_reason')
     reviews = [a for a in final['activations'] if a['role'] == 'node' and a['node_id'] == 'right']

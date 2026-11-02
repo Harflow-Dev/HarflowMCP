@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic as _launch_snapshot_time
 
 import pytest
 
@@ -34,6 +35,97 @@ async def _wait_for(predicate, timeout: float = 5.0):
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError("timed out waiting for supervised task state")
         await asyncio.sleep(0.05)
+
+
+async def _wait_for_launch_snapshot(log_dir: Path, task_id: str, timeout: float = 5.0) -> dict:
+    """Capture one stable launch read; retry only a proven atomic replacement race."""
+    deadline = _launch_snapshot_time() + timeout
+    while True:
+        try:
+            snapshot = task_supervision.read_launch(log_dir, task_id)
+        except task_supervision.LaunchDocumentError as error:
+            if getattr(error, "_source_changed_during_read", None) is not True:
+                raise
+        else:
+            if snapshot is not None:
+                return snapshot
+        if _launch_snapshot_time() >= deadline:
+            raise AssertionError("timed out waiting for a stable launch snapshot")
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_launch_snapshot_retries_only_a_marked_replacement_and_returns_that_read(tmp_path, monkeypatch):
+    changed = task_supervision.LaunchDocumentError(tmp_path, "task", "launch_identity", "source replaced")
+    changed._source_changed_during_read = True
+    snapshot = {"generation": "captured"}
+    reads = iter([changed, snapshot])
+    calls = []
+
+    def read(*args):
+        calls.append(args)
+        value = next(reads)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(task_supervision, "read_launch", read)
+    assert await _wait_for_launch_snapshot(tmp_path, "task") is snapshot
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [None, False, 1, "true"])
+async def test_launch_snapshot_propagates_unmarked_or_nonboolean_races(tmp_path, monkeypatch, marker):
+    error = task_supervision.LaunchDocumentError(tmp_path, "task", "launch_identity", "malformed launch document")
+    if marker is not None:
+        error._source_changed_during_read = marker
+    calls = []
+
+    def read(*args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setattr(task_supervision, "read_launch", read)
+    with pytest.raises(task_supervision.LaunchDocumentError) as caught:
+        await _wait_for_launch_snapshot(tmp_path, "task")
+    assert caught.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_launch_snapshot_propagates_other_read_errors(tmp_path, monkeypatch):
+    error = ValueError("invalid launch")
+    error._source_changed_during_read = True
+    calls = []
+
+    def read(*args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setattr(task_supervision, "read_launch", read)
+    with pytest.raises(ValueError) as caught:
+        await _wait_for_launch_snapshot(tmp_path, "task")
+    assert caught.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_launch_snapshot_stops_at_its_deadline(tmp_path, monkeypatch):
+    error = task_supervision.LaunchDocumentError(tmp_path, "task", "launch_identity", "source replaced")
+    error._source_changed_during_read = True
+    calls = []
+
+    def read(*args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setattr(task_supervision, "read_launch", read)
+    clock = iter([0.0, 1.0, 2.0])
+    monkeypatch.setitem(globals(), "_launch_snapshot_time", lambda: next(clock))
+    with pytest.raises(AssertionError, match="stable launch snapshot"):
+        await _wait_for_launch_snapshot(tmp_path, "task", timeout=2)
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
@@ -167,8 +259,7 @@ async def test_native_observations_replay_in_order_and_require_final_watermark(t
     registry = TaskRegistry(log_dir=log_dir, execution_mode="supervised")
     task = await registry.start("reply observation", tmp_path, backend=get("claude"), freedom="read_only")
     await _wait_for(lambda: store.read(log_dir, task.task_id) is not None)
-    launch = task_supervision.read_launch(log_dir, task.task_id)
-    assert launch is not None
+    launch = await _wait_for_launch_snapshot(log_dir, task.task_id)
     generation = launch["generation"]
 
     task_observations.append(log_dir, task.task_id, generation, 1, {"kind": "child_started", "child_id": "c1"})
@@ -192,29 +283,30 @@ async def test_native_observations_page_at_1000_and_reject_incomplete_final_barr
     log_dir = _tasks(tmp_path)
     registry = TaskRegistry(log_dir=log_dir, execution_mode="supervised")
     task = await registry.start("slow 30 observation page", tmp_path, backend=get("claude"), freedom="read_only")
-    await _wait_for(lambda: store.read(log_dir, task.task_id) is not None)
-    launch = task_supervision.read_launch(log_dir, task.task_id)
-    assert launch is not None
-    generation = launch["generation"]
-    for sequence in range(1, 1002):
-        for _ in range(3):
-            try:
-                task_observations.append(log_dir, task.task_id, generation, sequence, {"sequence": sequence})
-                break
-            except store.TaskDocumentError:
-                await asyncio.sleep(0.02)
-        else:
-            raise AssertionError("observation append never found a stable launch reservation")
+    try:
+        await _wait_for(lambda: store.read(log_dir, task.task_id) is not None)
+        launch = await _wait_for_launch_snapshot(log_dir, task.task_id)
+        generation = launch["generation"]
+        for sequence in range(1, 1002):
+            for _ in range(3):
+                try:
+                    task_observations.append(log_dir, task.task_id, generation, sequence, {"sequence": sequence})
+                    break
+                except store.TaskDocumentError:
+                    await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("observation append never found a stable launch reservation")
 
-    first, watermark = task_observations.read(log_dir, task.task_id)
-    assert len(first) == 1000 and first[-1]["sequence"] == 1000 and watermark is None
-    second, watermark = task_observations.read(log_dir, task.task_id, after=1000)
-    assert [entry["sequence"] for entry in second] == [1001] and watermark is None
+        first, watermark = task_observations.read(log_dir, task.task_id)
+        assert len(first) == 1000 and first[-1]["sequence"] == 1000 and watermark is None
+        second, watermark = task_observations.read(log_dir, task.task_id, after=1000)
+        assert [entry["sequence"] for entry in second] == [1001] and watermark is None
 
-    task_observations.finish(log_dir, task.task_id, generation, 1000)
-    with pytest.raises(ValueError, match="final barrier incomplete"):
-        task_observations.read(log_dir, task.task_id, after=1001)
-    await registry.cancel(task)
+        task_observations.finish(log_dir, task.task_id, generation, 1000)
+        with pytest.raises(ValueError, match="final barrier incomplete"):
+            task_observations.read(log_dir, task.task_id, after=1001)
+    finally:
+        await registry.cancel(task)
 
 
 @pytest.mark.asyncio
