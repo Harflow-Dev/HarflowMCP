@@ -521,6 +521,7 @@ async def start_task(
     workflow: str | None = None,
     auto_continue: StrictInt = 0,
     notify: str | None = None,
+    observe_repos: list[StrictStr] | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
     allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
     branch: str | None = None, base: str | None = None, fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False,
@@ -607,6 +608,8 @@ async def start_task(
         notify: Configured destination alias, direct callers only. Intent is durable before spawn.
             Receivers must deduplicate stable IDs; retries resume only while a server is active.
 
+        observe_repos: Optional list of up to seven absolute repository paths to observe alongside
+            the launch directory. Observation grants no filesystem or publishing authority.
         extra_writable_paths: Optional bounded list of existing absolute local file or directory
             paths. At most 16 paths, 4096 UTF-8 bytes each and 16384 bytes total. Relative paths,
             missing/special paths, filesystem roots and canonical duplicates are errors. Only
@@ -736,6 +739,8 @@ async def start_task(
     if workflow is not None:
         if caller_approvals or caller_write_approvals or interaction_owner != "caller":
             raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
+        if observe_repos is not None:
+            raise MCPError(INVALID_PARAMS, "Set observe_repos on workflow agent nodes for workflow launches")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
         if group_report_output is not None:
@@ -830,6 +835,7 @@ async def start_task(
             group=group,
             title=normalized_title,
             auto_continue=auto_continue,
+            **({'observe_repos': observe_repos} if observe_repos is not None else {}),
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
             **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
             **({'branch': branch} if branch is not None else {}), **({'base': base} if base is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
@@ -1138,7 +1144,7 @@ async def get_task_status(
     a running status during settlement does not authorize a replacement dispatch.
 
     Terminal `outcome` records starting and ending Git observations and diff statistics.
-    `new_commits` means newly reachable from initial HEAD, including imported history;
+    `new_commits` means newly reachable from the observed comparison base, including imported history;
     task-created commits and authorship are unavailable. Branch/HEAD are endpoint observations
     only; intermediate transitions are unobserved even when endpoints match. It also records
     local upstream comparison, optional bounded phase/probe diagnostics and partial-result status,

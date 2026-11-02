@@ -150,8 +150,11 @@ def _fields(strings="", counters="", numbers="", booleans="", objects="", arrays
 
 
 def _candidate(value, path):
-    _shape(value, {**_fields("backend instructions", booleans="caller_approvals caller_write_approvals git_https_rewrite group_report_output", arrays="allowed_commands", nullable_strings="model reasoning_effort"),
+    _shape(value, {**_fields("backend instructions", booleans="caller_approvals caller_write_approvals git_https_rewrite group_report_output", arrays="allowed_commands observe_repos", nullable_strings="model reasoning_effort"),
                    "max_turns": _nullable(_positive), "background_idle_seconds": NULL_NUMBER, "fallbacks": _array(_candidate)}, path)
+    if "observe_repos" in value:
+        from .task_documents import qualify_observe_repos
+        qualify_observe_repos(value["observe_repos"])
 
 
 def _identity(value, path):

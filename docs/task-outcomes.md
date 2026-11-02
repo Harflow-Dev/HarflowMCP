@@ -5,29 +5,45 @@ output. Outcomes are persisted; recovering status returns the original observati
 probing today's repository and presenting it as the task's terminal state. Older records and runs
 whose owner could not inspect the result return `null`.
 
-The outcome records a starting `baseline` and `terminal` observation: HEAD, branch and working tree
-status. `base_commit`, `head_commit`, `new_commits` (at most 100, with a truncation flag) and
-`committed_diff_stat` describe the original `base_commit..head_commit` range.
-`new_commits` means commits newly reachable from the initial HEAD, including history imported by
-checkout or fast-forward. It never identifies task-created commits: commit creation and authorship
-are unavailable, even when a task actually committed or another actor wrote into a shared checkout.
-The original baseline is never reset after a branch change. HEAD and branch are endpoint
-observations only; intermediate transitions are unobserved, even when both endpoints match.
-Full status reads clarify this attribution for older records without rewriting their saved evidence.
-Brief status and completion notifications retain bounded baseline/terminal HEAD, branch and
-provenance when the outcome is retained (oversized endpoint strings visibly end in `...[truncated]`), and carry the same attribution alongside commit lists.
-Their shorter lists use `new_commits_truncated` to disclose omission; full outcome limits remain
-unchanged. No reflog or narration is used to infer authorship. A missing/non-Git repository, absent Git,
-oversized output or timeout produces explicit unavailable fields. Failures never affect the
-agent's execution status.
+Git observation schema version 2 adds `git_observation_version: 2` and a bounded `repositories`
+list containing up to eight distinct worktree roots. The public ctl envelope remains wire `v: 1`;
+the observation version describes this additive outcome schema, not transport compatibility.
+Legacy top-level fields continue to describe the launch directory, including when it is a non-Git
+parent directory. Inspect `repositories` for work performed in child repositories.
 
-Baseline and terminal observations add `observation_status`: `success` when all four fields
-(HEAD, branch, repository root and working-tree status) are available, `partial` when some are
-available, or `unavailable`. Detached HEAD and unborn repositories can legitimately be partial.
-Each observation's `diagnostics` names its `phase` (`baseline` or `terminal`), shared `budget_ms`,
-`elapsed_ms` and at most 16 probes. The enclosing outcome has separate `capture` diagnostics for
-commit range, diffstat and local upstream queries. These phases use independent 1.5-second probe
-budgets; a working-tree check may fail while a later capture query independently succeeds.
+Pass `observe_repos` to `start_task` as up to seven additional absolute paths to capture their
+starting state before launch. Saved workflow agent candidates (including fallbacks) accept the
+same setting; resumes and continuations retain it. These paths are observations only: they do not
+grant filesystem, commit or publication authority. The primary directory plus explicit targets
+share one starting-observation budget. Canonical worktree roots are deduplicated; linked worktrees
+remain distinct and retain Git/common-directory identity evidence.
+
+During a run, normalized structured command directories (`cwd`/`workdir`), literal `git -C`
+commands and edit paths can discover additional repositories. Shell interpolation and agent
+narration are not repository discovery evidence. A repository first discovered midrun receives a
+baseline labelled `first_seen_midrun`; it cannot establish its dispatch state. Repository bounds,
+truncation and unavailable discovery evidence remain explicit.
+
+Each repository records `baseline` and `terminal` HEAD, branch and working-tree observations.
+`dispatch_head` retains the original observed HEAD. `base_commit`, `head_commit`, `new_commits`
+(at most 100, with a truncation flag), `base_provenance` and `committed_diff_stat` describe the
+observed comparison range. After a branch switch, an unambiguous locally recorded default-branch reference is preferred,
+with the local upstream as fallback, to select a merge-base; the provenance names the comparison. The original baseline is
+retained. Legacy outcomes keep their original initial-HEAD range semantics.
+
+Commit ranges contain newly reachable history, including imported commits. They never identify
+task-created commits or authorship, even when a task actually committed. HEAD and branch are
+endpoint observations; intermediate transitions remain unobserved. Brief status includes bounded
+repository counts and endpoint summaries. Full reads retain detailed observations. No reflog or
+narration establishes authorship. Missing Git, non-Git targets, oversized output and timeouts
+produce unavailable evidence without affecting task execution status.
+
+Baseline and terminal observations add `observation_status`: `success` when HEAD, repository root
+and working-tree status are available, `partial` when some are available, or `unavailable`.
+Detached HEAD and unborn repositories can legitimately be partial. Each observation's diagnostics
+names its phase, shared budget, elapsed time and at most 16 probes. All terminal repository/range
+probes share an aggregate three-second deadline; one repository cannot multiply the budget by the
+number of targets. Starting observations share 1.5 seconds.
 
 Each probe has a bounded semantic command label, `elapsed_ms` and a status: `success`,
 `git_failure` (nonzero exit), `time_limit`, `output_limit`, `skipped_budget_exhausted` (no command
@@ -61,8 +77,21 @@ custom Git configuration may appear dirty even when their ordinary Git status ap
 Pre-existing changes remain visible in the baseline; terminal differences cannot establish task
 authorship in a shared repository. Untracked directories use Git's normal collapsed presentation.
 
-`local_upstream` describes only the locally cached tracking ref and ahead/behind counts. `pushed`
-and `publication_evidence` are unavailable (`null`); a tracking ref cannot prove publication.
+`local_upstream` and `local_remote_refs` describe locally cached tracking refs, containment and
+ahead/behind counts. Their freshness is unknown: matching local refs cannot prove current remote
+state. `publication_evidence` retains bounded correlated standalone push/PR command results,
+including failures, command, call ID, exit code and repository identity. A successful push command
+is evidence of that command's result, never proof of current remote contents or exclusive task
+authorship. `push_evidence` names the local-ref corroboration and its unknown freshness; `pushed` describes
+that historical local evidence, never a current remote guarantee or attribution to a successful
+command. Failed command results remain failures. Unavailable publication stays `null`.
+
+At publish-capable dispatch, a non-Git launch directory receives a neutral notice without advice
+to cancel. Explicit observation targets are checked separately. A real repository's unknown
+branch notice identifies the observed cause (for example detached HEAD, no local remote HEAD,
+missing Git or timeout). Default branches come only from locally recorded remote HEADs; this
+check never fetches or guesses `main`/`master`. It samples once before launch, so it does not
+establish the eventual publication branch.
 
 `last_build_test` records the last recognized build/test command from correlated normalized tool
 calls/results, its observed exit code (or `null` if the harness did not supply one), and call ID.

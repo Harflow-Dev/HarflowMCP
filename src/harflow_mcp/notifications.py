@@ -168,21 +168,61 @@ def _text(value, limit=1024):
     return value.encode('utf-8')[:limit].decode('utf-8', 'ignore') if isinstance(value, str) else None
 
 
-def _payload(row, record, *, recovered=False, evidence=None):
-    # Only durable data; never resolve inferred deaths or replay prompt/raw output logs.
-    outcome = record.outcome if isinstance(record.outcome, dict) else {}
+def _git_projection(outcome):
+    """Keep per-repository provenance within the existing notification budget."""
     projection = {'pushed': outcome.get('pushed') if type(outcome.get('pushed')) is bool else None}
     projection.update(endpoint_projection(outcome))
-    for key in ('base_commit', 'head_commit', 'committed_diff_stat', 'publication_evidence'):
+    for key in ('repository_root', 'worktree', 'git_common_dir', 'dispatch_head',
+                'base_commit', 'head_commit', 'base_provenance', 'committed_diff_stat'):
         if key in outcome:
             projection[key] = _text(outcome[key], 512)
     if isinstance(outcome.get('local_upstream'), dict):
         projection['local_upstream'] = {key: _text(outcome['local_upstream'].get(key), 256)
-                                        for key in ('ref', 'ahead_behind', 'provenance')}
+                                        for key in ('ref', 'ahead_behind', 'provenance', 'freshness')}
+    if isinstance(outcome.get('publication_evidence'), list):
+        projection['publication_evidence'] = [
+            {key: ([_text(item, 256) for item in value[:8]] if key == 'ref' and isinstance(value, list)
+                   else value if type(value) in (bool, int) else _text(value, 256))
+             for key, value in entry.items() if key in
+             ('kind', 'command', 'exit_code', 'success', 'provenance', 'remote', 'ref', 'call_id',
+              'target_provenance', 'result_provenance')}
+            for entry in outcome['publication_evidence'][:3] if isinstance(entry, dict)]
+        projection['publication_evidence_truncated'] = len(outcome['publication_evidence']) > 3
+    elif 'publication_evidence' in outcome:
+        projection['publication_evidence'] = _text(outcome['publication_evidence'], 512)
+    if isinstance(outcome.get('local_remote_refs'), dict):
+        refs = outcome['local_remote_refs']
+        names = refs.get('containing_head')
+        projection['local_remote_refs'] = {
+            'containing_head': [_text(name, 256) for name in names[:8] if isinstance(name, str)]
+                if isinstance(names, list) else None,
+            'truncated': bool(refs.get('truncated') or isinstance(names, list) and len(names) > 8),
+            'freshness': _text(refs.get('freshness'), 128),
+            'provenance': _text(refs.get('provenance'), 256),
+        }
+    if isinstance(outcome.get('push_evidence'), dict):
+        evidence = outcome['push_evidence']
+        projection['push_evidence'] = {key: _text(evidence.get(key), 256)
+                                       for key in ('provenance', 'freshness', 'head')}
+        if isinstance(evidence.get('refs'), list):
+            projection['push_evidence']['refs'] = [_text(ref, 256) for ref in evidence['refs'][:8]]
     if isinstance(outcome.get('new_commits'), list):
         projection['attribution'] = COMMIT_ATTRIBUTION
         projection['new_commits_truncated'] = bool(outcome.get('new_commits_truncated') or len(outcome['new_commits']) > 10)
         projection['new_commits'] = [_text(item, 128) for item in outcome['new_commits'][:10] if isinstance(item, str)]
+    return projection
+
+
+def _payload(row, record, *, recovered=False, evidence=None):
+    # Only durable data; never resolve inferred deaths or replay prompt/raw output logs.
+    outcome = record.outcome if isinstance(record.outcome, dict) else {}
+    projection = _git_projection(outcome)
+    if outcome.get('git_observation_version') == 2:
+        projection['git_observation_version'] = 2
+    if isinstance(outcome.get('repositories'), list):
+        projection['repositories'] = [_git_projection(entry) for entry in outcome['repositories'][:8]
+                                      if isinstance(entry, dict)]
+        projection['repositories_truncated'] = bool(outcome.get('repositories_truncated') or len(outcome['repositories']) > 8)
     diagnostic = record.failure_diagnostic if isinstance(record.failure_diagnostic, dict) else {}
     failure = {key: _text(diagnostic[key], 256) for key in ('category', 'reason', 'source', 'reset_at', 'provider_code') if key in diagnostic}
     if type(diagnostic.get('http_status')) is int:

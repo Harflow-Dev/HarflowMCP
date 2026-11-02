@@ -2012,3 +2012,13 @@ roots; recover on a paused root and resume on a failed root refuse. An interrupt
 forwarded handover can finish using its original guarded token while the exact
 received source remains active and the root witness is unchanged. This completion
 does not repeat child instructions or grants.
+
+
+### Repository observations on agent candidates
+
+A saved agent candidate may set `observe_repos` to up to seven additional absolute repository
+paths. Fallback candidates carry their own setting. The engine captures these targets before
+launch alongside the primary directory, and retains them on resume. This setting grants no write
+or publication authority and belongs to agent nodes, rather than orchestrators or builders.
+See [observed task outcomes](task-outcomes.md) for repository discovery, comparison provenance
+and observation limits.

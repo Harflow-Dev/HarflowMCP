@@ -81,6 +81,8 @@ def tool_call(
     input: Any,
     path: str | None = None,
     command: str | None = None,
+    cwd: str | None = None,
+    workdir: str | None = None,
     edit: tuple[str, str] | None = None,
     source_ts: str | None = None,
 ) -> dict[str, Any]:
@@ -97,6 +99,10 @@ def tool_call(
         event["path"] = path
     if isinstance(command, str) and command:
         event["command"] = command
+    structured = input if isinstance(input, dict) else {}
+    directory = cwd or workdir or structured.get("cwd") or structured.get("workdir")
+    if isinstance(directory, str) and directory:
+        event["cwd"] = directory
     if edit is not None:
         old, new = edit
         event["edit"] = {

@@ -1277,3 +1277,58 @@ def test_the_git_probes_never_run_repository_configured_programs(tmp_path: Path)
 
     assert base_commit is not None
     assert not marker.exists()
+
+@pytest.mark.parametrize("freedom", ["publish", "unrestricted"])
+def test_nonrepository_publish_observation_is_neutral(tmp_path, freedom):
+    notice = tasks_module._publish_branch_notice(freedom, tmp_path, _codex_enforcement(freedom))
+    assert "not a Git repository" in notice
+    assert "cancel" not in notice.lower()
+    assert "could not be determined" not in notice
+
+
+def test_explicit_observation_targets_are_checked_from_parent(tmp_path):
+    repo = _repo_with_remote(tmp_path, branch="main")
+    notice = tasks_module._publish_branch_notice("publish", tmp_path, _codex_enforcement("publish"), [str(repo)])
+    assert "not a Git repository" in notice
+    assert f"[{repo}]" in notice
+    assert "default branch ('main')" in notice
+
+
+@pytest.mark.parametrize("error, reason", [
+    (FileNotFoundError("git"), "Git is unavailable"),
+    (subprocess.TimeoutExpired("git", 1), "Git probe timed out"),
+    (PermissionError("denied"), "denied permission"),
+])
+def test_branch_probe_reports_actual_failure(tmp_path, monkeypatch, error, reason):
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(tasks_module.subprocess, "run", fail)
+    notice = tasks_module._publish_branch_notice("publish", tmp_path, _codex_enforcement("publish"))
+    assert reason in notice
+    assert "or the check" not in notice
+
+
+def test_later_target_failure_preserves_earlier_notice(tmp_path, monkeypatch):
+    repo = _repo_with_remote(tmp_path, branch="main")
+    original = tasks_module._detect_publish_branch_notice
+    def detect(freedom, target, enforcement, **kwargs):
+        if target == repo:
+            raise subprocess.TimeoutExpired("git", 1)
+        return original(freedom, target, enforcement, **kwargs)
+    monkeypatch.setattr(tasks_module, "_detect_publish_branch_notice", detect)
+    notice = tasks_module._publish_branch_notice("publish", tmp_path, _codex_enforcement("publish"), [str(repo)])
+    assert "not a Git repository" in notice
+    assert f"[{repo}]" in notice and "Git probe timed out" in notice
+
+
+async def test_explicit_observation_paths_persist_on_real_dispatch(tmp_path, git_repo, monkeypatch):
+    extra = tmp_path / "observed"
+    extra.mkdir()
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
+    backend = _TrivialBackend()
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    task = await registry.start("observe", git_repo, backend=backend, observe_repos=[str(extra)])
+    await task.done.wait()
+    assert task.observe_repos == [str(extra)]
+    assert store.read(registry._log_dir, task.task_id).observe_repos == [str(extra)]
+    assert task.snapshot()["observe_repos"] == [str(extra)]

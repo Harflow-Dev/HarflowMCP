@@ -987,3 +987,14 @@ def test_every_registered_backend_has_a_callable_normalize_method() -> None:
     for backend in backends.BACKENDS.values():
         assert callable(getattr(backend, "normalize", None))
         assert isinstance(backend, backends.Backend)
+
+@pytest.mark.parametrize("input", [{"cwd": "/workspace/repo"}, {"workdir": "/workspace/repo"}])
+def test_normalized_commands_preserve_structured_directory(input):
+    event = tool_call(call_id="command", tool="shell", category="shell", input=input, command="git status")
+    assert event["cwd"] == "/workspace/repo"
+
+
+def test_codex_command_preserves_item_directory():
+    _, events = run(CodexBackend(), [{"type": "item.started", "item": {
+        "id": "command", "type": "command_execution", "command": "git status", "cwd": "/workspace/repo"}}])
+    assert next(event for event in events if event["kind"] == "tool_call")["cwd"] == "/workspace/repo"

@@ -325,14 +325,11 @@ GIT_PROBE_BUDGET_SECONDS = 3.0
 GIT_BASELINE_BUDGET_SECONDS = 1.5
 
 _UNDETERMINED_PUBLISH_NOTICE = (
-    "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
-    "open a PR — but the checkout branch could not be determined at dispatch (no remote "
-    "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
-    "unavailable, or the check timing out). For a publish-authorized run, that is itself worth "
-    "knowing: cancel this task now if you need to confirm the checkout before it proceeds. "
-    "This was sampled once, immediately before the agent was launched — not during the run — so "
-    "the branch may already have changed by the time the agent started, and will not be "
-    "re-checked if it changes later."
+    "this task was dispatched at freedom {freedom!r}, which authorizes attempts to commit, push, "
+    "and open a PR, but the checkout branch could not be determined at dispatch: {reason}. "
+    "Cancel this task now if you need to confirm the checkout before it proceeds. "
+    "This local observation was sampled once immediately before launch; it does not establish "
+    "the eventual commit or publication branch."
 )
 
 _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
@@ -364,18 +361,12 @@ _ON_DEFAULT_BRANCH_NETWORK_BLOCKED_NOTICE = (
     "the agent started, and will not be re-checked if it changes later."
 )
 _UNDETERMINED_NETWORK_BLOCKED_NOTICE = (
-    "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
-    "open a PR — but the checkout branch could not be determined at dispatch (no remote "
-    "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
-    "unavailable, or the check timing out). HarflowMCP's own network barrier blocks a "
-    "network-backed push and any network-backed PR creation here, but a push to a local path "
-    "(measured: a bare repo under a writable root) still succeeds, so the barrier stops "
-    "network-backed operations only. For a publish-authorized run, that is itself worth "
-    "knowing: cancel this task now if you need to confirm the checkout before it proceeds. "
-    "This was sampled once, immediately before the agent was launched — not during the run — so "
-    "the branch may already have changed by the time the agent started, and will not be "
-    "re-checked if it changes later."
+    "this task was dispatched at freedom {freedom!r}, but the checkout branch could not be "
+    "determined at dispatch: {reason}. HarflowMCP's network barrier blocks network-backed push "
+    "and PR creation; local-path pushes remain possible. Cancel this task now if you need to "
+    "confirm the checkout before it proceeds. This was sampled once immediately before launch."
 )
+
 _ON_DEFAULT_BRANCH_UNAUTHORIZED_REACHABLE_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
     "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
@@ -388,15 +379,10 @@ _ON_DEFAULT_BRANCH_UNAUTHORIZED_REACHABLE_NOTICE = (
 )
 _UNDETERMINED_UNAUTHORIZED_REACHABLE_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
-    "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
-    "publication (enforcement.network_access is {network_access!r}), so a push can genuinely "
-    "reach a remote; the checkout branch could not be determined at dispatch (no "
-    "remote HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', "
-    "git being unavailable, or the check timing out). That is itself worth knowing: cancel this "
-    "task now if you need to confirm the checkout before it proceeds. This was sampled "
-    "once, immediately before the agent was launched — not during the run — so the branch may "
-    "already have changed by the time the agent started, and will not be re-checked if it "
-    "changes later."
+    "pushing, or opening a PR, but its mechanism permits remote publication "
+    "(enforcement.network_access is {network_access!r}). The checkout branch could not be "
+    "determined at dispatch: {reason}. Cancel this task now if you need to confirm the checkout "
+    "before it proceeds. This was sampled once immediately before launch."
 )
 
 # Where network=True was accepted by a backend that has no barrier of its own to impose
@@ -435,13 +421,17 @@ def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
         raise subprocess.TimeoutExpired(cmd="git", timeout=GIT_PROBE_BUDGET_SECONDS)
     result = subprocess.run(
         ["git", "-C", str(repo_path), *GIT_SAFE_CONFIG, *args],
-        env={**os.environ, **GIT_SAFE_ENV},
+        env={**os.environ, **GIT_SAFE_ENV, "LC_ALL": "C"},
         capture_output=True,
         text=True,
         timeout=remaining,
         check=False,
     )
     if result.returncode != 0:
+        if args == ("rev-parse", "--is-inside-work-tree"):
+            if "not a git repository" in result.stderr.lower():
+                return "not_repository"
+            raise RuntimeError(f"Git repository probe failed (exit {result.returncode})")
         return None
     return result.stdout.strip()
 
@@ -504,14 +494,15 @@ def _branch_notice_templates(enforcement: Enforcement) -> tuple[str, str]:
 
 
 def _format_branch_notice(
-    template: str, freedom: str, enforcement: Enforcement, branch: str | None = None
+    template: str, freedom: str, enforcement: Enforcement, branch: str | None = None,
+    reason: str = "the Git probe did not complete",
 ) -> str:
     # str.format ignores keywords a template does not use, so all three states share one call.
-    return template.format(freedom=freedom, branch=branch, network_access=enforcement.network_access)
+    return template.format(freedom=freedom, branch=branch, network_access=enforcement.network_access, reason=reason)
 
 
 def _detect_publish_branch_notice(
-    freedom: str, repo_path: Path, enforcement: Enforcement
+    freedom: str, repo_path: Path, enforcement: Enforcement, *, deadline: float | None = None
 ) -> str | None:
     """The three outcomes: on the default branch, not on it (nothing to report), or undeterminable.
 
@@ -520,7 +511,14 @@ def _detect_publish_branch_notice(
     a remote's own recorded `HEAD` says. Which runs get a disclosure at all, and which wording,
     is decided by the Enforcement block (see `_branch_notice_templates`), not by the freedom name.
     """
-    deadline = time.monotonic() + GIT_PROBE_BUDGET_SECONDS
+    deadline = deadline if deadline is not None else time.monotonic() + GIT_PROBE_BUDGET_SECONDS
+    repository = _git_read(repo_path, deadline, "rev-parse", "--is-inside-work-tree")
+    if repository == "not_repository":
+        return (f"Launch observation for {str(repo_path)!r}: this directory is not a Git repository. "
+                "No checkout branch was sampled here; repositories used later are observed separately.")
+    if repository != "true":
+        return _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement,
+                                     reason="the target is not a Git working tree")
     current_branch = _git_read(repo_path, deadline, "symbolic-ref", "--quiet", "--short", "HEAD")
     remote = _default_branch_remote(repo_path, deadline)
     default_ref = (
@@ -549,14 +547,17 @@ def _detect_publish_branch_notice(
 
     on_branch, undetermined = _branch_notice_templates(enforcement)
     if not current_branch or not default_branch:
-        return _format_branch_notice(undetermined, freedom, enforcement)
+        reason = ("HEAD is detached" if not current_branch else
+                  "no unambiguous local remote is configured" if remote is None else
+                  "the remote HEAD is not recorded locally or its target ref is missing")
+        return _format_branch_notice(undetermined, freedom, enforcement, reason=reason)
     if current_branch == default_branch:
         return _format_branch_notice(on_branch, freedom, enforcement, default_branch)
     return None
 
 
 def _publish_branch_notice(
-    freedom: str, repo_path: Path, enforcement: Enforcement
+    freedom: str, repo_path: Path, enforcement: Enforcement, observe_repos: list[str] | None = None
 ) -> str | None:
     """A bridge notice disclosing default-branch exposure for a run that can publish — or reach
     a remote.
@@ -575,18 +576,23 @@ def _publish_branch_notice(
     """
     if not _branch_disclosure_warranted(enforcement):
         return None
-    try:
-        return _detect_publish_branch_notice(freedom, repo_path, enforcement)
-    except StateOwnershipError:
-        raise
-    except Exception:
-        log.warning(
-            "could not determine publish-branch exposure for %s; reporting that rather than the "
-            "branch itself",
-            repo_path,
-            exc_info=True,
-        )
-        return _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement)
+    targets = [repo_path, *(Path(value) for value in observe_repos or [])]
+    notices = []
+    deadline = time.monotonic() + GIT_PROBE_BUDGET_SECONDS
+    for target in dict.fromkeys(targets):
+        try:
+            notice = _detect_publish_branch_notice(freedom, target, enforcement, deadline=deadline)
+        except StateOwnershipError:
+            raise
+        except Exception as exc:
+            reason = ("the Git probe timed out" if isinstance(exc, subprocess.TimeoutExpired) else
+                      "Git is unavailable" if isinstance(exc, FileNotFoundError) else
+                      "the Git probe was denied permission" if isinstance(exc, PermissionError) else
+                      str(exc) if isinstance(exc, RuntimeError) else f"the Git probe failed ({type(exc).__name__})")
+            notice = _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement, reason=reason)
+        if notice:
+            notices.append(f"[{target}] {notice}" if observe_repos else notice)
+    return "\n".join(notices) or None
 
 
 # A4.3: a root task can open the Monitor app in the background — opt-in, with this set to "1".
@@ -738,6 +744,7 @@ class Task:
     """The network request this task was dispatched under: True/False explicit, None the
     freedom's historical default. Kept raw rather than resolved so a resume inherits exactly
     what was asked; the resolved outcome is `enforcement.network_access`."""
+    observe_repos: list[str] = field(default_factory=list)
     extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
     extra_path_certification: str | None = None
     enforcement: dict[str, Any] = field(default_factory=dict)
@@ -998,6 +1005,7 @@ class Task:
             "output_drained": self.output_drained,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
             "resume_command": None if has_extra_path_authority(self) or has_group_report_authority(self) else resume_command(self.backend, self.session_id, self.repo_path),
+            **({"observe_repos": self.observe_repos} if self.observe_repos else {}),
             "extra_writable_paths": self.extra_writable_paths,
             "extra_path_certification": self.extra_path_certification,
             "allowed_commands": list(self.allowed_commands),
@@ -1362,6 +1370,7 @@ class TaskRegistry:
         continuation_of_task_id: str | None = None,
         chain_root_task_id: str | None = None,
         chain_prompt: str | None = None,
+        observe_repos: list[str] | None = None,
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
@@ -1419,6 +1428,10 @@ class TaskRegistry:
                 validate_request(freedom=freedom, branch=branch, base=base, fetch=fetch, fetch_required=fetch_required, worktree=True)
             if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort or source.caller_approvals != caller_approvals or source.caller_write_approvals != caller_write_approvals or source.interaction_owner != interaction_owner):
                 raise ValueError("Continuation settings must match saved source authority")
+            from .task_outcomes import validate_observe_repos
+            observe_repos = validate_observe_repos(source.observe_repos if source is not None and observe_repos is None else observe_repos)
+            if source is not None and observe_repos != source.observe_repos:
+                raise ValueError("Continuation observe_repos must match the saved source")
             grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend, source)
             if grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
@@ -1494,6 +1507,7 @@ class TaskRegistry:
         return await self._spawn(
             invocation,
             extra_path_grants=grants,
+            observe_repos=observe_repos,
             backend=backend,
             prompt=prompt,
             display_prompt=display_prompt,
@@ -1773,6 +1787,7 @@ class TaskRegistry:
                     parent_task_id=parent.task_id,
                     session_id=parent.session_id,
                     repo_path=parent.repo_path,
+                    observe_repos=parent.observe_repos,
                     freedom=parent.freedom,
                     model=parent.model,
                     reasoning_effort=parent.reasoning_effort,
@@ -1847,6 +1862,7 @@ class TaskRegistry:
         task_id: str | None,
         consume_followups: bool,
         background_idle_seconds: float | None = None,
+        observe_repos: list[str] | None = None,
         allowed_commands: tuple[str, ...] = (),
         git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
         resource_request: dict[str, Any] | None = None,
@@ -1927,6 +1943,7 @@ class TaskRegistry:
             task = await self._spawn(
                 invocation,
                 extra_path_grants=grants,
+                observe_repos=observe_repos,
                 backend=backend,
                 prompt=prompt,
                 display_prompt=display_prompt,
@@ -2008,6 +2025,7 @@ class TaskRegistry:
         scratch_chain_id: str | None = None,
         shared_caller: str | None = None,
         extra_path_grants: tuple = (),
+        observe_repos: list[str] | None = None,
         dispatch_origin: dict[str, Any] | None = None,
         backend: Backend,
         prompt: str,
@@ -2165,7 +2183,7 @@ class TaskRegistry:
                 try:
                     publish_notice = await asyncio.wait_for(
                         asyncio.to_thread(
-                            _publish_branch_notice, freedom, repo_path, enforcement
+                            _publish_branch_notice, freedom, repo_path, enforcement, observe_repos
                         ),
                         timeout=GIT_PROBE_BUDGET_SECONDS * 2,
                     )
@@ -2173,7 +2191,7 @@ class TaskRegistry:
                     # Same rule as every other failure in this check: the dispatch proceeds and the
                     # caller is told the branch could not be determined.
                     publish_notice = _format_branch_notice(
-                        _branch_notice_templates(enforcement)[1], freedom, enforcement
+                        _branch_notice_templates(enforcement)[1], freedom, enforcement, reason="the Git observation worker timed out"
                     )
 
             # Where network=True was accepted by a backend with no barrier of its own to impose
@@ -2200,7 +2218,7 @@ class TaskRegistry:
             partial_baseline = empty_baseline()
             try:
                 git_baseline = await asyncio.wait_for(
-                    asyncio.to_thread(baseline, repo_path, partial_baseline), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
+                    asyncio.to_thread(baseline, repo_path, partial_baseline, observe_repos), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
                 )
                 base_commit = git_baseline["head"]
                 observed_status = git_baseline["working_tree_status"]
@@ -2390,6 +2408,7 @@ class TaskRegistry:
             base_commit=base_commit,
             start_dirty=start_dirty,
             git_baseline=git_baseline,
+            observe_repos=list(observe_repos or []),
             dispatch_git=dict(dispatch_git) if dispatch_git else None,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
@@ -3449,6 +3468,7 @@ class TaskRegistry:
                 base_commit=task.base_commit,
                 start_dirty=task.start_dirty,
                 git_baseline=task.git_baseline,
+                observe_repos=task.observe_repos,
                 dispatch_git=dict(task.dispatch_git) if task.dispatch_git else None,
                 outcome=task.outcome,
                 terminal_summary=(task.acc.summary.encode('utf-8')[:4096].decode('utf-8', errors='ignore')
@@ -4639,6 +4659,7 @@ class TaskRegistry:
                     session_id=record.session_id,
                     repo_path=repo_path,
                     freedom=record.freedom,
+                    observe_repos=record.observe_repos,
                     model=record.model,
                     reasoning_effort=record.reasoning_effort,
                     # The resumed task's own title, whoever the caller is — unlike `group`.

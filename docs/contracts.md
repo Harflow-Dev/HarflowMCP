@@ -452,15 +452,23 @@ timings, and at most 16 probe entries with bounded labels/categories and optiona
 counts/return codes. Outer baseline interruption can retain partial evidence and name its outer
 status/budget.
 
-The existing `new_commits` field means newly reachable commits from initial HEAD, including
-history imported by checkout or fast-forward; task-created commits and authorship are unavailable.
-`base_commit` remains the original baseline and the range algorithm is unchanged. Full response
-attribution clarifies these semantics for legacy records without rewriting saved observations.
+The `new_commits` field means newly reachable commits from the observed comparison base, including
+imported history; task-created commits and authorship are unavailable.
+Legacy `base_commit` observations retain their original range semantics. Observation schema v2
+adds `git_observation_version: 2`, up to eight canonical `repositories`, explicit original
+`dispatch_head` and `base_provenance`; a branch switch can use a local-reference merge-base.
+`observe_repos` is optional launch metadata, inherited on resume/continuation and saved per workflow
+agent candidate. Additional baseline repositories, structured discovery evidence, locally cached
+remote-ref containment and correlated standalone publication command results are additive.
+Local tracking refs do not establish remote freshness; failures and unavailable evidence remain
+explicit. See [observed task outcomes](task-outcomes.md). The observation schema version is
+independent of `CTL_JSON_VERSION` and every public wire envelope remains `v: 1`. Full response
+attribution clarifies legacy observations without rewriting saved evidence.
 Brief and notification outcomes add bounded `baseline`/`terminal` endpoint projections (`head`,
 `branch`, `provenance`) and disclose shortened commit lists with `new_commits_truncated`.
 Endpoints cannot reveal intermediate branch transitions, even when equal. This is an existing-field
-semantic clarification and additive v1 projection; canonical fixtures contain neither `new_commits`
-nor `committed_diff_stat`, so the fixture bundle and consumer version gates remain unchanged.
+semantic clarification and additive v1 projection. Canonical outcome fixtures demonstrate the
+additive observation schema while preserving the existing wire envelope and consumer version gates.
 
 These are additive v1 response fields; decoders and version gates remain unchanged. Canonical
 approval-status fixtures include the observer projections, using an isolated deterministic

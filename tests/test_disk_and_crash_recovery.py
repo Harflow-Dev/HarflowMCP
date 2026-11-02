@@ -180,3 +180,18 @@ def test_each_required_filesystem_is_checked(tmp_path, monkeypatch, low_index):
     with pytest.raises(disk_space.DiskSpaceError, match='Disk nearly full'):
         disk_space.check_launch_space(paths[0], paths[1])
     assert seen == paths[:low_index + 1]
+
+
+async def test_cold_resume_inherits_explicit_observation_targets(registry, tmp_path, monkeypatch):
+    from dataclasses import replace
+    source = replace(crashed_record(registry, tmp_path, 42), observe_repos=[str(tmp_path / "other")])
+    store.write(registry.log_dir, source)
+    monkeypatch.setattr(identity, "identity_check", lambda _: "dead")
+    launches = []
+    async def launch(**kwargs):
+        launches.append(kwargs)
+        return kwargs
+    monkeypatch.setattr(registry, "_launch_resume", launch)
+    loaded = store.read(registry.log_dir, source.task_id)
+    await registry.resume_record(loaded, "continue", task_id="resumed-observation")
+    assert launches[0]["observe_repos"] == source.observe_repos

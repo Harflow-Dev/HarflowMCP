@@ -199,7 +199,7 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "git_https_rewrite", "group_report_output", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "observe_repos", "git_https_rewrite", "group_report_output", "fallbacks"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
     if not isinstance(candidate.get("fallbacks", []), list):
@@ -224,6 +224,14 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
             raise WorkflowError("group_report_output cannot be combined with caller approvals")
     if "git_https_rewrite" in candidate and type(candidate["git_https_rewrite"]) is not bool:
         raise WorkflowError("git_https_rewrite must be a boolean")
+    if "observe_repos" in candidate:
+        if not grants:
+            raise WorkflowError("observe_repos belongs to workflow agent nodes")
+        from .task_outcomes import validate_observe_repos
+        try:
+            candidate["observe_repos"] = validate_observe_repos(candidate["observe_repos"])
+        except ValueError as exc:
+            raise WorkflowError(str(exc)) from exc
     if "allowed_commands" in candidate:
         if not grants:
             raise WorkflowError("allowed_commands belongs to workflow agent nodes, not orchestrators or builders")
@@ -3503,7 +3511,7 @@ class WorkflowSupervisor:
                                 context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}", **git_launch)
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"observe_repos": list(candidate["observe_repos"])} if "observe_repos" in candidate else {}), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}", **git_launch)
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                         self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                     snapshot = await self._observe_attempt(task, node, role, activation, reservation)
@@ -4407,6 +4415,8 @@ def _candidate_key(candidate: dict[str, Any]) -> str:
         signature["group_report_output"] = candidate["group_report_output"]
     if "git_https_rewrite" in candidate:
         signature["git_https_rewrite"] = candidate["git_https_rewrite"]
+    if "observe_repos" in candidate:
+        signature["observe_repos"] = list(candidate["observe_repos"])
     if candidate.get("allowed_commands"):
         signature["allowed_commands"] = list(candidate["allowed_commands"])
     return json.dumps(signature, sort_keys=True)

@@ -86,3 +86,18 @@ async def test_invalid_projection_detail_refuses_before_reads():
                          (server.wait_for_task, ('example',)), (server.list_workflows, ())):
         with pytest.raises(Exception, match='detail must be compact or full'):
             await method(*args, detail='unknown')
+
+
+def test_compact_parent_folder_outcome_retains_repository_evidence():
+    compact = mcp_projections.task_status({"task_id": "parent", "outcome": {
+        "git_observation_version": 2, "new_commits": None, "repositories": [{
+            "repository_root": "/workspace/child", "new_commits": ["abc"],
+            "baseline": {"head": "base", "branch": "main"},
+            "terminal": {"head": "abc", "branch": "feature"},
+            "committed_diff_stat": "x" * 1000000,
+        }]}})
+    outcome = compact["outcome"]
+    assert outcome["git_observation_version"] == 2 and outcome["repository_count"] == 1
+    assert outcome["repositories"][0]["new_commits_count"] == 1
+    assert outcome["repositories"][0]["terminal"]["branch"] == "feature"
+    assert "committed_diff_stat" not in outcome["repositories"][0]

@@ -83,6 +83,17 @@ def task_status(payload: dict[str, Any]) -> dict[str, Any]:
             key: (outcome[key][:512] if isinstance(outcome[key], str) else outcome[key])
             for key in ('base_commit', 'head_commit', 'pushed', 'attribution')
             if key in outcome}
+        repositories = outcome.get('repositories')
+        if isinstance(repositories, list):
+            result['outcome']['git_observation_version'] = outcome.get('git_observation_version')
+            result['outcome']['repository_count'] = len(repositories)
+            result['outcome']['repositories_truncated'] = bool(outcome.get('repositories_truncated'))
+            result['outcome']['repositories'] = [endpoint_projection(repository) | {
+                'repository_root': str(repository.get('repository_root', ''))[:512],
+                'new_commits_count': len(repository.get('new_commits') or []),
+                'new_commits_truncated': bool(repository.get('new_commits_truncated')),
+                'pushed': repository.get('pushed'),
+            } for repository in repositories[:8] if isinstance(repository, dict)]
         for phase in ('baseline', 'terminal'):
             endpoint = outcome.get(phase)
             if isinstance(endpoint, dict) and phase in result['outcome']:

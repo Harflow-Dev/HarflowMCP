@@ -1214,7 +1214,7 @@ class CodexBackend(ExtraPathsUnsupported):
             command = item.get("command")
             return [
                 nz.tool_call(
-                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command, cwd=item.get("cwd"), workdir=item.get("workdir")
                 )
             ]
         if item_type == "mcp_tool_call":
@@ -1274,7 +1274,7 @@ class CodexBackend(ExtraPathsUnsupported):
             command = item.get("command")
             events.append(
                 nz.tool_call(
-                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command, cwd=item.get("cwd"), workdir=item.get("workdir")
                 )
             )
         exit_code = item.get("exit_code")

@@ -366,3 +366,16 @@ def test_group_report_output_forces_headless_in_prefer_subagent_plan(monkeypatch
     outcome = next(iter(next(iter(plan['owners'].values()))['candidates'].values()))['nodes'][0]
     assert outcome['execution_kind'] == 'headless'
     assert 'Group report output' in outcome['fallback_reason']
+
+
+def test_observation_paths_are_saved_per_candidate(storage, tmp_path):
+    path = str(tmp_path)
+    definition = node_graph({"backend": "claude", "observe_repos": [path],
+                             "fallbacks": [{"backend": "codex", "observe_repos": [path]}]})
+    saved = storage.save("observed", definition)
+    assert saved["nodes"][1]["agent"]["observe_repos"] == [path]
+    assert storage.get("observed")["nodes"][1]["agent"]["fallbacks"][0]["observe_repos"] == [path]
+    with pytest.raises(w.WorkflowError, match="absolute"):
+        w._candidate({"backend": "claude", "observe_repos": ["relative"]})
+    with pytest.raises(w.WorkflowError, match="agent nodes"):
+        w._candidate({"backend": "claude", "observe_repos": [path]}, False)

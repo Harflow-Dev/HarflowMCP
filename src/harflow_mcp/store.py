@@ -82,6 +82,7 @@ class TaskRecord:
     reasoning_effort: str | None = None
     max_turns: int | None = None
     background_idle_seconds: float | None = None
+    observe_repos: list[str] = field(default_factory=list)
     extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
     extra_path_certification: str | None = None
     caller_approvals: bool = False
@@ -515,7 +516,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
     if unobserved:
         header['status'] = 'running'
-    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'live_input', 'background_idle_seconds', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
+    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'live_input', 'background_idle_seconds', 'observe_repos', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
     header['_caller'] = {key: getattr(record, key) for key in caller_keys}
     header['_limit_hit'] = limit_hits.evidence(record)
     try:
@@ -1227,6 +1228,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "outcome": project_outcome(record.outcome),
         "events_log": str(events.events_path(log_dir, record.task_id)),
         "resume_command": None if has_extra_path_authority(record) or has_group_report_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
+        **({"observe_repos": record.observe_repos} if record.observe_repos else {}),
         "extra_writable_paths": record.extra_writable_paths,
         "extra_path_certification": record.extra_path_certification,
         "allowed_commands": list(record.allowed_commands),

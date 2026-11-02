@@ -244,3 +244,28 @@ def test_scan_missing_directory_is_complete_empty_history(task_dir: Path) -> Non
     assert scan.refusals == {}
     assert not scan.history_incomplete
     assert store.read_all(missing) == []
+
+
+def test_multirepository_observations_round_trip():
+    outcome = {"git_observation_version": 2, "repositories": [{
+        "repository_root": "/workspace/repo", "baseline": {"head": "abc", "baseline_provenance": "dispatch"},
+        "local_remote_refs": {"containing_head": ["origin/main"], "truncated": False,
+                              "freshness": "unknown", "provenance": "local tracking refs"},
+        "publication_evidence": [{"kind": "push", "repository_root": "/workspace/repo", "command": "git push",
+                                  "call_id": "push", "exit_code": 0, "success": True, "result": "ok",
+                                  "remote": None, "ref": [], "provenance": "correlated command"}],
+    }]}
+    assert decode(document(observe_repos=["/workspace/repo"], outcome=outcome)).outcome == outcome
+
+
+@pytest.mark.parametrize("outcome", [
+    {"git_observation_version": True},
+    {"repositories": [{"local_remote_refs": {"containing_head": [False]}}]},
+    {"repositories": [{"publication_evidence": [{"exit_code": True}]}]},
+    {"repositories": [{"baseline": {"head": 7}}]},
+    {"repositories": [{}] * 9},
+    {"repositories": [{"repositories": [{}]}]},
+])
+def test_corrupt_multirepository_observations_are_refused(outcome):
+    with pytest.raises(task_documents.TaskDocumentError):
+        decode(document(outcome=outcome))

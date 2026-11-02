@@ -1023,6 +1023,13 @@
         "interaction-events.v1"
       ],
       "valid": true
+    },
+    "ctl-git-observations-synthetic.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.1",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
     }
   },
   "files": {
@@ -1155,6 +1162,7 @@
     "ctl-workflow-shared-pending-synthetic.json": "8780706791687cc4fdbb66d4b639b7d8fff8cd7b0f7d58c6b8b4e7cc94125bb4",
     "ctl-workflow-shared-answered-synthetic.json": "dcf81be197b31e977dda0e26ae6c86990ebc2651315786ed752069cf3741d932",
     "ctl-workflow-shared-already-answered-synthetic.json": "4dcbaed625c2603c5efb9cc750221ea080e9587555c45fb9b0ad5b5a37957fe1",
-    "ctl-interaction-events-synthetic.json": "f01a5d5d7ee013faa7f8be52bea97c009b99dc259c6378b29eff2d4c66d22b60"
+    "ctl-interaction-events-synthetic.json": "f01a5d5d7ee013faa7f8be52bea97c009b99dc259c6378b29eff2d4c66d22b60",
+    "ctl-git-observations-synthetic.json": "36812a63d00d3b64d1b27450a613fc8bc9ae32f2b18b0723cd5a7e5d0ffbf191"
   }
 }

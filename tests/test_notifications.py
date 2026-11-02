@@ -604,3 +604,32 @@ def test_legacy_outcome_notification_provenance(setup):
     assert outcome['new_commits_truncated'] is True
     assert json.dumps(r.outcome) == before
     assert len(body) <= n.MAX_PAYLOAD
+
+
+def test_multi_repository_notification_keeps_bounded_push_provenance(setup):
+    from dataclasses import replace
+    r = record(setup)
+    repository = {
+        'repository_root': '/work/target', 'worktree': '/work/target',
+        'base_provenance': 'dispatch', 'dispatch_head': 'a' * 40,
+        'base_commit': 'a' * 40, 'head_commit': 'b' * 40,
+        'new_commits': ['b' * 40], 'pushed': True,
+        'publication_evidence': [{'kind': 'push', 'command': 'git push origin topic',
+            'exit_code': 0, 'success': True, 'ref': ['HEAD:refs/heads/topic'],
+            'provenance': 'structured push result'}],
+        'local_remote_refs': {'containing_head': ['refs/remotes/origin/topic'],
+            'freshness': 'unknown', 'provenance': 'local remote-tracking ref'},
+    }
+    r = replace(r, outcome={'git_observation_version': 2, 'repositories': [repository]})
+    before = json.dumps(r.outcome)
+    body = n._payload({'id': 'stable'}, r)
+    outcome = json.loads(body)['outcome']
+    assert outcome['git_observation_version'] == 2
+    target = outcome['repositories'][0]
+    assert target['repository_root'] == '/work/target'
+    assert target['publication_evidence'][0]['exit_code'] == 0
+    assert target['publication_evidence'][0]['ref'] == ['HEAD:refs/heads/topic']
+    assert target['local_remote_refs']['freshness'] == 'unknown'
+    assert target['attribution']
+    assert json.dumps(r.outcome) == before
+    assert len(body) <= n.MAX_PAYLOAD

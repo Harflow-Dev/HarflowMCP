@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Observe up to eight worktree roots per task using explicit `observe_repos` and structured command/edit discovery; retain original dispatch heads, branch-change comparison provenance, local-ref freshness limits and correlated publication command evidence (#24). Git observation schema v2 remains additive inside public wire v1.
+- Report non-Git launch directories neutrally and check explicit observation targets independently; unknown repository branch notices name the observed probe failure (#106).
+
 - Allow qualified caller and human Monitor responders to share workflow questions, recovery, goal revision and messages without transferring ownership; persist the first winning answer and return it to late responders (#102).
 - Add a read-only retained interaction event feed for native notifications covering pending requests, answers and observed task completion/failure.
 

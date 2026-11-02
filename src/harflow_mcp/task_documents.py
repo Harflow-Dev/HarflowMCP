@@ -67,7 +67,7 @@ def _grants(values: list) -> None:
         raise ValueError("Malformed path grant bounds")
 
 
-BASELINE = {key: str | None for key in ("head", "branch", "repository_root", "working_tree_status", "provenance", "error")}
+BASELINE = {key: str | None for key in ("head", "branch", "repository_root", "working_tree_status", "provenance", "error", "baseline_provenance", "git_dir", "git_common_dir")}
 
 
 def _nested(record: Any) -> None:
@@ -78,7 +78,7 @@ def _nested(record: Any) -> None:
         if accounting["contribution_id"] != contribution_id(record.task_id):
             raise ValueError("Accounting contribution does not match task")
     if record.git_baseline is not None:
-        _shape(record.git_baseline, BASELINE, "git_baseline")
+        _qualify_baseline(record.git_baseline, "git_baseline")
     if record.failure_diagnostic is not None:
         _shape(record.failure_diagnostic, {"category": str, "reason": str, "source": str, "reset_at": str | int | float,
                                           "http_status": int, "provider_code": str}, "failure_diagnostic")
@@ -88,23 +88,75 @@ def _nested(record: Any) -> None:
     outcome = record.outcome
     if outcome is None:
         return
+    _qualify_outcome(outcome)
+
+
+def qualify_observe_repos(value: Any) -> None:
+    """Qualify saved observation targets structurally; never inspect today's filesystem."""
+    if type(value) is not list or len(value) > 7 or any(type(item) is not str or not Path(item).is_absolute() for item in value):
+        raise ValueError("Malformed observe_repos: expected at most seven absolute paths")
+
+
+def _qualify_baseline(value: dict, path: str, *, nested: bool = False) -> None:
+    _shape(value, {**BASELINE, "repositories": list[dict[str, Any]],
+                   "repository_discovery_unavailable": list[dict[str, Any]]}, path)
+    unavailable = value.get("repository_discovery_unavailable", [])
+    if len(unavailable) > 8:
+        raise ValueError("Too many unavailable repository observations")
+    for entry in unavailable:
+        _shape(entry, {"path": str, "reason": str}, path + ".repository_discovery_unavailable")
+    repositories = value.get("repositories", [])
+    if len(repositories) > 7 or (nested and repositories):
+        raise ValueError("Malformed baseline repositories")
+    for repository in repositories:
+        _qualify_baseline(repository, path + ".repositories", nested=True)
+
+
+def _qualify_outcome(outcome: dict, *, nested: bool = False) -> None:
     _shape(outcome, {"baseline": dict[str, Any] | None, "terminal": dict[str, Any] | None,
         "base_commit": str | None, "head_commit": str | None, "new_commits": list[str] | None,
         "new_commits_truncated": bool, "committed_diff_stat": str | None, "local_upstream": dict[str, Any] | None,
-        "pushed": bool | None, "publication_evidence": dict[str, Any] | None, "attribution": str,
+        "pushed": bool | None, "publication_evidence": list[dict[str, Any]] | dict[str, Any] | str | None, "attribution": str,
         "external_writes": list[dict[str, Any]] | None, "last_build_test": dict[str, Any] | None,
-        "evidence_provenance": str, "structured_evidence_complete": bool}, "outcome")
+        "evidence_provenance": str, "structured_evidence_complete": bool, "git_observation_version": int,
+        "repository_root": str | None, "worktree": str | None, "git_common_dir": str | None,
+        "dispatch_head": str | None, "base_provenance": str | None, "repositories": list[dict[str, Any]],
+        "repositories_truncated": bool, "repository_discovery_unavailable": list[dict[str, Any]],
+        "local_remote_refs": dict[str, Any] | None, "push_evidence": dict[str, Any] | None}, "outcome")
     for key in ("baseline", "terminal"):
         if outcome.get(key) is not None:
-            _shape(outcome[key], BASELINE, "outcome." + key)
+            _qualify_baseline(outcome[key], "outcome." + key)
     if outcome.get("local_upstream") is not None:
-        _shape(outcome["local_upstream"], {"ref": str, "ahead_behind": str | None, "provenance": str}, "local_upstream")
+        _shape(outcome["local_upstream"], {"ref": str, "ahead_behind": str | None, "provenance": str, "freshness": str, "contains_head": bool | None}, "local_upstream")
     if outcome.get("last_build_test") is not None:
         _shape(outcome["last_build_test"], {"command": str, "command_truncated": bool, "exit_code": int | None,
             "ok": bool | None, "call_id": str, "call_id_encoding": str, "exit_code_scope": str, "provenance": str}, "last_build_test")
     for item in outcome.get("external_writes") or []:
         _shape(item, {"path": str, "tool": str | None, "tool_truncated": bool, "call_id": str,
             "call_id_encoding": str, "provenance": str}, "external_write")
+
+    if outcome.get("local_remote_refs") is not None:
+        _shape(outcome["local_remote_refs"], {"containing_head": list[str], "truncated": bool,
+               "freshness": str, "provenance": str}, "local_remote_refs")
+    if outcome.get("push_evidence") is not None:
+        _shape(outcome["push_evidence"], {"provenance": str, "freshness": str, "refs": list[str],
+               "head": str}, "push_evidence")
+    publications = outcome.get("publication_evidence")
+    if isinstance(publications, list):
+        if len(publications) > 50:
+            raise ValueError("Too many publication observations")
+        for entry in publications:
+            _shape(entry, {"kind": str, "repository_root": str, "command": str, "call_id": str,
+                   "exit_code": int | None, "success": bool | None, "result": str | None,
+                   "remote": str | None, "ref": list[str] | None, "provenance": str,
+                   "result_provenance": str, "target_provenance": str}, "publication_evidence")
+    for entry in outcome.get("repository_discovery_unavailable") or []:
+        _shape(entry, {"path": str, "reason": str}, "repository_discovery_unavailable")
+    repositories = outcome.get("repositories", [])
+    if len(repositories) > 8 or (nested and repositories):
+        raise ValueError("Malformed outcome repositories")
+    for repository in repositories:
+        _qualify_outcome(repository, nested=True)
 
 
 def decode(document: Any, task_id: str, record_type: type) -> Any:
@@ -149,6 +201,7 @@ def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
         if record.background_idle_seconds is not None:
             from .background_idle import validate
             validate(record.background_idle_seconds)
+        qualify_observe_repos(record.observe_repos)
         _grants(record.extra_writable_paths)
         from .command_grants import check_bounds
         check_bounds(record.allowed_commands)

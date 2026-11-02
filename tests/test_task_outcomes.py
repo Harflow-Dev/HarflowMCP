@@ -375,10 +375,226 @@ def test_new_commits_are_reachability_observations(tmp_path, scenario):
         git(repo, 'commit', '--allow-empty', '-m', 'actual new commit')
     result = capture(repo, start, {})
     expected = git(repo, 'rev-list', f'{initial}..HEAD').splitlines()
-    assert result['base_commit'] == initial
-    assert result['new_commits'] == expected[:100]
-    assert result['new_commits_truncated'] == (len(expected) > 100)
+    changed_branch = scenario in {'checkout', 'checkout_ff', 'truncated', 'detached'}
+    assert result['base_commit'] == (None if changed_branch else initial)
+    assert result['new_commits'] == (None if changed_branch else expected[:100])
+    if not changed_branch:
+        assert result['new_commits_truncated'] == (len(expected) > 100)
     assert result['baseline']['branch'] == start['branch']
     assert result['terminal']['branch'] == (None if scenario == 'detached' else git(repo, 'branch', '--show-current'))
     assert result['attribution'] == COMMIT_ATTRIBUTION
     assert len(COMMIT_ATTRIBUTION.encode()) <= 160
+
+
+def test_parent_launch_discovers_literal_git_target(tmp_path):
+    repo = tmp_path / 'target'
+    repo.mkdir()
+    repository(repo)
+    start = baseline(tmp_path)
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'one', 'command': f'git -C {repo} status'}, tmp_path)
+    git(repo, 'commit', '--allow-empty', '-m', 'next')
+    result = capture(tmp_path, start, evidence)
+    assert result['head_commit'] is None
+    entry, = result['repositories']
+    assert entry['repository_root'] == str(repo)
+    assert entry['new_commits'] == [git(repo, 'rev-parse', 'HEAD')]
+    assert entry['base_provenance'].startswith('first_seen_midrun')
+
+
+def test_explicit_additional_worktree_baseline(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    repository(repo)
+    worktree = tmp_path / 'second'
+    git(repo, 'worktree', 'add', '-b', 'second', str(worktree))
+    start = baseline(repo, observe_repos=[str(worktree)])
+    git(worktree, 'commit', '--allow-empty', '-m', 'second')
+    result = capture(repo, start, {})
+    assert len(result['repositories']) == 2
+    second = result['repositories'][1]
+    assert second['worktree'] == str(worktree)
+    assert second['new_commits'] == [git(worktree, 'rev-parse', 'HEAD')]
+    assert second['base_provenance'] == 'dispatch'
+
+
+def test_switch_branch_excludes_imported_default_history(tmp_path):
+    repo = repository(tmp_path)
+    git(repo, 'branch', '-M', 'main')
+    git(repo, 'checkout', '-b', 'old')
+    git(repo, 'commit', '--allow-empty', '-m', 'old work')
+    start = baseline(repo)
+    git(repo, 'checkout', 'main')
+    git(repo, 'commit', '--allow-empty', '-m', 'imported default')
+    default = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'update-ref', 'refs/remotes/origin/main', default)
+    git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    git(repo, 'checkout', '-b', 'new')
+    git(repo, 'commit', '--allow-empty', '-m', 'new work')
+    result = capture(repo, start, {})
+    assert result['new_commits'] == [git(repo, 'rev-parse', 'HEAD')]
+    assert result['base_commit'] == default
+    assert result['dispatch_head'] == start['head']
+
+
+@pytest.mark.parametrize('command,code,pushed', [('git push', 0, None), ('git push', 1, None),
+    ('git push --dry-run', 0, None), ('gh pr create', 0, None)])
+def test_correlated_publication_evidence(tmp_path, command, code, pushed):
+    repo = repository(tmp_path)
+    start = baseline(repo)
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'push', 'command': command}, repo)
+    observe(evidence, 'tool_result', {'call_id': 'push', 'exit_code': code, 'ok': code == 0}, repo)
+    result = capture(repo, start, evidence)
+    assert result['pushed'] is pushed
+    if command == 'git push':
+        assert result['publication_evidence'][0]['exit_code'] == code
+
+
+def test_local_refs_never_claim_remote_freshness(tmp_path):
+    repo = repository(tmp_path)
+    start = baseline(repo)
+    git(repo, 'update-ref', 'refs/remotes/origin/main', start['head'])
+    result = capture(repo, start, {})
+    assert result['local_remote_refs']['containing_head'] == ['refs/remotes/origin/main']
+    assert result['local_remote_refs']['freshness'] == 'unknown'
+    assert result['new_commits'] == []
+    assert result['pushed'] is None
+    assert result['push_evidence']['freshness'] == 'unknown'
+
+
+def test_observe_repositories_bounds_and_validates(tmp_path):
+    from harflow_mcp.task_outcomes import validate_observe_repos, MAX_REPOSITORIES
+    with pytest.raises(ValueError):
+        validate_observe_repos(['relative'])
+    with pytest.raises(ValueError):
+        validate_observe_repos([str(tmp_path)] * MAX_REPOSITORIES)
+    evidence = {}
+    for index in range(MAX_REPOSITORIES * 4 + 2):
+        observe(evidence, 'tool_call', {'call_id': str(index), 'command': f'git -C {tmp_path / str(index)} status'}, tmp_path)
+    assert len(evidence['repository_candidates']) == MAX_REPOSITORIES * 4
+    assert evidence['repositories_truncated'] is True
+
+
+def test_detached_start_without_upstream_remains_observable(tmp_path):
+    repo = repository(tmp_path)
+    git(repo, 'checkout', '--detach')
+    start = baseline(repo)
+    assert start['observation_status'] == 'success'
+    assert start['branch'] is None
+    git(repo, 'commit', '--allow-empty', '-m', 'detached work')
+    result = capture(repo, start, {})
+    assert result['new_commits'] == [git(repo, 'rev-parse', 'HEAD')]
+    assert result['local_upstream'] is None
+    assert result['pushed'] is None
+
+
+def test_stale_tracking_ref_and_unrelated_push_leave_head_push_unknown(tmp_path):
+    repo = repository(tmp_path)
+    start = baseline(repo)
+    git(repo, 'update-ref', 'refs/remotes/origin/main', start['head'])
+    git(repo, 'commit', '--allow-empty', '-m', 'unpublished head')
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'push', 'command': 'git push origin --delete other'}, repo)
+    observe(evidence, 'tool_result', {'call_id': 'push', 'exit_code': 0}, repo)
+    result = capture(repo, start, evidence)
+    assert result['pushed'] is None
+    assert result['local_remote_refs']['containing_head'] == []
+    assert result['publication_evidence'][0]['success'] is True
+
+
+def test_local_ref_contains_new_observed_commit(tmp_path):
+    repo = repository(tmp_path)
+    start = baseline(repo)
+    git(repo, 'commit', '--allow-empty', '-m', 'new work')
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'))
+    result = capture(repo, start, {})
+    assert result['new_commits']
+    assert result['pushed'] is True
+    assert result['push_evidence']['freshness'] == 'unknown'
+
+
+def test_merged_repository_bound_reports_omitted_roots(tmp_path, monkeypatch):
+    from harflow_mcp import task_outcomes as outcomes
+    roots = [str(tmp_path / str(index)) for index in range(10)]
+    def fake_capture(path, start, evidence, deadline):
+        return {'repository_root': str(path), 'new_commits': [], 'pushed': None,
+                'publication_evidence': None, 'head_commit': 'a' * 40}
+    monkeypatch.setattr(outcomes, '_capture', fake_capture)
+    start = {'repositories': [{'repository_root': root} for root in roots[1:8]]}
+    evidence = {'repositories': {root: {'repository_root': root} for root in roots[8:]}}
+    result = capture(Path(roots[0]), start, evidence)
+    assert len(result['repositories']) == outcomes.MAX_REPOSITORIES
+    assert result['repositories_truncated'] is True
+
+
+def test_unrelated_detached_history_has_unavailable_comparison(tmp_path):
+    repo = repository(tmp_path)
+    git(repo, 'checkout', '--detach')
+    start = baseline(repo)
+    git(repo, 'checkout', '--orphan', 'unrelated')
+    git(repo, 'commit', '--allow-empty', '-m', 'unrelated history')
+    git(repo, 'checkout', '--detach')
+    result = capture(repo, start, {})
+    assert result['dispatch_head'] == start['head']
+    assert result['base_commit'] is None
+    assert result['new_commits'] is None
+    assert result['base_provenance'].startswith('unavailable:')
+
+
+def test_switched_branch_pushed_upstream_keeps_commit_against_default(tmp_path):
+    repo = repository(tmp_path)
+    git(repo, 'branch', '-M', 'main')
+    main = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'update-ref', 'refs/remotes/origin/main', main)
+    git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    git(repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+    start = baseline(repo)
+    git(repo, 'checkout', '-b', 'feature')
+    git(repo, 'commit', '--allow-empty', '-m', 'task work')
+    head = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'update-ref', 'refs/remotes/origin/feature', head)
+    git(repo, 'config', 'branch.feature.remote', 'origin')
+    git(repo, 'config', 'branch.feature.merge', 'refs/heads/feature')
+    result = capture(repo, start, {})
+    assert result['base_commit'] == main
+    assert result['new_commits'] == [head]
+    assert result['pushed'] is True
+
+
+def test_publication_uses_normalized_result_tail(tmp_path):
+    from harflow_mcp.backends.normalize import tool_result
+    repo = repository(tmp_path)
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'push', 'command': 'git push origin feature'}, repo)
+    event = tool_result(call_id='push', ok=False, output='remote: rejected', exit_code=1)
+    observe(evidence, event['kind'], event, repo)
+    entry, = evidence['publications']
+    assert entry['result'] == 'remote: rejected'
+    assert entry['result_provenance'] == 'bounded normalized result tail'
+    assert entry['remote'] == 'origin'
+    assert entry['ref'] == ['feature']
+    assert entry['target_provenance'].startswith('requested command arguments')
+
+
+def test_explicit_nonrepository_reason_survives_capture(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    repository(repo)
+    missing = tmp_path / 'missing'
+    start = baseline(repo, observe_repos=[str(missing)])
+    assert start['repository_discovery_unavailable'][0]['path'] == str(missing)
+    result = capture(repo, start, {})
+    assert result['repository_discovery_unavailable'][0]['reason']
+
+
+def test_publication_target_after_directory_named_push(tmp_path):
+    repo = tmp_path / 'push'
+    repo.mkdir()
+    repository(repo)
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'push', 'command': 'git -C push push origin feature'}, tmp_path)
+    observe(evidence, 'tool_result', {'call_id': 'push', 'exit_code': 0}, tmp_path)
+    entry, = evidence['publications']
+    assert entry['remote'] == 'origin'
+    assert entry['ref'] == ['feature']
