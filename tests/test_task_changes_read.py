@@ -315,3 +315,141 @@ def test_text_cursor_errors(world, monkeypatch):
     write_document(world.tasks, make_document([make_repository("/r", [make_row("a", b"changed")])]))
     with pytest.raises(read.ChangesCursorExpired):
         result(world, task, cursor=cursor)
+
+
+# --- malformed documents ----------------------------------------------------------------------
+
+BAD_VALUES = [123, [], {}, None, True, 1.5, "x" * 5000, "\ud800"]
+
+
+def broken(document, path, value):
+    target = document
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return document
+
+
+FIELD_PATHS = [("product",), ("format",), ("v",), ("task_id",), ("captured_at",), ("capture",), ("capture", "state"), ("capture", "reason"),
+               ("repositories",), ("repositories", 0), ("repositories", 0, "repository_root"), ("repositories", 0, "worktree"),
+               ("repositories", 0, "git_common_dir"), ("repositories", 0, "base_commit"), ("repositories", 0, "base_provenance"),
+               ("repositories", 0, "head_commit"), ("repositories", 0, "observed_at"), ("repositories", 0, "baseline_dirty"),
+               ("repositories", 0, "fields_truncated"), ("repositories", 0, "attribution"), ("repositories", 0, "state"),
+               ("repositories", 0, "reason"), ("repositories", 0, "scopes"), ("repositories", 0, "scopes", "committed_range"),
+               ("repositories", 0, "scopes", "committed_range", "state"), ("repositories", 0, "scopes", "committed_range", "reason"),
+               ("repositories", 0, "scopes", "committed_range", "row_count"), ("repositories", 0, "scopes", "committed_range", "rows_truncated"),
+               ("repositories", 0, "scopes", "committed_range", "observed_at"), ("repositories", 0, "scopes", "committed_range", "rows"),
+               ("repositories", 0, "scopes", "committed_range", "rows", 0), ("repositories", 0, "scopes", "working_tree", "counts_and_patch_separate")]
+ROW_FIELDS = ["path", "path_bytes_b64", "path_truncated", "old_path", "status", "additions", "deletions", "binary", "content", "text_b64"]
+
+
+def served_or_invalid(world, document):
+    """The reader must never crash: a document the validator rejects answers `changes_document_invalid`,
+    and one it accepts is served."""
+    seed_task(world.tasks, [{"repository_root": "/r"}])
+    (world.tasks / f"{TASK}{shape.SUFFIX}").write_text(json.dumps(document, ensure_ascii=True))
+    try:
+        shape.validate(json.loads(json.dumps(document)), TASK)
+        accepted = True
+    except shape.DocumentInvalid:
+        accepted = False
+    page = result(world)
+    if accepted:
+        assert page["mode"] == "list" and page["capture"]["reason"] != "changes_document_invalid"
+    else:
+        assert page["capture"] == {"state": "unavailable", "reason": "changes_document_invalid"}
+    return accepted
+
+
+@pytest.mark.parametrize("path", FIELD_PATHS, ids=lambda path: ".".join(map(str, path)))
+@pytest.mark.parametrize("value", range(len(BAD_VALUES)))
+def test_malformed_document_fields_never_crash_the_reader(world, path, value):
+    document = broken(make_document([make_repository("/r", [make_row("a", b"diff")])]), path, BAD_VALUES[value])
+    served_or_invalid(world, document)
+
+
+@pytest.mark.parametrize("field", ROW_FIELDS)
+@pytest.mark.parametrize("value", range(len(BAD_VALUES) + 2))
+def test_malformed_row_fields_never_crash_the_reader(world, field, value):
+    row = make_row("a", b"diff")
+    row[field] = (BAD_VALUES + [["x"], {"state": []}])[value]
+    served_or_invalid(world, make_document([make_repository("/r", [row])]))
+
+
+@pytest.mark.parametrize("path,value", [(("repositories", 0, "scopes", "committed_range", "rows", 0, "path"), 123),
+                                        (("repositories", 0, "scopes", "committed_range", "rows", 0, "status"), []),
+                                        (("repositories", 0, "scopes", "committed_range", "rows", 0, "content"), {"state": [], "reason": None, "bytes": 0}),
+                                        (("capture", "state"), {}), (("repositories", 0, "state"), []),
+                                        (("repositories", 0, "baseline_dirty"), "yes"), (("repositories", 0, "fields_truncated"), 0)])
+def test_known_bad_fields_are_rejected(world, path, value):
+    document = broken(make_document([make_repository("/r", [make_row("a", b"diff")])]), path, value)
+    assert served_or_invalid(world, document) is False
+
+
+def test_unhashable_enumerations_are_invalid(world):
+    for path, value in ((("capture", "state"), []), (("repositories", 0, "state"), {}), (("repositories", 0, "scopes", "working_tree", "state"), [1])):
+        document = broken(make_document([make_repository("/r", [make_row("a")])]), path, value)
+        with pytest.raises(shape.DocumentInvalid):
+            shape.validate(document, TASK)
+
+
+# --- bounds -----------------------------------------------------------------------------------
+
+
+def worst_case_document():
+    escaped = "\x01" * (shape.MAX_REPOSITORY_FIELD // 6)  # six escaped bytes per character
+    assert shape.escaped_size(escaped) <= shape.MAX_REPOSITORY_FIELD
+    repositories = []
+    for index in range(shape.MAX_REPOSITORIES):
+        repository = make_repository(f"/r{index}", [])
+        repository.update(repository_root=escaped, worktree=escaped, git_common_dir=escaped, base_provenance=escaped,
+                          base_commit="a" * 64, head_commit="b" * 64, reason="r" * 64)
+        for scope in repository["scopes"].values():
+            scope.update(reason="x" * 64)
+        repositories.append(repository)
+    long_path = "\x01" * (shape.MAX_PATH_BYTES)
+    repositories[-1]["scopes"]["committed_range"]["rows"] = [make_row(long_path, b"x" * 100)]
+    repositories[-1]["scopes"]["committed_range"]["row_count"] = 1
+    return make_document(repositories)
+
+
+def test_worst_case_listing_fits_with_the_resolved_from_reserve(world):
+    document = worst_case_document()
+    shape.validate(document, TASK)
+    task = stored(world, document["repositories"])
+    page = result(world, task, limit=500)
+    assert len(paths(page)) <= 1 and wire_size(page) + read.FIT_RESERVE_BYTES <= read.DOCUMENT_MAX_BYTES
+    from harflow_mcp import id_resolution
+    echoed = id_resolution.echo(page, primary=id_resolution.Resolution(TASK + "-full", "prefix"))
+    assert wire_size(echoed) <= read.DOCUMENT_MAX_BYTES
+
+
+def test_oversized_repository_fields_are_invalid(world):
+    document = make_document([make_repository("/r", [])])
+    document["repositories"][0]["git_common_dir"] = "\x01" * 1000
+    with pytest.raises(shape.DocumentInvalid):
+        shape.validate(document, TASK)
+
+
+def test_a_page_that_cannot_fit_is_refused_not_served_oversized(world, monkeypatch):
+    task = stored(world, [make_repository("/r", [make_row("a", b"x")])])
+    monkeypatch.setattr(read, "DOCUMENT_MAX_BYTES", 200)
+    with pytest.raises(read.ChangesPageTooLarge) as raised:
+        result(world, task)
+    assert raised.value.code == "changes_page_too_large"
+    with pytest.raises(read.ChangesPageTooLarge):
+        result(world, task, selector=selector("a"))
+
+
+def test_deeply_nested_cursor_is_invalid_not_a_traceback(world, monkeypatch):
+    import sys
+    task = stored(world, three_repositories())
+    nested = base64.urlsafe_b64encode(b"[" * 400 + b"]" * 400).decode().rstrip("=")
+    monkeypatch.setattr(sys, "getrecursionlimit", sys.getrecursionlimit)
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(150)
+    try:
+        with pytest.raises(read.ChangesCursorInvalid):
+            result(world, task, cursor=nested)
+    finally:
+        sys.setrecursionlimit(previous)

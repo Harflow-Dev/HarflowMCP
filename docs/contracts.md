@@ -870,7 +870,8 @@ is "unsupported". MCP `list_task_page(predecessor_task_id=...)` is unchanged. Ex
 
 ```bash
 harflow-ctl task-changes TASK_ID [--limit N] [--cursor C] --json
-harflow-ctl task-changes TASK_ID --repository-root R --scope committed_range|working_tree --path-b64 P [--cursor C] --json
+harflow-ctl task-changes TASK_ID --repository-root R --scope committed_range|working_tree --path-b64 P --json
+harflow-ctl task-changes TASK_ID --cursor C --json        # the next chunk of a text read
 ```
 
 Capability `task-changes.v1`; read-only. Authority is the direct-caller gate of the reads above,
@@ -878,7 +879,7 @@ decided before the id is resolved (`agent_caller`, `caller_undecidable`), then t
 resolution as `status` (`resolved_from`, `unknown_task`, `task_pending_launch`). Usage errors come
 first: `--json` is required; `--limit` is 1..500 (default 200); `--repository-root`, `--scope` and
 `--path-b64` (standard base64 of the row's path bytes) come together or not at all; the three are a
-usage error with `--cursor` or with `--limit`. Diff text can contain secrets and the user's own
+usage error with `--cursor` or with `--limit`: a text read continues with `TASK_ID --cursor C` alone. Diff text can contain secrets and the user's own
 uncommitted edits; no redaction is claimed, which is why only direct callers read it. MCP has no
 equivalent. Examples: `contracts/v1/ctl-task-changes-*.json` (the `text-chunk` fixtures are generated
 with a lowered document bound so that a small patch pages; the real bound is 262144 bytes).
@@ -899,25 +900,55 @@ with a repository's own configuration. The per-worktree Git directory is proven 
 worktree's `.git` file, the admin directory's `commondir` and `gitdir`; a main checkout's real `.git`
 directory), else the working-tree scope is `not_captured` / `git_dir_unverified` and the committed
 scope still runs. Every command uses a disposable Git directory (objects and refs linked, `HEAD`
-checked as a regular file, minimal config), replace objects off, no system or global config, no
-hooks, fsmonitor, external diff, textconv or filter drivers, literal pathspecs and no network;
-submodules are never entered. The working tree is read through a private copy of the index (a split
-index's shared part is copied too); the original index is never touched. The copy is refreshed so
-stat-only differences are not reported; if that fails the working-tree scope is `incomplete` /
-`index_refresh_failed` with no rows.
+checked as a regular file, minimal config; an unusable `HEAD` falls back to the common directory's, as
+no capture command reads it), replace objects off, no system or global config, `HOME` and
+`XDG_CONFIG_HOME` pointing into the disposable directory, no hooks, fsmonitor, external diff,
+textconv or filter drivers, literal pathspecs and no network. Only data is carried over from the
+repository: a fixed set of non-executing `core` booleans (`filemode`, `ignorecase`,
+`precomposeunicode`, `symlinks`, `autocrlf`) parsed from its config, its `info/exclude`, and the
+user's global ignore file (the `core.excludesFile` of their global config, else Git's default
+location; includes are not followed). Submodules are never executed or entered as repositories: Git
+compares the commit a submodule's own `HEAD` names with the recorded one but runs no process and
+reads no configuration there (`--ignore-submodules=dirty`), so only a changed submodule commit is
+reported.
+
+The working tree is read through a private copy of the index (a split index's shared part is copied
+too); the original index is never touched. Before any command touches the work tree every entry name
+of the index (and of a split index's shared part) is checked as Git's `verify_path` would: absolute
+names, empty, `.` or `..` components, backslashes and any spelling of `.git` (case, trailing dots and
+spaces, `git~1`, NTFS streams, HFS+ ignorable characters) make the scope `not_captured` /
+`index_unsafe_path`. A missing index is `not_captured` / `index_missing`, so a deleted index cannot
+turn every tracked file into a deletion. Entries marked assume-unchanged, and skip-worktree entries
+whose file exists, are cleared on the copy and forced to be read from disk, so an agent cannot hide
+an edit with those flags; more than 50,000 such entries make the scope `incomplete` /
+`index_flags_present`. The copy is refreshed so stat-only differences are not reported; if that
+fails the scope is `incomplete` / `index_refresh_failed` with no rows.
+
+**Trust anchor.** The recorded `git_common_dir` and `worktree` come from the terminal observation,
+which an agent can influence. Where the task record holds dispatch-time values they must still match:
+a repository root recorded in the dispatch baseline is anchored, and for a task worktree its source
+repository's `.git` directory must still be the common directory, else `working_tree` is
+`not_captured` / `repository_identity_changed` (the committed range, which reads content-addressed
+objects with replace objects off, still runs). A repository first seen mid-run has no anchor; if its
+object store has `objects/info/alternates` both scopes are `not_captured` / `alternates_present`.
+Anchoring cannot prove a linked worktree that was not provisioned by Harflow came from the checkout
+it was started in.
 
 **Scopes.** Per repository, `committed_range` is the two-dot tree diff from `base_commit` to
 `head_commit`; `working_tree` is the working tree against the pinned `head_commit`, plus untracked
 files. `committed_range` is `not_captured` with `head_missing`, `base_missing` (no recorded base, or
 the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`,
-`git_dir_unverified`, `index_too_large` (over 32 MiB), `index_unsupported` (an unreadable or
-unsupported index) or `index_unreadable`. Working-tree counts and patches are separate observations
+`git_dir_unverified`, `repository_identity_changed`, `index_missing`, `index_too_large` (over 32 MiB),
+`index_unsupported` (an unsupported or unreadable shared index), `index_unreadable` or
+`index_unsafe_path`; both scopes with `alternates_present`. Working-tree counts and patches are separate observations
 and may disagree (`counts_and_patch_separate: true`).
 
-**Rows** (at most 500 per scope including untracked, then `rows_truncated`; sorted by path bytes):
+**Rows** (at most 500 per scope, tracked rows allocated before untracked ones, then `rows_truncated`;
+sorted by path bytes; the raw listing and the counts are separate bounded streams, so hitting the
+ceiling or deadline keeps the complete records already read):
 `path` (UTF-8) or `path_bytes_b64`, `path_truncated`, `old_path` (always `null`: renames are off,
 so a rename is a deletion and an addition), `status` (`added`, `modified`, `deleted`, `typechange`,
-`unmerged`, `submodule`, `untracked`, `unknown`), `additions` and `deletions` (`null` for binary),
+`unmerged`, `submodule`, `untracked`, `unknown`; an untracked directory is one row ending in `/`), `additions` and `deletions` (`null` for binary),
 `binary` and `content {state, reason, bytes}`. Paths over 4096 bytes keep a truncated form with
 `content` `not_captured` / `path_too_long`. Symlinks are never followed: their text is the link-target
 diff. Content `state` and `reason`: `available`; `truncated` (`file_limit` over 64 KiB, `task_limit`
@@ -935,8 +966,12 @@ scope `incomplete` / `capture_timeout`; the 8 MiB per-command output ceiling mak
 deadline is `incomplete` / `budget_exhausted`; one whose directory is gone is `unavailable` /
 `repository_unavailable`; a failure confined to one repository is `unavailable` / `capture_error`.
 Other scope reasons: `git_failed`, `listing_unparsable`, `patch_alignment_failed`, `patch_failed`,
-`spawn_failed`. An empty diff is `available` with zero rows. Provenance per repository:
-`repository_root`, `worktree`, `git_common_dir`, `base_commit`, `base_provenance`, `head_commit`,
+`spawn_failed` (the scope is `incomplete`). A type change (file to symlink or submodule) is one row whose text holds
+both of Git's patch sections. An empty diff is `available` with zero rows. When every repository is `not_captured`
+the document's `capture.state` is still `available`: it describes the capture as a whole, and each repository carries
+its own state and reason. Provenance per repository:
+`repository_root`, `worktree`, `git_common_dir`, `base_commit`, `base_provenance`, `head_commit`
+(each cut so its JSON-escaped form is at most 4096 bytes, `fields_truncated` then `true`),
 `observed_at`, `baseline_dirty` (`true`, `false` or `"unknown"`) and the fixed
 `attribution: "Observed repository differences; not evidence of task authorship."`; a shared
 checkout's working-tree scope includes other writers' and pre-existing changes.
@@ -956,7 +991,9 @@ content, text, text_b64, offset, returned_bytes, total_bytes, has_more, next_cur
 The stored patch is judged as a whole: `text` when it is valid UTF-8 (chunks cut on character
 boundaries) else `text_b64`; the other key is `null`. Offsets are bytes of the stored text; a row
 without stored text answers empty text with its `content` state. An unknown repository, scope or path
-(or no stored document) is `changes_entry_not_found`.
+(or no stored document) is `changes_entry_not_found`. A page or chunk that cannot fit the document
+bound even at its smallest is refused with `changes_page_too_large` rather than served oversized (the
+field bounds above make this unreachable for documents Harflow writes).
 
 **Cursors** are opaque (at most 2048 characters) and bind the task, the mode, the stored document's
 sha256 and a compact entry position plus offset. A malformed cursor, one for another task or one that

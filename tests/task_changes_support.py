@@ -66,11 +66,11 @@ def entry(repo: Path, base: str | None, head_commit: str | None, *, status: str 
 
 
 def seed_task(tasks: Path, repositories: list[dict[str, Any]] | None, *, task_id: str = TASK, status: str = "completed",
-              exit_code: int | None = 0, finished_at: str | None = "2027-01-01T00:00:10+00:00") -> store.TaskRecord:
+              exit_code: int | None = 0, finished_at: str | None = "2027-01-01T00:00:10+00:00", **extra: Any) -> store.TaskRecord:
     outcome = None if repositories is None else {"repositories": repositories}
     record = store.TaskRecord(task_id=task_id, backend="claude", session_id="s1", markers=["s1"], repo_path="/repo",
                               started_at="2027-01-01T00:00:00+00:00", status=status, exit_code=exit_code,
-                              finished_at=finished_at, outcome=outcome)
+                              finished_at=finished_at, outcome=outcome, **extra)
     store.write(tasks, record)
     return store.read(tasks, task_id, include_prompt=False)
 
@@ -103,7 +103,7 @@ def make_row(path: str | bytes, text: bytes | None = None, *, status: str = "mod
 
 def make_repository(root: str, committed: list[dict[str, Any]], working: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"repository_root": root, "worktree": root, "git_common_dir": root + "/.git", "base_commit": "a" * 40,
-            "base_provenance": "dispatch", "head_commit": "b" * 40, "observed_at": DATE, "baseline_dirty": False,
+            "base_provenance": "dispatch", "head_commit": "b" * 40, "observed_at": DATE, "baseline_dirty": False, "fields_truncated": False,
             "attribution": document_shape.ATTRIBUTION, "state": "available", "reason": None,
             "scopes": {"committed_range": blank_scope("committed_range", committed),
                        "working_tree": blank_scope("working_tree", working or [])}}

@@ -55,6 +55,12 @@ class ChangesCursorExpired(ChangesRefusal):
         super().__init__(message, {"reload": "first"})
 
 
+class ChangesPageTooLarge(ChangesRefusal):
+    """Even the smallest page of the stored changes would exceed the document bound; never served oversized."""
+
+    code = "changes_page_too_large"
+
+
 class ChangesEntryNotFound(ChangesRefusal):
     code = "changes_entry_not_found"
 
@@ -201,7 +207,7 @@ def parse_cursor(value: str, task_id: str) -> _Cursor:
         raise ChangesCursorInvalid("Malformed cursor")
     try:
         payload = json.loads(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
-    except (binascii.Error, ValueError, UnicodeError):
+    except (binascii.Error, ValueError, UnicodeError, RecursionError):
         raise ChangesCursorInvalid("Malformed cursor") from None
     if not isinstance(payload, dict) or set(payload) != {"g", "m", "t", "d", "e", "o"}:
         raise ChangesCursorInvalid("Malformed cursor")
@@ -275,8 +281,10 @@ def _listing(task_id: str, capture: dict[str, Any], stored: Stored, start: tuple
     while True:
         result = build()
         excess = _document_bytes(result) + FIT_RESERVE_BYTES - DOCUMENT_MAX_BYTES
-        if excess <= 0 or len(included) <= 1:
+        if excess <= 0:
             return result
+        if len(included) <= 1:
+            raise ChangesPageTooLarge("The smallest page of the stored changes exceeds the document bound")
         while excess > 0 and len(included) > 1:
             excess -= len(json.dumps(included.pop()[1])) + 2
 
@@ -340,8 +348,10 @@ def _text_result(task_id: str, capture: dict[str, Any], stored: Stored, entry: t
     while True:
         result = build(size)
         excess = _document_bytes(result) + FIT_RESERVE_BYTES - DOCUMENT_MAX_BYTES
-        if excess <= 0 or result["returned_bytes"] <= 1:
+        if excess <= 0:
             return result
+        if result["returned_bytes"] <= 1:
+            raise ChangesPageTooLarge("The smallest chunk of the stored text exceeds the document bound")
         size = max(1, result["returned_bytes"] // 2)
 
 

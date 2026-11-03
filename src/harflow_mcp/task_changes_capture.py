@@ -11,15 +11,19 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import selectors
+import shutil
 import signal
 import stat
 import struct
 import subprocess
+import re
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +47,10 @@ COMMAND_CEILING = 8 * 1024 * 1024
 INDEX_LIMIT = 32 * 1024 * 1024
 GIT_FILE_LIMIT = 4096
 LOCK_RETRY_SECONDS = 0.2
+EXIT_GRACE_SECONDS = 0.05
+REAP_SECONDS = 1.0
+CONFIG_LIMIT = 1024 * 1024
+FLAG_LIMIT = 50_000
 GIT: tuple[str, ...] = ("git",)
 
 _COMMIT = frozenset("0123456789abcdef")
@@ -91,6 +99,13 @@ def _kill(process: subprocess.Popen) -> None:
         pass
 
 
+def _reap(process: subprocess.Popen) -> None:
+    try:
+        process.wait()
+    except Exception:
+        pass
+
+
 def _run(argv: list[str], environment: dict[str, str], cwd: str, budget: _Budget, sink: Callable[[bytes], None]) -> _Result:
     """Run one command, streaming stdout into `sink`; killed on the deadline or the output ceiling."""
     if budget.expired():
@@ -127,16 +142,26 @@ def _run(argv: list[str], environment: dict[str, str], cwd: str, budget: _Budget
             total += len(chunk)
             sink(chunk)
         if cause is None:
+            # A command that closed its output at the deadline edge has finished: give its exit a fixed
+            # moment instead of whatever budget is left.
             try:
-                process.wait(timeout=max(budget.left(), 0.001))
+                process.wait(timeout=max(budget.left(), EXIT_GRACE_SECONDS))
             except subprocess.TimeoutExpired:
                 cause = "capture_timeout"
     finally:
         selector.close()
         if cause is not None or process.poll() is None:
             _kill(process)
-        process.wait()
-        process.stdout.close()
+        try:
+            process.wait(timeout=REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            # A process that survives SIGKILL is abandoned to a daemon reaper rather than waited on here.
+            cause = cause or "capture_timeout"
+            threading.Thread(target=_reap, args=(process,), daemon=True).start()
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
     return _Result(None if cause else process.returncode, cause)
 
 
@@ -149,7 +174,8 @@ class _Context:
         self.work_tree = work_tree
         self.budget = budget
         inherited = {key: value for key, value in os.environ.items() if not key.startswith("GIT_") or key == "GIT_EXEC_PATH"}
-        self.environment = {**inherited, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        self.environment = {**inherited, "HOME": str(root), "XDG_CONFIG_HOME": str(root / "xdg"),
+                            "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                             "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
                             "GIT_COMMON_DIR": str(self.git_dir), "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1",
                             "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_ATTR_NOSYSTEM": "1"}
@@ -177,8 +203,7 @@ def _valid_commit(value: Any) -> bool:
     return isinstance(value, str) and len(value) in (40, 64) and set(value) <= _COMMIT
 
 
-def _text(value: Any) -> str | None:
-    return value[:document_shape.MAX_FIELD_CHARS] if isinstance(value, str) else None
+_text = document_shape.bound_field
 
 
 def _read_regular(path: str, limit: int) -> bytes | None:
@@ -254,62 +279,167 @@ def verified_git_dir(worktree: str, common: str) -> str | None:
     return target
 
 
-# --- split index ------------------------------------------------------------------------------
+# --- index ------------------------------------------------------------------------------------
 
 
 class _IndexUnsupported(Exception):
     pass
 
 
-def _shared_index_name(data: bytes, hash_length: int, budget: _Budget) -> str | None:
-    """The `sharedindex.<oid>` name a split index (`link` extension) refers to, or None for a plain index."""
+_IGNORABLE = frozenset(list(range(0x200C, 0x2010)) + list(range(0x202A, 0x202F)) + list(range(0x206A, 0x2070)) + [0xFEFF])
+_DOT_GIT = re.compile(rb"(\.git|git~1)[ .]*(:.*)?", re.DOTALL)
+
+
+def _dot_git_like(component: bytes) -> bool:
+    """Whether `component` is `.git` or a form Git's `verify_path` treats as it (case, NTFS dots and
+    spaces, `git~1`, alternate streams, HFS+ ignorable code points)."""
+    candidates = [component.lower()]
+    try:
+        text = component.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is not None:
+        stripped = "".join(character for character in text if ord(character) not in _IGNORABLE)
+        candidates.append(stripped.lower().encode("utf-8"))
+    return any(_DOT_GIT.fullmatch(candidate) for candidate in candidates)
+
+
+def unsafe_index_path(path: bytes, *, directory: bool = False) -> bool:
+    """Whether an index entry name could address anything but a path inside the work tree.
+
+    Mirrors Git's `verify_path`: no absolute names, empty, `.` or `..` components, no `.git` in any
+    spelling Git protects against, and no backslash (`core.protectNTFS`).
+    """
+    if directory and path.endswith(b"/"):
+        path = path[:-1]
+    if not path or path.startswith(b"/") or b"\\" in path:
+        return True
+    return any(component in (b"", b".", b"..") or _dot_git_like(component) for component in path.split(b"/"))
+
+
+@dataclass
+class _Flagged:
+    start: int
+    name: bytes
+    assume: bool
+    skip: bool
+
+
+@dataclass
+class _IndexScan:
+    shared: str | None = None
+    link_offset: int | None = None
+    unsafe: bool = False
+    overflow: bool = False
+    flagged: list[_Flagged] = field(default_factory=list)
+
+
+def _varint(data: bytes, position: int) -> tuple[int, int]:
+    """Git's offset-encoded varint (index version 4 name prefix lengths)."""
+    byte = data[position]
+    position += 1
+    value = byte & 0x7F
+    while byte & 0x80:
+        byte = data[position]
+        position += 1
+        value = ((value + 1) << 7) + (byte & 0x7F)
+    return value, position
+
+
+def _scan_index(data: bytes, hash_length: int, budget: _Budget, *, shared_file: bool = False) -> _IndexScan:
+    """Walk every entry of an index file: validate names and note assume-unchanged and skip-worktree entries."""
+    scan = _IndexScan()
     if len(data) < 12 + hash_length or data[:4] != b"DIRC":
         raise _IndexUnsupported("signature")
     version, count = struct.unpack(">II", data[4:12])
     if version not in (2, 3, 4):
         raise _IndexUnsupported("version")
     end = len(data) - hash_length
-    position = None
-    eoie = 8 + 4 + hash_length
-    if end - eoie >= 12 and data[end - eoie:end - eoie + 4] == b"EOIE":
-        offset = struct.unpack(">I", data[end - eoie + 8:end - eoie + 12])[0]
-        if 12 <= offset <= end - eoie:
-            position = offset
-    if position is None:
-        position = 12
-        fixed = 40 + hash_length + 2
+    fixed = 40 + hash_length + 2
+    position, previous, placeholders = 12, b"", 0
+    try:
         for index in range(count):
-            if index % 8192 == 0 and budget.expired():
+            if index % 4096 == 0 and budget.expired():
                 raise _IndexUnsupported("deadline")
             if position + fixed > end:
                 raise _IndexUnsupported("entries")
-            flags = struct.unpack(">H", data[position + fixed - 2:position + fixed])[0]
             start = position
-            position += fixed + (2 if flags & 0x4000 and version >= 3 else 0)
+            mode = struct.unpack(">I", data[start + 24:start + 28])[0]
+            flags = struct.unpack(">H", data[start + fixed - 2:start + fixed])[0]
+            extended = 0
+            position += fixed
+            if flags & 0x4000:
+                if version < 3:
+                    raise _IndexUnsupported("flags")
+                extended = struct.unpack(">H", data[position:position + 2])[0]
+                position += 2
             if version == 4:
-                while position < end and data[position] & 0x80:
-                    position += 1
-                position += 1
+                strip, position = _varint(data, position)
+                if strip > len(previous):
+                    raise _IndexUnsupported("name")
                 nul = data.find(b"\0", position, end)
                 if nul < 0:
                     raise _IndexUnsupported("entries")
+                name = previous[:len(previous) - strip] + data[position:nul]
                 position = nul + 1
             else:
                 nul = data.find(b"\0", position, end)
                 if nul < 0:
                     raise _IndexUnsupported("entries")
-                position = start + ((position - start + (nul - position) + 8) & ~7)
+                name = data[position:nul]
+                position = start + ((position - start + len(name) + 8) & ~7)
+            previous = name
+            if not name and not shared_file:
+                placeholders += 1  # a split index's main file holds replacement data under empty names
+            elif unsafe_index_path(name, directory=(mode & 0o170000) == 0o040000):
+                scan.unsafe = True
+                return scan
+            assume, skip = bool(flags & 0x8000), bool(extended & 0x4000)
+            if assume or skip:
+                if len(scan.flagged) >= FLAG_LIMIT:
+                    scan.overflow = True
+                else:
+                    scan.flagged.append(_Flagged(start, name, assume, skip))
+    except (struct.error, IndexError):
+        raise _IndexUnsupported("entries") from None
     while position + 8 <= end:
         signature = data[position:position + 4]
         size = struct.unpack(">I", data[position + 4:position + 8])[0]
         if position + 8 + size > end:
             raise _IndexUnsupported("extension")
-        if signature == b"link":
+        if signature == b"link" and not shared_file:
             if size < hash_length:
                 raise _IndexUnsupported("link")
-            return "sharedindex." + data[position + 8:position + 8 + hash_length].hex()
+            scan.shared = "sharedindex." + data[position + 8:position + 8 + hash_length].hex()
+            scan.link_offset = position + 8
         position += 8 + size
-    return None
+    if placeholders and scan.shared is None:
+        scan.unsafe = True
+    return scan
+
+
+def _checksum(data: bytes, hash_length: int) -> bytes:
+    return hashlib.new("sha256" if hash_length == 32 else "sha1", data).digest()
+
+
+def _clear_flags(data: bytes, hash_length: int, entries: list[_Flagged], present: Callable[[bytes], bool]) -> bytes:
+    """`data` with assume-unchanged and (for files that exist) skip-worktree cleared and the recorded
+    size made impossible, so Git must read each such file instead of trusting its flag or stat data."""
+    buffer = bytearray(data)
+    fixed = 40 + hash_length + 2
+    for entry in entries:
+        clear_skip = entry.skip and present(entry.name)
+        if not (entry.assume or clear_skip):
+            continue
+        if entry.assume:
+            flags = struct.unpack_from(">H", buffer, entry.start + fixed - 2)[0]
+            struct.pack_into(">H", buffer, entry.start + fixed - 2, flags & ~0x8000)
+        if clear_skip:
+            extended = struct.unpack_from(">H", buffer, entry.start + fixed)[0]
+            struct.pack_into(">H", buffer, entry.start + fixed, extended & ~0x4000)
+        struct.pack_into(">I", buffer, entry.start + 36, 0xFFFFFFFF)
+    buffer[-hash_length:] = _checksum(bytes(buffer[:-hash_length]), hash_length)
+    return bytes(buffer)
 
 
 # --- listing and patch parsing ----------------------------------------------------------------
@@ -326,42 +456,52 @@ class _Entry:
     rowed: bool = True
     row: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def segments(self) -> int:
+        """Patch segments Git prints for this entry: a type change is a deletion and an addition."""
+        return 2 if self.status == "typechange" else 1
 
-def _parse_listing(data: bytes) -> list[_Entry] | None:
-    """Entries of `--raw --numstat -z` output (raw records first, then one numstat record each)."""
+
+def _parse_raw(data: bytes, *, partial: bool = False) -> list[_Entry] | None:
+    """Entries of `--raw -z` output; with `partial`, only the complete records of a cut-off stream."""
     tokens = data.split(b"\0")
-    if tokens and tokens[-1] == b"":
-        tokens.pop()
+    last = tokens.pop()  # empty after a final NUL, otherwise an unfinished record
     entries: list[_Entry] = []
-    modes: list[tuple[bytes, bytes]] = []
     index = 0
-    while index < len(tokens) and tokens[index].startswith(b":"):
+    while index + 1 < len(tokens) and tokens[index].startswith(b":"):
         meta = tokens[index][1:].split(b" ")
-        if len(meta) != 5 or index + 1 >= len(tokens):
+        if len(meta) != 5:
             return None
         letter = meta[4][:1].decode("ascii", "replace")
-        entries.append(_Entry(path=tokens[index + 1], status=_STATUSES.get(letter, "unknown")))
-        modes.append((meta[0], meta[1]))
-        index += 2
-    statistics = tokens[index:]
-    if len(statistics) != len(entries):
-        return None
-    for entry, record, (old, new) in zip(entries, statistics, modes):
-        parts = record.split(b"\t", 2)
-        if len(parts) != 3 or parts[2] != entry.path:
-            return None
-        if parts[0] == b"-" and parts[1] == b"-":
-            entry.binary = True
-        else:
-            try:
-                entry.additions, entry.deletions = int(parts[0]), int(parts[1])
-            except ValueError:
-                return None
-        if b"160000" in (old, new):
+        entry = _Entry(path=tokens[index + 1], status=_STATUSES.get(letter, "unknown"))
+        if b"160000" in (meta[0], meta[1]):
             entry.status, entry.forced = "submodule", "submodule"
         elif entry.status == "unmerged":
             entry.forced = "unmerged"
+        entries.append(entry)
+        index += 2
+    if index < len(tokens) or (last and not partial):
+        return None
     return entries
+
+
+def _parse_stat(data: bytes) -> dict[bytes, tuple[int | None, int | None, bool]] | None:
+    """Counts by path from `--numstat -z` output; complete records only."""
+    tokens = data.split(b"\0")
+    tokens.pop()
+    counts = {}
+    for record in tokens:
+        parts = record.split(b"\t", 2)
+        if len(parts) != 3:
+            return None
+        if parts[0] == b"-" and parts[1] == b"-":
+            counts[parts[2]] = (None, None, True)
+            continue
+        try:
+            counts[parts[2]] = (int(parts[0]), int(parts[1]), False)
+        except ValueError:
+            return None
+    return counts
 
 
 class _Segment:
@@ -382,8 +522,10 @@ class _PatchSplitter:
     prefixes cannot occur inside a hunk. Bytes beyond a segment's allowance are counted and dropped.
     """
 
-    def __init__(self, allowances: list[bool], budget: _Budget) -> None:
+    def __init__(self, allowances: list[bool], budget: _Budget, groups: list[int] | None = None) -> None:
         self.allowances = allowances
+        self.groups = groups if groups is not None else list(range(len(allowances)))
+        self.group_used: dict[int, int] = {}
         self.budget = budget
         self.segments: list[_Segment] = []
         self.current: _Segment | None = None
@@ -394,6 +536,7 @@ class _PatchSplitter:
     def _close(self) -> None:
         if self.current is not None:
             self.budget.text_left -= len(self.current.kept)
+            self.group_used[self.group] = self.group_used.get(self.group, 0) + len(self.current.kept)
 
     def _start(self) -> None:
         self._close()
@@ -401,7 +544,9 @@ class _PatchSplitter:
         allowed = index < len(self.allowances) and self.allowances[index]
         if index >= len(self.allowances):
             self.bad = True
-        self.current = _Segment(min(FILE_TEXT_LIMIT, max(self.budget.text_left, 0)) if allowed else 0)
+        self.group = self.groups[index] if index < len(self.groups) else -1
+        room = FILE_TEXT_LIMIT - self.group_used.get(self.group, 0)
+        self.current = _Segment(max(min(room, self.budget.text_left), 0) if allowed else 0)
         self.segments.append(self.current)
 
     def _write(self, data: bytes) -> None:
@@ -509,33 +654,49 @@ def _scope(state: str, reason: str | None, rows: list[dict[str, Any]] | None = N
 # --- scopes -----------------------------------------------------------------------------------
 
 
-def _diff_scope(context: _Context, budget: _Budget, list_args: list[str], patch_args: list[str], *, extras: list[_Entry] | None,
-                working_tree: bool) -> dict[str, Any]:
-    """One scope: the row listing, then the patch text allocated to the rows in path order."""
-    data, result = context.collect(list_args)
-    if result.cause:
-        return _scope("incomplete", result.cause, working_tree=working_tree)
-    if result.returncode != 0:
+def _diff_scope(context: _Context, budget: _Budget, raw_args: list[str], stat_args: list[str], patch_args: list[str], *,
+                unmerged: list[bytes] | None, untracked: list[bytes] | None, working_tree: bool) -> dict[str, Any]:
+    """One scope: the row listing, the counts, then the patch text allocated to the rows in path order."""
+    data, listed = context.collect(raw_args)
+    if not listed.cause and listed.returncode != 0:
         return _scope("unavailable", "git_failed", working_tree=working_tree)
-    entries = _parse_listing(data)
+    entries = _parse_raw(data, partial=bool(listed.cause))
     if entries is None:
         return _scope("unavailable", "listing_unparsable", working_tree=working_tree)
+    problem: tuple[str, str | None] = ("incomplete", listed.cause) if listed.cause else ("available", None)
     patch_entries = list(entries)
-    by_path = {entry.path: entry for entry in entries}
-    for extra in extras or []:
-        if extra.forced == "unmerged" and extra.path in by_path:
-            by_path[extra.path].status, by_path[extra.path].forced = "unmerged", "unmerged"
-        elif extra.path not in by_path:
-            entries.append(extra)
-            by_path[extra.path] = extra
-    entries.sort(key=lambda entry: entry.path)
-    truncated = len(entries) > document_shape.MAX_ROWS
-    for entry in entries[document_shape.MAX_ROWS:]:
+    tracked = list(entries)
+    known = {entry.path: entry for entry in entries}
+    for path in unmerged or []:
+        if path in known:
+            known[path].status, known[path].forced = "unmerged", "unmerged"
+        else:
+            known[path] = _Entry(path=path, status="unmerged", forced="unmerged")
+            tracked.append(known[path])
+    tracked.sort(key=lambda entry: entry.path)
+    others = [_Entry(path=path, status="untracked", forced="untracked") for path in sorted(untracked or [])]
+    # Tracked rows are allocated first, so untracked names can never evict them.
+    chosen = tracked[:document_shape.MAX_ROWS]
+    room = document_shape.MAX_ROWS - len(chosen)
+    dropped = tracked[document_shape.MAX_ROWS:] + others[room:]
+    chosen += others[:room]
+    truncated = bool(dropped) or bool(listed.cause)
+    for entry in dropped:
         entry.rowed = False
-    rows = entries[:document_shape.MAX_ROWS]
+    rows = sorted(chosen, key=lambda entry: entry.path)
     for entry in rows:
         entry.row = _row(entry)
-    scope_state, scope_reason = "available", None
+    if not listed.cause:
+        statistics, counted = context.collect(stat_args)
+        counts = _parse_stat(statistics) if not counted.cause and counted.returncode == 0 else None
+        if counts is None:
+            problem = ("incomplete", counted.cause or "git_failed")
+        else:
+            for entry in entries:
+                if entry.path in counts:
+                    entry.additions, entry.deletions, entry.binary = counts[entry.path]
+                    if entry.row:
+                        entry.row.update(additions=entry.additions, deletions=entry.deletions, binary=entry.binary)
 
     def wants_text(entry: _Entry) -> bool:
         """False (after recording why) for a row that never carries patch text."""
@@ -546,6 +707,8 @@ def _diff_scope(context: _Context, budget: _Budget, list_args: list[str], patch_
             _set_content(row, "not_captured", entry.forced)
         elif entry.binary:
             _set_content(row, "binary", None)
+        elif listed.cause:
+            _set_content(row, "not_captured", listed.cause)
         else:
             return True
         return False
@@ -558,18 +721,23 @@ def _diff_scope(context: _Context, budget: _Budget, list_args: list[str], patch_
                 if wanting[id(entry)]:
                     _set_content(entry.row, "omitted_size", "task_limit")
         elif budget.expired():
-            scope_state, scope_reason = "incomplete", "capture_timeout"
+            problem = problem if problem[0] != "available" else ("incomplete", "capture_timeout")
             for entry in rows:
                 if wanting[id(entry)]:
                     _set_content(entry.row, "not_captured", "capture_timeout")
         else:
-            scope_state, scope_reason = _apply_patch(context, budget, patch_args, patch_entries, allowances)
-    return _scope(scope_state, scope_reason, [entry.row for entry in rows], truncated=truncated, working_tree=working_tree)
+            outcome = _apply_patch(context, budget, patch_args, patch_entries, allowances)
+            problem = problem if problem[0] != "available" else outcome
+    return _scope(problem[0], problem[1], [entry.row for entry in rows], truncated=truncated, working_tree=working_tree)
 
 
 def _apply_patch(context: _Context, budget: _Budget, patch_args: list[str], patch_entries: list[_Entry],
                  allowances: list[bool]) -> tuple[str, str | None]:
-    splitter = _PatchSplitter(allowances, budget)
+    slots: list[int] = []  # the entry index each expected patch segment belongs to
+    for index, entry in enumerate(patch_entries):
+        slots += [index] * entry.segments
+    slot_allowed = [allowances[index] for index in slots]
+    splitter = _PatchSplitter(slot_allowed, budget, slots)
     result = context.run(patch_args, splitter.feed)
     complete = result.cause is None and result.returncode == 0
     splitter.finish(complete)
@@ -583,14 +751,14 @@ def _apply_patch(context: _Context, budget: _Budget, patch_args: list[str], patc
         for entry in wanted:
             _set_content(entry.row, "not_captured", reason)
 
-    if failure is None and (splitter.bad or len(segments) != len(patch_entries)):
+    if failure is None and (splitter.bad or len(segments) != len(slots)):
         discard("patch_alignment_failed")
         return "incomplete", "patch_alignment_failed"
     if failure == "patch_failed":
         discard("patch_failed")
         return "incomplete", "patch_failed"
-    for entry, segment in zip(patch_entries, segments):
-        expected = _plain_header(entry.path)
+    for slot, segment in zip(slots, segments):
+        expected = _plain_header(patch_entries[slot].path)
         header = bytes(segment.header)
         if expected is not None and len(expected) <= _HEADER_LIMIT and header.startswith(b"diff --git ") and header != expected:
             discard("patch_alignment_failed")
@@ -598,19 +766,20 @@ def _apply_patch(context: _Context, budget: _Budget, patch_args: list[str], patc
     for index, entry in enumerate(patch_entries):
         if not allowances[index]:
             continue
-        if index >= len(segments):
+        own = [segment for slot, segment in zip(slots, segments) if slot == index]
+        if len(own) < entry.segments:
             _set_content(entry.row, "not_captured", failure or "patch_alignment_failed")
             continue
-        segment = segments[index]
-        kept = _trim_incomplete_utf8(segment.kept) if segment.size > len(segment.kept) else bytes(segment.kept)
-        if segment.partial:
+        kept = b"".join(_trim_incomplete_utf8(segment.kept) if segment.size > len(segment.kept) else bytes(segment.kept) for segment in own)
+        size = sum(segment.size for segment in own)
+        if any(segment.partial for segment in own):
             _set_content(entry.row, "truncated" if kept else "not_captured", failure, kept or None)
-        elif segment.cap == 0:
-            _set_content(entry.row, "omitted_size", "task_limit")
-        elif segment.size > len(segment.kept):
-            _set_content(entry.row, "truncated", "file_limit" if len(segment.kept) >= FILE_TEXT_LIMIT else "task_limit", kept)
-        else:
+        elif len(kept) == size:
             _set_content(entry.row, "available", None, kept)
+        elif not kept:
+            _set_content(entry.row, "omitted_size", "task_limit")
+        else:
+            _set_content(entry.row, "truncated", "file_limit" if len(kept) >= FILE_TEXT_LIMIT else "task_limit", kept)
     return ("incomplete", failure) if failure else ("available", None)
 
 
@@ -633,49 +802,68 @@ def _committed_scope(context: _Context, budget: _Budget, base: Any, head: Any) -
     if ancestry.returncode != 0:
         return _scope("unavailable", "git_failed")
     options = ["--no-ext-diff", "--no-textconv", "--no-color", "--no-renames"]
-    listing = context.command("diff-tree", "-r", "-z", "--raw", "--numstat", *options, base, head, "--")
-    patch = context.command("diff-tree", "-r", "-p", *options, base, head, "--")
-    return _diff_scope(context, budget, listing, patch, extras=None, working_tree=False)
+    return _diff_scope(context, budget, context.command("diff-tree", "-r", "-z", "--raw", *options, base, head, "--"),
+                       context.command("diff-tree", "-r", "-z", "--numstat", *options, base, head, "--"),
+                       context.command("diff-tree", "-r", "-p", *options, base, head, "--"),
+                       unmerged=None, untracked=None, working_tree=False)
 
 
-def _copy_index(context: _Context, git_dir: str, common: str, hash_length: int, budget: _Budget) -> str | None:
-    """Copy the index (and a split index's shared part) into the disposable directory; a reason on failure."""
-    index = Path(git_dir) / "index"
-    data = None
+def _read_index_file(path: str) -> tuple[bytes | None, str | None]:
+    """`(bytes, None)` of a regular index file, `(None, reason)` when it is missing or unusable."""
     try:
-        info = os.lstat(index)
+        info = os.lstat(path)
     except FileNotFoundError:
-        info = None
+        return None, "index_missing"
     except OSError:
-        return "index_unreadable"
-    if info is not None:
-        if not stat.S_ISREG(info.st_mode):
-            return "index_unreadable"
-        if info.st_size > INDEX_LIMIT:
-            return "index_too_large"
-        data = _read_regular(str(index), INDEX_LIMIT)
-        if data is None:
-            return "index_unreadable"
-    if data is not None:
-        try:
-            shared = _shared_index_name(data, hash_length, budget)
-        except _IndexUnsupported:
-            return "index_unsupported"
-        if shared is not None:
+        return None, "index_unreadable"
+    if not stat.S_ISREG(info.st_mode):
+        return None, "index_unreadable"
+    if info.st_size > INDEX_LIMIT:
+        return None, "index_too_large"
+    data = _read_regular(path, INDEX_LIMIT)
+    return (data, None) if data is not None else (None, "index_unreadable")
+
+
+def _prepare_index(context: _Context, git_dir: str, common: str, hash_length: int, budget: _Budget) -> tuple[str, str] | None:
+    """Validate and copy the index (and a split index's shared part) into the disposable directory.
+
+    Returns `(scope state, reason)` when the working tree must not be read, else None. Every entry name
+    of both files is checked before any command touches the work tree; assume-unchanged and
+    skip-worktree entries, which an agent can set to hide edits, are cleared on the private copy.
+    """
+    data, reason = _read_index_file(os.path.join(git_dir, "index"))
+    if data is None:
+        return "not_captured", reason or "index_unreadable"
+    try:
+        scan = _scan_index(data, hash_length, budget)
+        shared_data = shared_scan = None
+        if scan.shared is not None:
             for directory in (git_dir, common):
-                path = os.path.join(directory, shared)
-                if not os.path.lexists(path):
-                    continue
-                if os.path.getsize(path) > INDEX_LIMIT:
-                    return "index_too_large"
-                text = _read_regular(path, INDEX_LIMIT)
-                if text is None:
-                    return "index_unsupported"
-                _private_write(context.git_dir / shared, text)
-                break
-            else:
-                return "index_unsupported"
-        _private_write(context.git_dir / "index", data)
+                shared_data, reason = _read_index_file(os.path.join(directory, scan.shared))
+                if shared_data is not None or reason != "index_missing":
+                    break
+            if shared_data is None:
+                return "not_captured", "index_unsupported" if reason in (None, "index_missing", "index_unreadable") else reason
+            shared_scan = _scan_index(shared_data, hash_length, budget, shared_file=True)
+    except _IndexUnsupported:
+        return "not_captured", "index_unsupported"
+    if scan.unsafe or (shared_scan is not None and shared_scan.unsafe):
+        return "not_captured", "index_unsafe_path"
+    if scan.overflow or (shared_scan is not None and shared_scan.overflow):
+        return "incomplete", "index_flags_present"
+    work_tree = os.fsencode(context.work_tree or "")
+    present = lambda name: os.path.lexists(os.path.join(work_tree, name))
+    name = scan.shared
+    if shared_scan is not None and shared_scan.flagged:
+        shared_data = _clear_flags(shared_data, hash_length, shared_scan.flagged, present)
+        digest = shared_data[-hash_length:]
+        name = "sharedindex." + digest.hex()
+        data = data[:scan.link_offset] + digest + data[scan.link_offset + hash_length:]
+    if scan.flagged or name != scan.shared:
+        data = _clear_flags(data, hash_length, scan.flagged, present)
+    if name is not None:
+        _private_write(context.git_dir / name, shared_data)
+    _private_write(context.git_dir / "index", data)
     context.environment["GIT_INDEX_FILE"] = str(context.git_dir / "index")
     return None
 
@@ -690,38 +878,103 @@ def _private_write(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
+def _config_values(path: str, section: str, keys: frozenset[str] | None = None) -> dict[str, str]:
+    """`key = value` pairs of one section of a Git config file, read as data (includes are not followed)."""
+    data = _read_regular(path, CONFIG_LIMIT)
+    values: dict[str, str] = {}
+    if data is None:
+        return values
+    current = None
+    for line in data.decode("utf-8", "replace").splitlines()[:20_000]:
+        line = line.strip()
+        if line.startswith("["):
+            current = line[1:line.find("]")].strip().lower() if "]" in line else None
+            continue
+        if current != section or not line or line[0] in "#;":
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip().lower()
+        if keys is not None and key not in keys:
+            continue
+        value = re.split(r"\s[#;]", value.strip(), maxsplit=1)[0].strip().strip('"') if separator else "true"
+        values[key] = value
+    return values
+
+
+_CORE_BOOLEANS = frozenset({"filemode", "ignorecase", "precomposeunicode", "symlinks", "autocrlf"})
+_TRUE, _FALSE = frozenset({"true", "yes", "on", "1"}), frozenset({"false", "no", "off", "0"})
+
+
+def _prepare_configuration(context: _Context, common: str) -> None:
+    """Carry the data a faithful diff needs into the disposable directory without running any config.
+
+    Only a fixed set of non-executing `core` booleans from the repository config, the repository's own
+    `info/exclude`, and the user's global ignore file (named by `core.excludesFile` in their global
+    config, else Git's default location) are copied; nothing else of any config applies.
+    """
+    lines = []
+    for key, value in _config_values(os.path.join(common, "config"), "core", _CORE_BOOLEANS).items():
+        lowered = value.lower()
+        if key == "autocrlf" and lowered == "input":
+            lines.append("\tautocrlf = input")
+        elif lowered in _TRUE:
+            lines.append(f"\t{key} = true")
+        elif lowered in _FALSE:
+            lines.append(f"\t{key} = false")
+    exclude = _read_regular(os.path.join(common, "info", "exclude"), CONFIG_LIMIT)
+    if exclude is not None:
+        (context.git_dir / "info").mkdir(exist_ok=True)
+        _private_write(context.git_dir / "info" / "exclude", exclude)
+    home = os.environ.get("HOME") or ""
+    candidates = [os.environ["GIT_CONFIG_GLOBAL"]] if os.environ.get("GIT_CONFIG_GLOBAL") else [
+        os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "git", "config"), os.path.join(home, ".gitconfig")]
+    configured = None
+    for candidate in candidates:
+        configured = _config_values(candidate, "core", frozenset({"excludesfile"})).get("excludesfile", configured)
+    if configured is None:
+        configured = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "git", "ignore")
+    if configured.startswith("~/"):
+        configured = os.path.join(home, configured[2:])
+    if os.path.isabs(configured):
+        ignore = _read_regular(configured, CONFIG_LIMIT)
+        if ignore is not None:
+            _private_write(context.git_dir / "global-excludes", ignore)
+            lines.append(f"\texcludesFile = {context.git_dir / 'global-excludes'}")
+    if lines:
+        with open(context.git_dir / "config", "a") as handle:
+            handle.write("[core]\n" + "\n".join(lines) + "\n")
+
+
 def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: str | None, common: str) -> dict[str, Any]:
     if not _valid_commit(head):
         return _scope("not_captured", "head_missing", working_tree=True)
     if git_dir is None:
         return _scope("not_captured", "git_dir_unverified", working_tree=True)
-    reason = _copy_index(context, git_dir, common, len(head) // 2, budget)
-    if reason is not None:
-        return _scope("not_captured", reason, working_tree=True)
+    failure = _prepare_index(context, git_dir, common, len(head) // 2, budget)
+    if failure is not None:
+        return _scope(failure[0], failure[1], working_tree=True)
     refresh = context.command("update-index", "-q", "--unmerged", "--ignore-submodules", "--refresh", work_tree=True)
     _, refreshed = context.collect(refresh)
     if refreshed.cause or refreshed.returncode != 0:
         # Without a refreshed copy, stat-dirty entries would be reported as modified; report none.
         return _scope("incomplete", "index_refresh_failed", working_tree=True)
     unmerged_data, unmerged_result = context.collect(context.command("ls-files", "-z", "--unmerged", work_tree=True))
-    others_data, others_result = context.collect(context.command("ls-files", "-z", "--others", "--exclude-standard", work_tree=True))
+    others_data, others_result = context.collect(context.command(
+        "ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory", work_tree=True))
     for result in (unmerged_result, others_result):
         if result.cause:
             return _scope("incomplete", result.cause, working_tree=True)
         if result.returncode != 0:
             return _scope("unavailable", "git_failed", working_tree=True)
-    extras = []
-    for record in unmerged_data.split(b"\0"):
-        if record:
-            _, _, path = record.partition(b"\t")
-            extras.append(_Entry(path=path, status="unmerged", forced="unmerged"))
-    for path in others_data.split(b"\0"):
-        if path:
-            extras.append(_Entry(path=path, status="untracked", forced="untracked"))
+    unmerged = sorted({record.partition(b"\t")[2] for record in unmerged_data.split(b"\0") if record})
+    if any(unsafe_index_path(path) for path in unmerged):
+        return _scope("not_captured", "index_unsafe_path", working_tree=True)
+    untracked = [path for path in others_data.split(b"\0") if path]
     options = ["--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--ignore-submodules=dirty"]
-    listing = context.command("diff-index", "-z", "--raw", "--numstat", *options, head, "--", work_tree=True)
-    patch = context.command("diff-index", "-p", *options, head, "--", work_tree=True)
-    return _diff_scope(context, budget, listing, patch, extras=extras, working_tree=True)
+    return _diff_scope(context, budget, context.command("diff-index", "-z", "--raw", *options, head, "--", work_tree=True),
+                       context.command("diff-index", "-z", "--numstat", *options, head, "--", work_tree=True),
+                       context.command("diff-index", "-p", *options, head, "--", work_tree=True),
+                       unmerged=unmerged, untracked=untracked, working_tree=True)
 
 
 # --- repositories -----------------------------------------------------------------------------
@@ -746,10 +999,13 @@ def _repository_state(scopes: dict[str, dict[str, Any]]) -> tuple[str, str | Non
 
 
 def _provenance(entry: dict[str, Any]) -> dict[str, Any]:
-    return {"repository_root": _text(entry.get("repository_root")), "worktree": _text(entry.get("worktree") or entry.get("repository_root")),
-            "git_common_dir": _text(entry.get("git_common_dir")), "base_commit": _text(entry.get("base_commit")),
-            "base_provenance": _text(entry.get("base_provenance")), "head_commit": _text(entry.get("head_commit")),
-            "observed_at": _stamp(), "baseline_dirty": _baseline_dirty(entry), "attribution": document_shape.ATTRIBUTION}
+    keys = ("repository_root", "worktree", "git_common_dir", "base_commit", "base_provenance", "head_commit")
+    given = {key: entry.get(key) for key in keys}
+    given["worktree"] = entry.get("worktree") or entry.get("repository_root")
+    bounded = {key: _text(value) for key, value in given.items()}
+    return {**bounded, "observed_at": _stamp(), "baseline_dirty": _baseline_dirty(entry),
+            "fields_truncated": any(isinstance(given[key], str) and bounded[key] != given[key] for key in keys),
+            "attribution": document_shape.ATTRIBUTION}
 
 
 def _skipped(entry: dict[str, Any], state: str, reason: str) -> dict[str, Any]:
@@ -757,7 +1013,40 @@ def _skipped(entry: dict[str, Any], state: str, reason: str) -> dict[str, Any]:
     return {**_provenance(entry), "state": state, "reason": reason, "scopes": scopes}
 
 
-def _capture_repository(entry: dict[str, Any], budget: _Budget) -> dict[str, Any]:
+def _guarded(function: Callable[[], dict[str, Any]], working_tree: bool) -> dict[str, Any]:
+    """One scope's capture; a failure costs that scope only, never a scope that already completed."""
+    try:
+        return function()
+    except StateOwnershipError:
+        raise
+    except Exception:
+        log.warning("changes capture failed for one scope", exc_info=True)
+        return _scope("unavailable", "capture_error", working_tree=working_tree)
+
+
+def _build_isolated(context: _Context, git_dir: str | None, common: str, object_format: str) -> None:
+    """The disposable Git directory; `HEAD` is never used by the pinned commands, so an unusable one
+    (not a regular file) falls back to the common directory's, then to a fixed value."""
+    for source in (git_dir, common):
+        if source is None:
+            continue
+        try:
+            build_isolated_git_dir(context.git_dir, source, common, object_format)
+            break
+        except (ValueError, OSError):
+            shutil.rmtree(context.git_dir, ignore_errors=True)
+            context.git_dir.mkdir()
+    else:
+        build_isolated_git_dir(context.git_dir, str(context.root), common, object_format)
+    if not (context.git_dir / "HEAD").exists():
+        (context.git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+
+def _real(path: Any) -> str | None:
+    return os.path.realpath(path) if isinstance(path, str) else None
+
+
+def _capture_repository(entry: dict[str, Any], budget: _Budget, anchors: dict[str, str | None] | None) -> dict[str, Any]:
     if budget.expired():
         return _skipped(entry, "incomplete", "budget_exhausted")
     root, worktree, common = entry.get("repository_root"), entry.get("worktree") or entry.get("repository_root"), entry.get("git_common_dir")
@@ -765,29 +1054,43 @@ def _capture_repository(entry: dict[str, Any], budget: _Budget) -> dict[str, Any
     if not all(isinstance(value, str) and os.path.isabs(value) for value in (root, worktree, common)) or \
             not os.path.isdir(os.path.join(common, "objects")):
         return _skipped(entry, "unavailable", "repository_unavailable")
-    git_dir = verified_git_dir(worktree, common)
+    anchors = anchors or {}
+    anchored = _real(root) in anchors
+    if not anchored and os.path.lexists(os.path.join(common, "objects", "info", "alternates")):
+        # Nothing recorded at dispatch vouches for this repository, and alternates let its object store
+        # name another repository's objects.
+        return _skipped(entry, "not_captured", "alternates_present")
+    expected = anchors.get(_real(root)) if anchored else None
+    changed = anchored and (_real(worktree) != _real(root) or (expected is not None and _real(expected) != _real(common)))
+    git_dir = None if changed else verified_git_dir(worktree, common)
     with tempfile.TemporaryDirectory(prefix="harflow_mcp-changes-") as directory:
         context = _Context(Path(directory), worktree, budget)
         context.git_dir.mkdir()
-        format_name = "sha256" if _valid_commit(head) and len(head) == 64 else "sha1"
-        build_isolated_git_dir(context.git_dir, git_dir or common, common, format_name)
-        if not (context.git_dir / "HEAD").exists():
-            (context.git_dir / "HEAD").write_text("ref: refs/heads/main\n")
-        scopes = {"committed_range": _committed_scope(context, budget, entry.get("base_commit"), head),
-                  "working_tree": _working_tree_scope(context, budget, head, git_dir, common)}
+        _build_isolated(context, git_dir, common, "sha256" if _valid_commit(head) and len(head) == 64 else "sha1")
+        _prepare_configuration(context, common)
+        scopes = {"committed_range": _guarded(lambda: _committed_scope(context, budget, entry.get("base_commit"), head), False)}
+        if changed:
+            scopes["working_tree"] = _scope("not_captured", "repository_identity_changed", working_tree=True)
+        else:
+            scopes["working_tree"] = _guarded(lambda: _working_tree_scope(context, budget, head, git_dir, common), True)
     state, reason = _repository_state(scopes)
     return {**_provenance(entry), "state": state, "reason": reason, "scopes": scopes}
 
 
-def build_document(task_id: str, repositories: list[Any], *, budget_seconds: float | None = None) -> dict[str, Any]:
-    """The `harflow.task-changes` document for a task's persisted outcome repositories."""
+def build_document(task_id: str, repositories: list[Any], *, budget_seconds: float | None = None,
+                   anchors: dict[str, str | None] | None = None) -> dict[str, Any]:
+    """The `harflow.task-changes` document for a task's persisted outcome repositories.
+
+    `anchors` maps the real path of each repository root recorded at dispatch to the Git common
+    directory it must still have (None when none was recorded).
+    """
     budget = _Budget(BUDGET_SECONDS if budget_seconds is None else budget_seconds)
     entries = [entry for entry in repositories if isinstance(entry, dict)][:document_shape.MAX_REPOSITORIES]
     entries.sort(key=lambda entry: str(entry.get("repository_root")))
     captured = []
     for entry in entries:
         try:
-            captured.append(_capture_repository(entry, budget))
+            captured.append(_capture_repository(entry, budget, anchors))
         except StateOwnershipError:
             raise
         except Exception:
@@ -873,6 +1176,23 @@ def publish(log_dir: Path, task_id: str, identity: tuple[Any, ...], data: bytes)
         lock.close(unlock=True)
 
 
+def _anchors(record: store.TaskRecord) -> dict[str, str | None]:
+    """The repositories the task's own dispatch records vouch for, by real path of the root, each with the
+    Git common directory it must still have when that is known (a task worktree's source repository)."""
+    anchors: dict[str, str | None] = {}
+    baseline = record.git_baseline if isinstance(record.git_baseline, dict) else {}
+    recorded = [baseline.get("repository_root")] + [item.get("repository_root") for item in baseline.get("repositories") or []
+                                                      if isinstance(item, dict)]
+    for root in recorded:
+        if isinstance(root, str):
+            anchors[os.path.realpath(root)] = None
+    worktree = record.worktree if isinstance(record.worktree, dict) else {}
+    if isinstance(worktree.get("path"), str) and isinstance(worktree.get("source_repo_path"), str):
+        source_git = os.path.join(worktree["source_repo_path"], ".git")
+        anchors[os.path.realpath(worktree["path"])] = source_git if _is_directory(source_git) else None
+    return anchors
+
+
 def capture_task_changes(log_dir: Path, task_id: str) -> str:
     """Capture and publish the task's changes document; returns what happened.
 
@@ -888,7 +1208,7 @@ def capture_task_changes(log_dir: Path, task_id: str) -> str:
     identity = _identity(record)
     reason = None
     try:
-        data = serialize(build_document(task_id, repositories))
+        data = serialize(build_document(task_id, repositories, anchors=_anchors(record)))
         if len(data) > document_shape.MAX_DOCUMENT_BYTES:
             reason = "capture_too_large"
     except StateOwnershipError:

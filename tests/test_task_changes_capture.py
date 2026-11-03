@@ -290,7 +290,7 @@ def test_split_index_is_copied_with_its_shared_part(repo):
     shared = sorted(p.name for p in (path / ".git").glob("sharedindex.*"))
     assert shared
     index = (path / ".git" / "index").read_bytes()
-    assert capture._shared_index_name(index, 20, capture._Budget(5)) == shared[0] or capture._shared_index_name(index, 20, capture._Budget(5)) in shared
+    assert capture._scan_index(index, 20, capture._Budget(5)).shared in shared
     document = build([simple_entry(path, base)])
     assert "split" in text_of(rows(document, "working_tree")["f1"])
     for name in shared:
@@ -300,9 +300,10 @@ def test_split_index_is_copied_with_its_shared_part(repo):
 
 def test_shared_index_name_is_none_for_a_plain_index(repo):
     path, _ = repo
-    assert capture._shared_index_name((path / ".git" / "index").read_bytes(), 20, capture._Budget(5)) is None
+    scan = capture._scan_index((path / ".git" / "index").read_bytes(), 20, capture._Budget(5))
+    assert scan.shared is None and not scan.unsafe and scan.flagged == []
     with pytest.raises(capture._IndexUnsupported):
-        capture._shared_index_name(b"nonsense" * 10, 20, capture._Budget(5))
+        capture._scan_index(b"nonsense" * 10, 20, capture._Budget(5))
 
 
 def test_index_too_large(repo, monkeypatch):
@@ -476,11 +477,13 @@ def test_path_encoding_helpers():
 
 
 def test_listing_parser_and_splitter_forms():
-    listing = (b":100644 100644 " + b"1" * 40 + b" " + b"0" * 40 + b" M\0a b\0:000000 160000 " + b"0" * 40 + b" " + b"2" * 40 + b" A\0sub\0"
-               b"1\t2\ta b\0" + b"1\t0\tsub\0")
-    parsed = capture._parse_listing(listing)
-    assert [(e.path, e.status, e.forced, e.additions) for e in parsed] == [(b"a b", "modified", None, 1), (b"sub", "submodule", "submodule", 1)]
-    assert capture._parse_listing(listing[:-5]) is None
+    raw = (b":100644 100644 " + b"1" * 40 + b" " + b"0" * 40 + b" M\0a b\0:000000 160000 " + b"0" * 40 + b" " + b"2" * 40 + b" A\0sub\0")
+    parsed = capture._parse_raw(raw)
+    assert [(e.path, e.status, e.forced) for e in parsed] == [(b"a b", "modified", None), (b"sub", "submodule", "submodule")]
+    assert capture._parse_raw(raw[:-5]) is None
+    assert [e.path for e in capture._parse_raw(raw[:-5], partial=True)] == [b"a b"]
+    assert capture._parse_stat(b"1\t2\ta b\0-\t-\tsub\0") == {b"a b": (1, 2, False), b"sub": (None, None, True)}
+    assert capture._parse_stat(b"1\t2\ta b") == {} and capture._parse_stat(b"x\0") is None
     budget = capture._Budget(5)
     splitter = capture._PatchSplitter([True, False, True], budget)
     patch = (b"diff --git a/x b/x\nnew file mode 100644\n--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+hi\n"
@@ -693,3 +696,425 @@ def test_continuations_are_launched_as_their_own_supervised_processes(world, mon
     assert launched == ["parent"]
     assert "execution_mode == \"supervised\"" in inspect.getsource(TaskRegistry._spawn)
     assert "_execute_prepared" not in inspect.getsource(TaskRegistry._spawn).split("supervised")[1].split("return await launch")[0]
+
+
+# --- hostile indexes --------------------------------------------------------------------------
+
+
+def forge_index(entries, *, flags_for=None):
+    """A version 2 index with exactly these `(name, oid)` entries, bypassing Git's own path checks."""
+    import struct
+    body = b"DIRC" + struct.pack(">II", 2, len(entries))
+    for name, oid in sorted(entries):
+        fixed = struct.pack(">10I", 0, 0, 0, 0, 0, 0, 0o100644, 0, 0, 3) + bytes.fromhex(oid) + struct.pack(">H", min(len(name), 0xFFF))
+        entry = fixed + name + b"\0"
+        body += entry + b"\0" * (-len(entry) % 8)
+    import hashlib
+    return body + hashlib.sha1(body).digest()
+
+
+@pytest.mark.parametrize("name", [b"../secret.txt", b".git/config", b".GIT/x", b"a/./b", b"a/../b", b"/etc/passwd", b"a//b",
+                                  b".git ", b".git.", b"git~1/x", ".g‌it/x".encode(), b"a\\b", b".git::$INDEX_ALLOCATION/x", b""])
+def test_unsafe_index_names_are_recognised(name):
+    assert capture.unsafe_index_path(name)
+
+
+@pytest.mark.parametrize("name", [b"a", b"dir/file.txt", b".github/workflows/x.yml", b".gitignore", b"foo.git/x", b"gitx", b"a b/c"])
+def test_ordinary_index_names_are_accepted(name):
+    assert not capture.unsafe_index_path(name)
+
+
+@pytest.mark.parametrize("name", [b"../secret.txt", b".git/config", b"sub/../../secret.txt"])
+def test_index_entry_outside_the_work_tree_is_never_read(repo, world, name):
+    path, base = repo
+    (world.root / "secret.txt").write_text("OUTSIDE-SENTINEL\n")
+    blob = git(path, "hash-object", "-w", str(world.root / "secret.txt"))
+    index = path / ".git" / "index"
+    index.write_bytes(forge_index([(b"f1", git(path, "rev-parse", "HEAD:f1")), (name, blob)]))
+    document = build([simple_entry(path, base)])
+    scope = scopes(document)["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "index_unsafe_path", [])
+    assert "OUTSIDE-SENTINEL" not in json.dumps(document) and scopes(document)["committed_range"]["state"] == "available"
+
+
+def test_unsafe_name_in_a_shared_index_is_refused(repo):
+    import hashlib
+    path, base = repo
+    git(path, "update-index", "--split-index")
+    git(path, "add", "-A")
+    git_dir = path / ".git"
+    shared = next(git_dir.glob("sharedindex.*"))
+    forged = forge_index([(b"../x", git(path, "rev-parse", "HEAD:f1"))])
+    digest = forged[-20:]
+    index = bytearray((git_dir / "index").read_bytes())
+    position = bytes(index).index(bytes.fromhex(shared.name.split(".")[1]))
+    index[position:position + 20] = digest
+    index[-20:] = hashlib.sha1(bytes(index[:-20])).digest()
+    (git_dir / ("sharedindex." + digest.hex())).write_bytes(forged)
+    (git_dir / "index").write_bytes(bytes(index))
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert (scope["state"], scope["reason"]) == ("not_captured", "index_unsafe_path")
+
+
+def test_leading_directory_symlink_leaks_nothing(world):
+    path = init_repo(world.root / "link-repo")
+    base = commit(path, "base", **{"d/secret.txt": "committed\n", "f": "1\n"})
+    outside = world.root / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("LEAK-SENTINEL\n")
+    import shutil
+    shutil.rmtree(path / "d")
+    os.symlink(outside, path / "d")
+    document = build([simple_entry(path, base)])
+    assert "LEAK-SENTINEL" not in json.dumps(document)
+    assert rows(document, "working_tree")["d/secret.txt"]["status"] == "deleted"
+
+
+def test_missing_index_is_not_captured(repo):
+    path, base = repo
+    (path / ".git" / "index").unlink()
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "index_missing", [])
+
+
+def test_assume_unchanged_and_skip_worktree_cannot_hide_edits(repo):
+    path, base = repo
+    git(path, "update-index", "--assume-unchanged", "f1")
+    git(path, "update-index", "--skip-worktree", "f2")
+    stamp = (path / "f1").stat()
+    (path / "f1").write_text("A\nB\n")  # same size; mtime restored below so stat data cannot give it away
+    os.utime(path / "f1", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    (path / "f2").write_text("changed\n")
+    before = (path / ".git" / "index").read_bytes()
+    document = build([simple_entry(path, base)])
+    working = rows(document, "working_tree")
+    assert set(working) == {"f1", "f2"} and "+A" in text_of(working["f1"]) and "+changed" in text_of(working["f2"])
+    assert (path / ".git" / "index").read_bytes() == before
+
+
+def test_skip_worktree_entries_without_files_stay_quiet(repo):
+    path, base = repo
+    git(path, "update-index", "--skip-worktree", "f2")
+    (path / "f2").unlink()
+    assert rows(build([simple_entry(path, base)]), "working_tree") == {}
+
+
+def test_flags_in_a_split_index_are_cleared_too(repo):
+    path, base = repo
+    git(path, "update-index", "--split-index")
+    git(path, "update-index", "--assume-unchanged", "f1")
+    (path / "f1").write_text("split-edit\n")
+    git(path, "update-index", "--split-index")
+    document = build([simple_entry(path, base)])
+    assert "+split-edit" in text_of(rows(document, "working_tree")["f1"])
+
+
+# --- trust anchors ----------------------------------------------------------------------------
+
+
+def seeded(world, repositories, **extra):
+    return seed_task(world.tasks, repositories, **extra)
+
+
+def test_dispatch_anchor_rejects_a_different_repository_identity(world, repo):
+    path, base = repo
+    other = init_repo(world.root / "other")
+    commit(other, "x", f="1\n")
+    tip = commit(path, "next", g="1\n")
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    seeded(world, [entry(path, base, tip)], worktree={"path": str(path), "source_repo_path": str(other)},
+           git_baseline={"repository_root": str(path)})
+    assert capture.capture_task_changes(world.tasks, TASK) == "published"
+    document = json.loads((world.tasks / f"{TASK}{shape.SUFFIX}").read_bytes())
+    assert scopes(document)["working_tree"]["reason"] == "repository_identity_changed"
+    assert scopes(document)["committed_range"]["state"] == "available" and common
+
+
+def test_dispatch_anchor_accepts_the_recorded_source_repository(world, repo):
+    path, base = repo
+    tip = commit(path, "next", g="1\n")
+    seeded(world, [entry(path, base, tip)], git_baseline={"repository_root": str(path)})
+    assert capture.capture_task_changes(world.tasks, TASK) == "published"
+    document = json.loads((world.tasks / f"{TASK}{shape.SUFFIX}").read_bytes())
+    assert scopes(document)["working_tree"]["state"] == "available"
+
+
+def test_unanchored_repository_with_alternates_is_not_captured(repo, world):
+    path, base = repo
+    (path / ".git" / "objects" / "info").mkdir(exist_ok=True)
+    (path / ".git" / "objects" / "info" / "alternates").write_text(str(world.root / "elsewhere") + "\n")
+    repository = build([simple_entry(path, base)])["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "alternates_present")
+    assert all(scope["state"] == "not_captured" and scope["rows"] == [] for scope in repository["scopes"].values())
+    anchored = build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]
+    assert anchored["state"] == "available"
+
+
+# --- document bounds --------------------------------------------------------------------------
+
+
+def test_repository_strings_are_bounded_and_flagged(repo):
+    path, base = repo
+    long_value = "p" + "\x01" * 3000
+    repository = build([{**simple_entry(path, base), "base_provenance": long_value}])["repositories"][0]
+    assert shape.escaped_size(repository["base_provenance"]) <= shape.MAX_REPOSITORY_FIELD
+    assert repository["fields_truncated"] is True
+    assert build([simple_entry(path, base)])["repositories"][0]["fields_truncated"] is False
+
+
+# --- typechange -------------------------------------------------------------------------------
+
+
+def test_typechange_in_both_scopes_keeps_alignment(repo):
+    path, base = repo
+    os.unlink(path / "f2")
+    os.symlink("f1", path / "f2")
+    tip = commit(path, "file to symlink", other="1\n")
+    committed = rows(build([entry(path, base, tip)]), "committed_range")
+    assert committed["f2"]["status"] == "typechange" and "+f1" in text_of(committed["f2"]) and "-x" in text_of(committed["f2"])
+    assert committed["other"]["content"]["state"] == "available"
+    os.unlink(path / "f2")
+    (path / "f2").write_text("regular again\n")
+    document = build([entry(path, base, tip)])
+    working = rows(document, "working_tree")
+    assert working["f2"]["status"] == "typechange" and "regular again" in text_of(working["f2"])
+    assert scopes(document)["working_tree"]["state"] == "available"
+    assert text_of(working["f2"]).count("diff --git") == 2
+
+
+# --- exclusions -------------------------------------------------------------------------------
+
+
+def test_info_exclude_global_excludes_and_directories(repo, world, monkeypatch):
+    path, base = repo
+    (path / ".git" / "info" / "exclude").write_text("build/\n")
+    (path / "build").mkdir()
+    for index in range(600):
+        (path / "build" / f"o{index}.o").write_text("x")
+    (path / "f1").write_text("edit\n")
+    (path / "noise.log").write_text("x")
+    (path / "newdir").mkdir()
+    for name in "abc":
+        (path / "newdir" / name).write_text("x")
+    global_config = world.root / "global.gitconfig"
+    ignore = world.root / "global-ignore"
+    ignore.write_text("*.log\n")
+    global_config.write_text(f"[core]\n\texcludesFile = {ignore}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    scope = scopes(build([simple_entry(path, base)], budget_seconds=30))["working_tree"]
+    assert [capture_row_path(row) for row in scope["rows"]] == ["f1", "newdir/"]
+    assert scope["rows_truncated"] is False and scope["state"] == "available"
+
+
+def test_tracked_rows_are_never_evicted_by_untracked_ones(repo):
+    path, base = repo
+    (path / "zzz-tracked-edit").write_text("1\n")
+    git(path, "add", "zzz-tracked-edit")
+    tip = commit(path, "tracked")
+    (path / "zzz-tracked-edit").write_text("2\n")
+    for index in range(600):
+        (path / f"a{index:04d}").write_text("u")
+    scope = scopes(build([entry(path, base, tip)], budget_seconds=30))["working_tree"]
+    names = [capture_row_path(row) for row in scope["rows"]]
+    assert scope["row_count"] == 500 and scope["rows_truncated"] is True and "zzz-tracked-edit" in names
+
+
+def test_allow_listed_core_booleans_are_honoured(repo):
+    path, base = repo
+    os.chmod(path / "f1", 0o755)
+    assert "f1" in rows(build([simple_entry(path, base)]), "working_tree")
+    git(path, "config", "core.filemode", "false")
+    git(path, "config", "core.fsmonitor", "touch /nonexistent/never")
+    assert rows(build([simple_entry(path, base)]), "working_tree") == {}
+
+
+# --- processes --------------------------------------------------------------------------------
+
+
+def test_capture_commands_run_with_a_disposable_home(repo, world, monkeypatch):
+    path, base = repo
+    out = world.root / "env.txt"
+    monkeypatch.setattr(capture, "GIT", wrapper(world, f'echo "$HOME $XDG_CONFIG_HOME" >> {out}'))
+    build([simple_entry(path, base)])
+    seen = {line for line in out.read_text().splitlines()}
+    assert seen and all(str(world.root / "home") not in line and "harflow_mcp-changes-" in line for line in seen)
+
+
+def test_a_process_that_survives_the_kill_is_abandoned(world, monkeypatch):
+    import threading
+    release = threading.Event()
+    reaped = []
+    reader, writer = os.pipe()
+
+    class Stuck:
+        pid = 0
+        returncode = None
+        stdout = os.fdopen(reader, "rb")
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("git", timeout)
+            reaped.append(True)
+            release.wait(5)
+
+        def kill(self):
+            pass
+    monkeypatch.setattr(capture.subprocess, "Popen", Stuck)
+    monkeypatch.setattr(capture, "_kill", lambda process: None)
+    monkeypatch.setattr(capture, "REAP_SECONDS", 0.1)
+    started = time.monotonic()
+    result = capture._run(["git"], {}, str(world.root), capture._Budget(0.2), lambda chunk: None)
+    assert time.monotonic() - started < 3 and result.cause == "capture_timeout"
+    time.sleep(0.1)
+    assert reaped == [True]
+    release.set()
+    os.close(writer)
+
+
+def test_a_command_finishing_at_the_deadline_edge_is_not_a_timeout(world, monkeypatch):
+    monkeypatch.setattr(capture, "EXIT_GRACE_SECONDS", 1.0)
+    result = capture._run(["sh", "-c", "exec 1>&-; sleep 0.2"], dict(os.environ), str(world.root), capture._Budget(0.1), lambda chunk: None)
+    assert (result.cause, result.returncode) == (None, 0)
+
+
+def test_failed_numstat_keeps_rows_and_text(repo, world, monkeypatch):
+    path, base = repo
+    tip = commit(path, "two", a="1\n", b="2\n")
+    monkeypatch.setattr(capture, "GIT", wrapper(world, 'case "$*" in *--numstat*) exit 3;; esac'))
+    committed = scopes(build([entry(path, base, tip)]))["committed_range"]
+    assert (committed["state"], committed["reason"]) == ("incomplete", "git_failed")
+    assert [row["additions"] for row in committed["rows"]] == [None, None]
+    assert all(row["content"]["state"] == "available" for row in committed["rows"])
+
+
+def test_listing_ceiling_keeps_the_complete_records_it_read(repo, monkeypatch):
+    path, base = repo
+    tip = commit(path, "many", **{f"file{index:02d}": "x\n" for index in range(30)})
+    monkeypatch.setattr(capture, "COMMAND_CEILING", 700)
+    committed = scopes(build([entry(path, base, tip)]))["committed_range"]
+    assert (committed["state"], committed["reason"], committed["rows_truncated"]) == ("incomplete", "output_ceiling", True)
+    assert 0 < committed["row_count"] < 30
+    assert all(row["content"] == {"state": "not_captured", "reason": "output_ceiling", "bytes": 0} for row in committed["rows"])
+
+
+# --- degraded repositories --------------------------------------------------------------------
+
+
+def test_dangling_shared_index_link_is_unsupported_not_a_crash(repo):
+    path, base = repo
+    git(path, "update-index", "--split-index")
+    git(path, "add", "-A")
+    for shared in (path / ".git").glob("sharedindex.*"):
+        shared.unlink()
+        os.symlink(path / "nowhere", shared)
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["state"] == "not_captured" and scope["reason"] in {"index_unsupported", "index_unreadable"}
+
+
+def test_unusable_head_in_a_worktree_admin_directory_does_not_stop_capture(world, repo):
+    path, base = repo
+    linked = world.root / "wt-head"
+    git(path, "worktree", "add", "-q", str(linked), "-b", "wt-head")
+    tip = commit(linked, "in linked", g="1\n")
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    admin = os.path.join(common, "worktrees", "wt-head")
+    os.unlink(os.path.join(admin, "HEAD"))
+    os.mkfifo(os.path.join(admin, "HEAD"))
+    document = build([entry(path, base, tip, worktree=linked, common=common)])
+    assert scopes(document)["committed_range"]["state"] == "available" and "g" in rows(document, "committed_range")
+
+
+def test_a_failing_scope_does_not_lose_the_completed_one(repo, monkeypatch):
+    path, base = repo
+    tip = commit(path, "next", g="1\n")
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(capture, "_working_tree_scope", explode)
+    document = build([entry(path, base, tip)])
+    assert scopes(document)["committed_range"]["state"] == "available" and "g" in rows(document, "committed_range")
+    assert (scopes(document)["working_tree"]["state"], scopes(document)["working_tree"]["reason"]) == ("unavailable", "capture_error")
+
+
+# --- cancellation and races -------------------------------------------------------------------
+
+
+def test_cancelled_hook_leaves_an_inert_swept_temporary_file(world, monkeypatch):
+    from harflow_mcp import retention
+    published(world)
+    started, release = __import__("threading").Event(), __import__("threading").Event()
+    orphan = world.tasks / f"{TASK}{shape.SUFFIX}.0123456789abcdef.tmp"
+
+    def interrupted(log_dir, task_id):
+        orphan.write_text("{")
+        started.set()
+        release.wait(5)
+        return "published"
+    monkeypatch.setattr(task_supervisor.task_changes_capture, "capture_task_changes", interrupted)
+
+    async def scenario():
+        job = asyncio.ensure_future(task_supervisor._capture_changes(world.tasks, _Task()))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        release.set()
+    asyncio.run(scenario())
+    from harflow_mcp import task_changes_read
+    assert task_changes_read.load_document(world.tasks, TASK).state == "missing"
+    assert retention._delete_task_files_locked(world.tasks, TASK) and not orphan.exists()
+
+
+def test_a_record_rewritten_during_capture_with_the_same_identity_still_publishes(world, monkeypatch):
+    published(world)
+    real = capture.build_document
+
+    def rewrite(*args, **kwargs):
+        document = real(*args, **kwargs)
+        import dataclasses
+        store.write(world.tasks, dataclasses.replace(store.read(world.tasks, TASK, include_prompt=False), title="resumed meanwhile"))
+        return document
+    monkeypatch.setattr(capture, "build_document", rewrite)
+    assert capture.capture_task_changes(world.tasks, TASK) == "published"
+
+
+# --- end to end -------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_supervised_task_stores_its_changes_after_settling(tmp_path, monkeypatch):
+    """The production path: a detached owner runs a fake agent in a real repository, settles, then captures."""
+    from harflow_mcp import task_supervision
+    from harflow_mcp.backends import get
+    from harflow_mcp.tasks import TaskRegistry
+    from restart_test_support import install_fake_claude
+
+    pin_git(monkeypatch, tmp_path / "home")
+    install_fake_claude(tmp_path, monkeypatch, session="changes-e2e")
+    repo = init_repo(tmp_path / "work")
+    commit(repo, "base", f="1\n")
+    (repo / "f").write_text("1\n2\n")
+    log_dir = tmp_path / "state" / "tasks"
+    registry = TaskRegistry(log_dir=log_dir, execution_mode="supervised")
+    task_id = "c" * 32
+    await registry.start("die 0", repo, backend=get("claude"), freedom="read_only", task_id=task_id)
+    document_path = log_dir / f"{task_id}{shape.SUFFIX}"
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not document_path.exists():
+        await asyncio.sleep(0.2)
+    assert document_path.exists(), "the owner never stored a changes document"
+    document = json.loads(document_path.read_bytes())
+    shape.validate(document, task_id)
+    record = store.read(log_dir, task_id, include_prompt=False)
+    assert record.exit_code is not None and stat.S_IMODE(document_path.stat().st_mode) == 0o600
+    working = rows(document, "working_tree")
+    assert "+2" in text_of(working["f"]) and scopes(document)["working_tree"]["state"] == "available"
+    launch = task_supervision.read_launch(log_dir, task_id)
+    assert launch["state"] == "settled"

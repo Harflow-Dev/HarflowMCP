@@ -337,7 +337,7 @@ def build_changes(world: World) -> None:
 
     def repository(root, committed, working, **extra):
         return {"repository_root": root, "worktree": root, "git_common_dir": root + "/.git", "base_commit": sha("a"),
-                "base_provenance": "dispatch", "head_commit": sha("b"), "observed_at": stamp, "baseline_dirty": False,
+                "base_provenance": "dispatch", "head_commit": sha("b"), "observed_at": stamp, "baseline_dirty": False, "fields_truncated": False,
                 "attribution": shape.ATTRIBUTION, "state": "available", "reason": None,
                 "scopes": {"committed_range": scope("committed_range", committed), "working_tree": scope("working_tree", working)}, **extra}
 
@@ -349,9 +349,10 @@ def build_changes(world: World) -> None:
 
     outcome = {"repositories": [{"repository_root": WORKSPACE}]}
     patch = b"diff --git a/src/app.py b/src/app.py\nindex 1111111..2222222 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,2 @@\n print('a')\n+print('b')\n"
+    guide = b"diff --git a/docs/guide.md b/docs/guide.md\n" + b"+one more line of documentation\n" * 40
     world.task("task-changes-available", outcome=outcome)
     store_document("task-changes-available", [repository(
-        WORKSPACE, [row("README.md", b"diff --git a/README.md b/README.md\n+hello\n", status="added"), row("src/app.py", patch),
+        WORKSPACE, [row("README.md", b"diff --git a/README.md b/README.md\n+hello\n", status="added"), row("docs/guide.md", guide, status="added"), row("src/app.py", patch),
                     row("assets/logo.png", status="added", additions=None, deletions=None, state="binary", binary=True)],
         [row("src/app.py", patch), row("notes.txt", status="untracked", additions=None, deletions=None, state="not_captured", reason="untracked")])])
     first = world.call("available-listing", "task-changes", "task-changes-available", "--limit", "2", capability=cap)
@@ -359,8 +360,9 @@ def build_changes(world: World) -> None:
     selection = ("--repository-root", WORKSPACE, "--scope", "committed_range", "--path-b64", base64.b64encode(b"src/app.py").decode())
     world.call("text-complete", "task-changes", "task-changes-available", *selection, capability=cap)
     # Chunking is driven by the 262144-byte document bound; the fixture lowers it so a small patch needs several pages.
-    with mock.patch.object(task_changes_read, "DOCUMENT_MAX_BYTES", 1100):
-        chunk = world.call("text-chunk", "task-changes", "task-changes-available", *selection, capability=cap)
+    paged = ("--repository-root", WORKSPACE, "--scope", "committed_range", "--path-b64", base64.b64encode(b"docs/guide.md").decode())
+    with mock.patch.object(task_changes_read, "DOCUMENT_MAX_BYTES", 1800):
+        chunk = world.call("text-chunk", "task-changes", "task-changes-available", *paged, capability=cap)
         assert chunk["has_more"], chunk
         world.call("text-chunk-next", "task-changes", "task-changes-available", "--cursor", chunk["next_cursor"], capability=cap)
     expired = first["next_cursor"]
