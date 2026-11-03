@@ -24,6 +24,8 @@ Return the session receipt at the specified lead-repository path, including all 
 
 For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 
+The [v2 coverage ledger](../../HarflowDesign/v2/docs/migration-coverage.md) is an optional workspace coordination reference, not a build dependency. S10-Gxx bounded gap sub-sessions follow scope approval and obtain exact design approval before dependent work; unresolved required states block only their dependent feature. Independent work continues. The approved mock does not establish runtime capability or authority. Existing S01 evidence and S02 status remain as recorded in their receipts.
+
 ## Sessions
 
 ### S01 — Contract and runtime inventory
@@ -47,7 +49,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowMCP. Co-owned: HarflowMac, HarflowDesign, HarflowEngine, HarflowWeb.
 - Prerequisite receipts: S02.
 - Checklist coverage: B0-MC-02 (final contribution), B0-MA-04 (final contribution), B0-DS-01 (final contribution), C0-DS-04 (partial), B0-EN-01 (final contribution), B0-WE-01 (partial).
-- Scope and acceptance: Obtain owner decisions on freeze, parity, scope, representative datasets and performance budgets; inventory design approvals, engine scaffold and deferred Web; record accepted baselines and unknowns.
+- Scope and acceptance: Record Keep, Simplify, Deliberately remove and Undecided decisions in the v2 coverage ledger; obtain decisions on freeze, representative datasets and performance budgets, preserving unresolved scope and approved removals.
 - Output: lead receipt `docs/migration-receipts/S03.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S04 — Bounded Python public reads
@@ -55,7 +57,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S03.
 - Checklist coverage: C0-MC-01 (final contribution).
-- Scope and acceptance: Audit existing reads first; deliver only needed additive bounded activity/status semantics with expiry, gaps, drain and change evidence.
+- Scope and acceptance: Audit existing public reads against approved v2 and scope decisions, including task title, changes and diff provenance; deliver only needed approved additive bounded reads with expiry, gaps, drain and change evidence.
 - Output: lead receipt `docs/migration-receipts/S04.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S05 — Handshake and contract fixtures
@@ -63,7 +65,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S04.
 - Checklist coverage: C0-MC-02 (final contribution), C0-MC-03 (final contribution).
-- Scope and acceptance: Fixture handshake, compatibility, unknown fields, errors, run/resume and included MCP schemas; document unsupported tools.
+- Scope and acceptance: Reconcile v2 mock capabilities with actual public compatibility, errors and schemas; fixture handshake, unknown fields, run/resume and included MCP schemas, documenting unsupported capabilities without inventing semantics.
 - Output: lead receipt `docs/migration-receipts/S05.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S06 — Mac fixture compatibility
@@ -95,7 +97,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S08.
 - Checklist coverage: C0-MC-04 (final contribution).
-- Scope and acceptance: Run workflow, resource and statistics scenarios; assemble the complete C0 conformance coverage and Python baseline receipt.
+- Scope and acceptance: Run workflow, resource and statistics conformance for included engine behavior; honor UI removals without treating them as engine API deletion, and assemble the Python baseline receipt.
 - Output: lead receipt `docs/migration-receipts/S09.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S11 — Client contract boundary
@@ -103,7 +105,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowClient. Co-owned: HarflowMCP, HarflowDesign.
 - Prerequisite receipts: S09 and S10, with approved references for the assigned states.
 - Checklist coverage: C0-CL-01 (final contribution), C0-CL-02 (final contribution), C0-CL-03 (final contribution).
-- Scope and acceptance: Deliver traceable immutable types, validators, injected ports, fakes and contract checks, with pinned contract and approved design identities.
+- Scope and acceptance: Deliver v2 models, validators, injected ports, fakes and contract checks traceable to canonical public contracts and exact approved design identities; do not infer authority from mocks.
 - Output: lead receipt `docs/migration-receipts/S11.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S14 — Python adapter and polling
@@ -119,7 +121,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowDesktop. Co-owned: HarflowMCP, HarflowMac, HarflowDesign, HarflowClient.
 - Prerequisite receipts: S23.
 - Checklist coverage: E0-MC-01 (final contribution), E0-MA-01 (final contribution), E0-DS-02 (final contribution), E0-CL-05 (final contribution), E0-CL-06 (final contribution), E0-CL-07 (final contribution), E0-CL-14 (final contribution), E0-DE-02 (final contribution), E0-DE-06 (final contribution), E0-DE-12 (final contribution).
-- Scope and acceptance: Run full E0 scenarios including reconnect, disposal, accessibility, production pixels, performance, clean pinned install and sandbox smoke; accept exact app/client/Python/contract identities and limitations.
+- Scope and acceptance: Accept Electron on Python against approved v2 production pixels and the retained/simplified feature ledger, including reconnect, disposal, accessibility, performance, clean pinned install and sandbox smoke. Do not restore removed UI for parity; record exact identities and limitations.
 - Output: lead receipt `docs/migration-receipts/S24.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S39 — Setup and MCP
@@ -135,7 +137,7 @@ For optional work replace `Sxx` with `X01`, `X02` or `X03`.
 - Status: planned. Lead: HarflowEngine. Co-owned: HarflowMCP.
 - Prerequisite receipts: S40.
 - Checklist coverage: R0-EN-08 (final contribution), R0-EN-09 (final contribution), R0-EN-10 (final contribution), R0-EN-11 (final contribution), R0-EN-12 (final contribution), R0-EN-13 (final contribution), R0-EN-14 (final contribution), R0-MC-01 (final contribution).
-- Scope and acceptance: Pass Python-equivalent conformance and all listed fault families on macOS with external oracles; adjudicate discrepancies and accept R0 without claiming other platforms.
+- Scope and acceptance: Pass retained engine wire and semantic conformance and listed fault families on macOS with external oracles; frontend removals do not delete APIs. Adjudicate discrepancies without claiming other platforms.
 - Output: lead receipt `docs/migration-receipts/S41.md`, with the evidence and identities required by the dispatch protocol.
 
 ### S46 — Cutover rehearsal
