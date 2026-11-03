@@ -1659,7 +1659,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if action == "inspect" and args.view == "activity":
                 from .takeover import caller_refusal
                 # Running node activity is for a verified direct caller only; every other caller keeps the settled-only read.
-                live_activity = await asyncio.to_thread(caller_refusal, default_log_dir()) is None
+                live_activity = managed is None and await asyncio.to_thread(caller_refusal, default_log_dir()) is None
             try:
                 if action == "assigned-input":
                     return await asyncio.to_thread(workflow_node_reads.assigned_input_node, managed, args.workflow_run_id, args.execution_id, source_run_id=args.source_run_id, task_id=args.task_id, cursor=args.cursor, limit=args.limit, root=default_log_dir().parent)

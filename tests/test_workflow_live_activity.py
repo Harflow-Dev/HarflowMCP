@@ -130,15 +130,85 @@ def test_other_callers_keep_the_settled_only_read(tmp_path, capsys, monkeypatch,
     assert "fully settled" in inspect(capsys, run_id, "exec", expect=1)["message"]
 
 
-def test_managed_orchestrator_is_refused_a_live_node(tmp_path, capsys, monkeypatch):
-    from types import SimpleNamespace
-    from harflow_mcp import lineage
+def test_managed_view_keeps_the_settled_only_read_even_for_a_direct_caller(tmp_path, capsys, monkeypatch):
+    from harflow_mcp import workflow_inspection
     storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"}),
                                       activation("decision", "running", role="orchestrator")])
-    storage.update_run(run_id, lambda value: value["activations"][1].update(role="orchestrator"), "synthetic_authority")
-    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: SimpleNamespace(record=SimpleNamespace(task_id="owned-caller")))
-    monkeypatch.setattr(takeover, "caller_refusal", lambda *_: ("agent_caller", "an agent"))
+    log(storage, "att-1", 1)
+    managed = ({"role": "orchestrator", "activation_id": "decision"}, storage.get_run(run_id))
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+    # caller_refusal is permissive (autouse), so only the managed view can refuse.
     assert "fully settled" in inspect(capsys, run_id, "exec", expect=1)["message"]
+
+
+def test_ordinary_agent_with_the_real_gate_stays_settled_only(tmp_path, capsys, monkeypatch):
+    storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
+    log(storage, "att-1", 1)
+    monkeypatch.undo()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HARFLOW_TASK_ID", "unassociated-agent")
+    # Refused before any log is read: either the node is live and settled-only, or the caller cannot be verified.
+    message = inspect(capsys, run_id, "exec", expect=1)["message"]
+    assert "fully settled" in message or "cannot be verified" in message
+
+
+def live(storage, capsys, run_id, task_log=None):
+    return inspect(capsys, run_id, "exec")
+
+
+def test_log_replacements_are_never_followed_or_blocked_on(tmp_path, capsys):
+    import os
+    storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
+    path = events_path(storage.root / "tasks", "att-1")
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(event_line("att-1", 7))
+    path.symlink_to(outside)
+    assert (live(storage, capsys, run_id)["activity_state"], ) == ("unavailable",)
+    path.unlink()
+    os.mkfifo(path)
+    result = live(storage, capsys, run_id)
+    assert (result["activity_state"], result["reason"], result["events"]) == ("unavailable", "log_not_regular_file", [])
+    path.unlink()
+    assert live(storage, capsys, run_id)["activity_state"] == "not_started"
+
+
+def test_read_uses_the_qualified_descriptor_when_the_path_is_swapped_after_open(tmp_path, capsys, monkeypatch):
+    from harflow_mcp import events
+    storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
+    log(storage, "att-1", 2)
+    path = events_path(storage.root / "tasks", "att-1")
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(event_line("att-1", 9))
+    original = events.read_page
+
+    def swapping(*args, **kwargs):
+        path.unlink()
+        path.symlink_to(outside)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(events, "read_page", swapping)
+    result = live(storage, capsys, run_id)
+    assert result["activity_state"] == "available" and [event["seq"] for event in result["events"]] == [0, 1]
+
+
+def test_read_failure_is_reported_as_unavailable(tmp_path, capsys, monkeypatch):
+    from harflow_mcp import workflow_inspection
+
+    class Broken:
+        def seek(self, *args):
+            return 100
+
+        def read(self, *args):
+            raise OSError("device error")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+    storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
+    monkeypatch.setattr(workflow_inspection, "_open_log", lambda path: ("available", None, Broken()))
+    result = live(storage, capsys, run_id)
+    assert (result["activity_state"], result["reason"], result["events"]) == ("unavailable", "log_unreadable", [])
 
 
 def test_request_documents_cannot_carry_the_permission(tmp_path):

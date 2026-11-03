@@ -129,9 +129,13 @@ def duration(start: float, end: float, intervals=()) -> dict:
 
 def cost_value(value: Any) -> float | None:
     """A reported dollar cost as a finite non-negative float, else None; unknown never becomes zero."""
-    if type(value) in (int, float) and math.isfinite(value) and value >= 0:
-        return float(value)
-    return None
+    if type(value) not in (int, float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def observed_model_value(value: Any) -> dict | None:

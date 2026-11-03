@@ -555,12 +555,21 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any], *, 
                     "attempt_status": None, "settled": False, "activity_state": "not_started"}
         raise ValueError("Node execution has no dispatched task activity")
     path = events_path(root / "tasks", task["task_id"])
-    # The settled-only read keeps reading the log exactly as before; only the live-capable read classifies it.
-    state, reason = (("not_started", None) if task.get("status") == "reserved" else _log_state(path)) if allow_live_activity else ("available", None)
-    if state != "available":
-        page = PageResult(events=[], has_more=False)
+    layout = resolve_layout(root=root)
+    handle, failed, reason = None, [], None
+    if not allow_live_activity:
+        # The settled-only read keeps reading the log exactly as before.
+        state = "available"
+        page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=layout)
     else:
-        page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=resolve_layout(root=root))
+        state, reason, handle = ("not_started", None, None) if task.get("status") == "reserved" else _open_log(path)
+        if state == "available":
+            # Read through the descriptor that was qualified, never by reopening the path.
+            page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=layout, handle=handle, failed=failed)
+            if failed:
+                state, reason, page = "unavailable", "log_unreadable", PageResult(events=[], has_more=False)
+        else:
+            page = PageResult(events=[], has_more=False)
     result = {**base, "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
     if allow_live_activity:
         result.update(attempt_status=task.get("status"), settled=settled, activity_state=state)
@@ -569,23 +578,25 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any], *, 
     return result
 
 
-def _log_state(path: Any) -> tuple[str, str | None]:
-    """`available`, `not_started` (no log yet) or `unavailable` with a reason, without following links."""
+def _open_log(path: Any) -> tuple[str, str | None, Any]:
+    """`(state, reason, stream)`: `available` with an open binary stream on a regular file opened without
+    following links or blocking, `not_started` when no log exists, else `unavailable` with a reason."""
     import os
     import stat
     try:
-        info = os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return "not_started", None
+        return "not_started", None, None
     except OSError:
-        return "unavailable", "log_unreadable"
-    if not stat.S_ISREG(info.st_mode):
-        return "unavailable", "log_not_regular_file"
+        return "unavailable", "log_unreadable", None
     try:
-        os.close(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return "unavailable", "log_not_regular_file", None
+        return "available", None, os.fdopen(fd, "rb")
     except OSError:
-        return "unavailable", "log_unreadable"
-    return "available", None
+        os.close(fd)
+        return "unavailable", "log_unreadable", None
 
 
 def guard_saved_workflow_authority(caller: Any, value: Any) -> None:

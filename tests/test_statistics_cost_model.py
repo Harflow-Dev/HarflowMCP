@@ -94,6 +94,12 @@ def test_backends_without_cost_leave_it_null(owned):
     assert record.total_cost_usd is None and record.observed_model is None
 
 
+def test_an_absurdly_large_cost_is_unknown_not_an_error():
+    from harflow_mcp import accounting
+    assert accounting.cost_value(10**400) is None and accounting.cost_value(-(10**400)) is None
+    assert accounting.cost_value(10**6) == 1e6
+
+
 @pytest.mark.parametrize("bad", [math.nan, math.inf, -0.5, "0.4", True, None])
 def test_invalid_cost_becomes_null_without_raising(owned, bad):
     acc = Accumulator()
@@ -213,6 +219,13 @@ def test_headless_attempt_uses_observed_harness_metadata_when_the_record_has_non
     # The task's own observation wins over the attempt's.
     own = task_payload("att", observed_model={"model": "own", "provenance": "harness_initialization_event"})
     assert executions(workflow_sources(attempt("att", observed_model=vibe), task=own))["att"]["observed_model"] == "own"
+
+
+def test_native_rows_take_the_observed_model_only_from_the_attempt():
+    child = attempt("child", execution_kind="native_subagent", transport_task_id="t", observed_model={"model": "child-model", "provenance": "observed_native_child"})
+    record = task_payload("child", observed_model={"model": "record-model", "provenance": "harness_initialization_event"}, total_cost_usd=3.0)
+    row = executions(workflow_sources(child, task=record))["child"]
+    assert (row["observed_model"], row["observed_model_provenance"], row["cost_usd"]) == ("child-model", "observed_native_child", None)
 
 
 def test_native_child_has_no_cost_and_reports_its_observed_model_once():

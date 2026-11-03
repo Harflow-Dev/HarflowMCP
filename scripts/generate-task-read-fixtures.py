@@ -419,17 +419,14 @@ def build_statistics_cost(world: World) -> None:
                observed_model={"model": None, "provenance": "harness_initialization_event_mixed"})
     # Source witnesses carry inode and ctime, which differ per machine; keep what a fixture can reproduce.
     from harflow_mcp import statistics_index
-    patch = mock.patch.object(statistics_index, "witness", lambda info: [0, 0, info.st_mtime_ns, 0, info.st_size])
-    patch.start()
     argv = ("statistics-page", "--since", world.iso(-86400.0), "--before", world.iso(86400.0), "--limit", "10")
-    for _ in range(10):  # the first reads only prepare the bounded derivative index
-        got = world.call(None, *argv, capability=cap)
-        if got.get("state") == "ready":
-            break
-    else:
-        raise SystemExit("the statistics index did not become ready")
-    world.call("reported-and-silent", *argv, capability=cap)
-    patch.stop()
+    with mock.patch.object(statistics_index, "witness", lambda info: [0, 0, info.st_mtime_ns, 0, info.st_size]):
+        for _ in range(10):  # the first reads only prepare the bounded derivative index
+            if world.call(None, *argv, capability=cap).get("state") == "ready":
+                break
+        else:
+            raise SystemExit("the statistics index did not become ready")
+        world.call("reported-and-silent", *argv, capability=cap)
 
 
 def finalize(world: World) -> tuple[dict[str, dict], dict[str, str]]:

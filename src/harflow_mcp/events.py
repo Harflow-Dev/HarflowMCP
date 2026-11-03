@@ -267,24 +267,33 @@ def _parse_event_line(line_bytes: bytes) -> dict[str, Any] | None:
 
 
 @path_operation
-def _iter_events_forward(path: Path, skipped: list[int], *, layout=None) -> Iterator[dict[str, Any]]:
+def _iter_events_forward(path: Path, skipped: list[int], *, layout=None, handle: Any = None, failed: list[bool] | None = None) -> Iterator[dict[str, Any]]:
     """Parsed events oldest first, up to the size the file had when opened.
 
     Stopping at that size keeps a busy writer from stretching the scan, and only newline-terminated
     lines count, so an event still being appended is left for the next read. A line longer than
     `MAX_LINE_BYTES` is discarded as it streams past — never buffered whole — and counted in
-    `skipped[0]`. Stops quietly on an I/O error.
+    `skipped[0]`. Stops quietly on an I/O error, which `failed` (when given) records.
+
+    A caller that already holds a qualified descriptor passes it as `handle` (an open binary stream,
+    which is closed here); the path is then not opened again.
     """
     layout = layout if layout is not None else current_owned().layout
     require_state_path(layout, path)
     try:
-        with path.open("rb") as handle:
-            yield from _iter_open_log(handle, skipped, layout=layout)
+        if handle is not None:
+            with handle:
+                yield from _iter_open_log(handle, skipped, layout=layout, failed=failed)
+            return
+        with path.open("rb") as opened:
+            yield from _iter_open_log(opened, skipped, layout=layout, failed=failed)
     except OSError:
+        if failed is not None:
+            failed.append(True)
         return
 
 
-def _iter_open_log(handle: Any, skipped: list[int], *, layout) -> Iterator[dict[str, Any]]:
+def _iter_open_log(handle: Any, skipped: list[int], *, layout, failed: list[bool] | None = None) -> Iterator[dict[str, Any]]:
     """`_iter_events_forward`'s loop over an open log — split out so one `try` covers the whole
     life of the file, closing included."""
     assert_owned(layout)
@@ -292,6 +301,8 @@ def _iter_open_log(handle: Any, skipped: list[int], *, layout) -> Iterator[dict[
         remaining = handle.seek(0, 2)
         handle.seek(0)
     except OSError:
+        if failed is not None:
+            failed.append(True)
         return
     fragment = b""
     discarding = False
@@ -300,6 +311,8 @@ def _iter_open_log(handle: Any, skipped: list[int], *, layout) -> Iterator[dict[
         try:
             chunk = handle.read(min(CHUNK_SIZE, remaining))
         except OSError:
+            if failed is not None:
+                failed.append(True)
             return
         if not chunk:
             return
@@ -483,7 +496,7 @@ def read_page(
     before_seq: int | None = None,
     after_seq: int | None = None,
     kinds: list[str] | None = None,
-    *, layout=None,
+    *, layout=None, handle: Any = None, failed: list[bool] | None = None,
 ) -> PageResult:
     """Read a page of events from the events log.
 
@@ -557,7 +570,7 @@ def read_page(
     matching = 0
     if after_seq is not None:
         events_to_return: list[dict[str, Any]] = []
-        for event in _iter_events_forward(path, skipped, layout=layout):
+        for event in _iter_events_forward(path, skipped, layout=layout, handle=handle, failed=failed):
             if matches(event):
                 matching += 1
                 if len(events_to_return) == limit:
@@ -565,7 +578,7 @@ def read_page(
                 events_to_return.append(event)
     else:
         window: deque[dict[str, Any]] = deque(maxlen=limit)
-        for event in _iter_events_forward(path, skipped, layout=layout):
+        for event in _iter_events_forward(path, skipped, layout=layout, handle=handle, failed=failed):
             if matches(event):
                 matching += 1
                 window.append(event)

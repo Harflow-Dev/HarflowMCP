@@ -833,7 +833,7 @@ For a direct caller every activity reply adds:
 - `settled`: whether the whole node execution is settled; a poller stops when it is `true` and the
   last page has no more events.
 - `activity_state`: `not_started` (the execution has no attempt yet, or the attempt is `reserved`, or
-  its log file does not exist yet: `events` is empty and `has_more` false), `unavailable` (a log
+  its log file does not exist: `events` is empty and `has_more` false), `unavailable` (a log
   exists but is not a regular file or cannot be opened without following links; `reason` is
   `log_not_regular_file` or `log_unreadable`) or `available`.
 

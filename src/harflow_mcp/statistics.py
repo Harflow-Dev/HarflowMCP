@@ -301,7 +301,7 @@ def project(sources, since_epoch, before_epoch, *, deadline=None):
             item.update(execution_kind="native", duration_additive=False, usage_additive=False, owner_task_id=attempt.get("transport_task_id") or attempt.get("owner_task_id"))
             if item["owner_task_id"]:
                 item["accounting"] = accounting.unavailable(item["owner_task_id"], "native_owner_contribution")
-        item.update(_cost_and_model(None if native else task.get("total_cost_usd"), task.get("observed_model") or attempt.get("observed_model"), native=native))
+        item.update(_cost_and_model(None if native else task.get("total_cost_usd"), attempt.get("observed_model") if native else (task.get("observed_model") or attempt.get("observed_model")), native=native))
         items.append(item)
 
     # Native logical children have no TaskRecord; their recorded lifecycle is

@@ -1099,7 +1099,7 @@ A verified direct caller using `harflow-ctl workflow-inspect --view activity` (c
 and every other caller stay settled-only, and the MCP tool is unchanged. The reply then adds
 `attempt_status`, `settled` (the whole execution, including fallbacks, is settled) and
 `activity_state`: `not_started` (no attempt yet, the attempt is `reserved`, or its log does not
-exist yet; `events` is empty), `unavailable` (the log exists but cannot be read safely; `reason`
+exist; `events` is empty), `unavailable` (the log exists but cannot be read safely; `reason`
 says why) or `available`. A live poller advances with `after_seq`. See
 [live node activity](contracts.md#live-workflow-node-activity-workflow-live-activityv1).
 
