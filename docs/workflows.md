@@ -1094,6 +1094,15 @@ is null. Result pages default to 16,000 characters and cap at 32,000. Cursors ar
 execution, selected attempt, and immutable content. The activity view uses normalized task events
 with `before_seq`/`after_seq` pagination (50 events by default, maximum 200).
 
+A verified direct caller using `harflow-ctl workflow-inspect --view activity` (capability
+`workflow-live-activity.v1`) may also read a node execution that has not settled; the result view
+and every other caller stay settled-only, and the MCP tool is unchanged. The reply then adds
+`attempt_status`, `settled` (the whole execution, including fallbacks, is settled) and
+`activity_state`: `not_started` (no attempt yet, the attempt is `reserved`, or its log does not
+exist yet; `events` is empty), `unavailable` (the log exists but cannot be read safely; `reason`
+says why) or `available`. A live poller advances with `after_seq`. See
+[live node activity](contracts.md#live-workflow-node-activity-workflow-live-activityv1).
+
 Managed orchestrators can read only their own run and settled node executions. Workers can read
 only tasks from their own execution; workflow context reads are refused. Ordinary callers keep
 existing read access. These are API boundaries, not filesystem isolation.

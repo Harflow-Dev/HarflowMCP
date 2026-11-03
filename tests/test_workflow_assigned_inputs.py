@@ -129,7 +129,7 @@ def test_cli_inspect_parity(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
-    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq, root=None):
+    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq, root=None, allow_live_activity=False):
         seen.append((resolved, run_id, execution_id, task_id, view, cursor, limit, before_seq, after_seq))
         return {"chunk": "ok"}
     monkeypatch.setattr(workflow_node_reads, "inspect_node", inspect)

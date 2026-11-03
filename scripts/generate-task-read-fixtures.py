@@ -32,11 +32,13 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "contracts" / "v1"
 EVENTS_CAPABILITY, PROMPT_CAPABILITY = "task-event-page.v1", "task-prompt.v1"
 SUCCESSORS_CAPABILITY = "task-successors.v1"
+LIVE_ACTIVITY_CAPABILITY = "workflow-live-activity.v1"
 # The fixture-name prefix each capability's documents are written under.
 PREFIXES = {
     EVENTS_CAPABILITY: "ctl-task-events-",
     PROMPT_CAPABILITY: "ctl-task-prompt-",
     SUCCESSORS_CAPABILITY: "ctl-task-page-successors-",
+    LIVE_ACTIVITY_CAPABILITY: "ctl-workflow-inspect-live-",
 }
 EPOCH = 1_792_000_000.0
 OWNER = {"pid": 5678, "start_time": "bridge-start", "markers": []}
@@ -118,7 +120,8 @@ class World:
 
     # --- invocation -------------------------------------------------------------------------------------
 
-    def call(self, name: str | None, *argv: str, capability: str = EVENTS_CAPABILITY, undecidable: bool = False) -> dict:
+    def call(self, name: str | None, *argv: str, capability: str = EVENTS_CAPABILITY, undecidable: bool = False,
+             agent_caller: bool = False) -> dict:
         """Run one ctl command, keep its document as fixture `name` (None: do not keep), and return its `result` or `error`."""
         self.now = EPOCH
         out, err = io.StringIO(), io.StringIO()
@@ -128,6 +131,8 @@ class World:
                 stack.enter_context(mock.patch.object(self.lineage, "detect_caller_detail",
                                                       lambda *a, **k: self.lineage.Detection(None, "the process table is unavailable")))
                 stack.enter_context(mock.patch.object(self.takeover, "caller_refusal", lambda log_dir, environ=None: self.real_refusal(log_dir, {})))
+            if agent_caller:
+                stack.enter_context(mock.patch.object(self.takeover, "caller_refusal", lambda *_: ("agent_caller", "called from a task")))
             stack.enter_context(contextlib.redirect_stdout(out))
             stack.enter_context(contextlib.redirect_stderr(err))
             code = self.ctl.main([*argv, "--json"])
@@ -228,6 +233,7 @@ def build(world: World) -> None:
     world.call("integrity-failed", "task-prompt", "task-prompt-damaged", capability=PROMPT_CAPABILITY)
 
     build_successors(world)
+    build_live_activity(world)
 
 
 def build_successors(world: World) -> None:
@@ -255,6 +261,37 @@ def build_successors(world: World) -> None:
             mock.patch.object(task_supervision, "read_launch", lambda *a: {"state": "waiting_for_resources"}), \
             mock.patch.object(task_resources, "is_pending_kind", lambda receipt: True):
         world.call("pending-launch-predecessor", "task-list-page", "--predecessor-task-id", "task-succ-pending", capability=cap)
+
+
+def build_live_activity(world: World) -> None:
+    from harflow_mcp import workflows
+    cap = LIVE_ACTIVITY_CAPABILITY
+    run_id = "fixture-live-run"
+    storage = workflows.WorkflowStore(root=world.base / ".harflow")
+    definition = storage.save("live-graph", {"nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}],
+                                             "connections": [{"id": "finish", "source": "start", "target": "end"}]})
+    storage.create_run(definition, "synthetic assignment", world.base, run_id=run_id)
+
+    def attempt(task_id, status):
+        return {"task_id": task_id, "status": status}
+
+    def reserve(value):
+        value.update(status="running", execution_contract="delegation", activations=[
+            {"id": "live-node", "node_id": "implement", "role": "node", "status": "running", "created_at": 0.0,
+             "tasks": [attempt("live-attempt-1", "running")]},
+            {"id": "reserved-node", "node_id": "review", "role": "node", "status": "running", "created_at": 0.0,
+             "tasks": [attempt("live-attempt-2", "reserved")]},
+            {"id": "waiting-node", "node_id": "report", "role": "node", "status": "running", "created_at": 0.0, "tasks": []},
+        ])
+    storage.update_run(run_id, reserve, "fixture_seed")
+    world.log("live-attempt-1", lambda log: (log.write("task_started", {"backend": "claude", "model": None}),
+                                             log.write("assistant_text", {"text": "Working on it."}, raw_offset=None),
+                                             log.write("usage", {"input_tokens": 12, "output_tokens": 3})), finish=False)
+    world.call("running-attempt", "workflow-inspect", run_id, "live-node", "--view", "activity", capability=cap)
+    world.call("running-attempt-after", "workflow-inspect", run_id, "live-node", "--view", "activity", "--after-seq", "1", capability=cap)
+    world.call("reserved-attempt", "workflow-inspect", run_id, "reserved-node", "--view", "activity", capability=cap)
+    world.call("no-attempt", "workflow-inspect", run_id, "waiting-node", "--view", "activity", capability=cap)
+    world.call("agent-caller-settled-only", "workflow-inspect", run_id, "live-node", "--view", "activity", capability=cap, agent_caller=True)
 
 
 def finalize(world: World) -> tuple[dict[str, dict], dict[str, str]]:

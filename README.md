@@ -149,6 +149,8 @@ stored prompt with an integrity state (capability `task-prompt.v1`). Clients req
 on the version-info handshake before using either command. See [task event pages and prompts](docs/contracts.md#task-event-pages-and-prompts).
 `harflow-ctl task-list-page --predecessor-task-id TASK_ID --json` lists a task's recorded resumes and
 continuations (capability `task-successors.v1`; see [successor discovery](docs/contracts.md#successor-discovery-task-successorsv1)).
+A verified direct caller can also read the activity of a running workflow node with `harflow-ctl workflow-inspect --view activity`
+(capability `workflow-live-activity.v1`; see [live node activity](docs/contracts.md#live-workflow-node-activity-workflow-live-activityv1)).
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at

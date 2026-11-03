@@ -55,8 +55,13 @@ def inspect_node(
     before_seq: int | None = None,
     after_seq: int | None = None,
     root: Any = None,
+    allow_live_activity: bool = False,
 ) -> dict[str, Any]:
-    """One settled node execution's result or activity page, for either transport."""
+    """One settled node execution's result or activity page, for either transport.
+
+    `allow_live_activity` is set only by the ctl handler for a verified direct caller; see
+    `workflow_inspection.inspect_request`.
+    """
     # The same pre-flight the MCP tool applies, so a bad request is refused before any role check.
     if view == "result" and (before_seq is not None or after_seq is not None):
         raise ValueError("Result view uses cursor, not event sequence cursors")
@@ -79,7 +84,7 @@ def inspect_node(
         "before_seq": before_seq,
         "after_seq": after_seq,
     }
-    return id_resolution.echo(inspect_request(run, store_.root, request), primary=resolution, task_id=selected)
+    return id_resolution.echo(inspect_request(run, store_.root, request, allow_live_activity=allow_live_activity), primary=resolution, task_id=selected)
 
 
 def assigned_input_node(

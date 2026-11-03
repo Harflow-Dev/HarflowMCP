@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -639,8 +639,12 @@ Both are limited to a verified direct caller. The caller check runs before the i
 a refused caller (`agent_caller`, `caller_undecidable`) learns nothing about which ids exist. After
 that the task id is resolved and guarded exactly as `status` does: prefix ids are accepted and the
 reply echoes `resolved_from`; a pending launch answers `task_pending_launch`, and an unknown or
-retention-removed task the existing unknown-task code. Only standalone task records are served;
-the logs of workflow native executions stay on `workflow-inspect`. Error precedence is usage, then
+retention-removed task the existing unknown-task code. Any task that has a record is served to a
+direct caller, including a headless workflow attempt (read-only; the workflow read guard applies
+only to managed callers, who are refused here). Native workflow executions have no task record and
+are read only through `workflow-inspect`. For a live headless attempt `task-events ATTEMPT_TASK_ID`
+is the richer stream (cursor, log state, change token); `workflow-inspect` is the node-addressed
+entry point. Error precedence is usage, then
 authority, then task, then cursor.
 
 ### `task-events` (`task-event-page.v1`)
@@ -769,8 +773,38 @@ Rules a client applies when it loses or resumes a connection, all already implem
   window; a removed task answers the unknown-task code.
 - A `task-events` `event_cursor_expired` or `event_cursor_invalid` means: reload the newest page and
   discard what was derived from older cursors of that task.
-- Not yet on ctl, for later design and contracts: loss, reconnect and unavailable presentations,
-  and activity of running workflow nodes.
+- Not yet on ctl, for later design and contracts: loss, reconnect and unavailable presentations.
+
+### Live workflow node activity (`workflow-live-activity.v1`)
+
+```bash
+harflow-ctl workflow-inspect RUN_ID EXECUTION_ID [--task-id T] --view activity [--limit N]
+    [--before-seq S | --after-seq S] --json
+```
+
+Today `workflow-inspect` refuses a node execution until it is fully settled (every attempt, including
+fallbacks). With this capability a **verified direct caller** (`takeover.caller_refusal` is `None`,
+decided in the ctl handler) may read the activity view of a node execution that has not settled.
+The permission is a transport decision, never a request field, so an orchestrator's crafted
+inspection requests cannot obtain it; managed orchestrators, ordinary agents and undecidable callers
+keep the settled-only read and its message, and the MCP `inspect_workflow_node` output is unchanged.
+`--view result` stays settled-only for everyone. Attempt selection is unchanged (`--task-id`, else the
+last attempt); a live attempt does not need a normalized `node_result`.
+
+For a direct caller every activity reply adds:
+
+- `attempt_status`: the selected attempt's status, `null` before any attempt exists.
+- `settled`: whether the whole node execution is settled; a poller stops when it is `true` and the
+  last page has no more events.
+- `activity_state`: `not_started` (the execution has no attempt yet, or the attempt is `reserved`, or
+  its log file does not exist yet: `events` is empty and `has_more` false), `unavailable` (a log
+  exists but is not a regular file or cannot be opened without following links; `reason` is
+  `log_not_regular_file` or `log_unreadable`) or `available`.
+
+Paging is unchanged: `before_seq`/`after_seq`, 1..200 events, and a live poller advances with
+`after_seq` from the previous `next_after_seq`. The page has no log lifecycle or change token; for
+a headless attempt use `task-events` on the attempt's task id. Examples:
+`contracts/v1/ctl-workflow-inspect-live-*.json`.
 
 ### Successor discovery (`task-successors.v1`)
 

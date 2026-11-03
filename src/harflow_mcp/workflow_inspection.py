@@ -471,9 +471,14 @@ def instruction_page(run: dict[str, Any], request: dict[str, Any]) -> dict[str, 
 
 
 @root_operation
-def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> dict[str, Any]:
-    """Runner-side inspection, with no MCP server, registry, or agent tool dependency."""
-    from .events import events_path, read_page
+def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any], *, allow_live_activity: bool = False) -> dict[str, Any]:
+    """Runner-side inspection, with no MCP server, registry, or agent tool dependency.
+
+    `allow_live_activity` is decided by the transport from verified caller authority (never from the
+    request): it lets the activity view read a node execution that has not settled and adds
+    `attempt_status`, `settled` and `activity_state` to that view.
+    """
+    from .events import PageResult, events_path, read_page
     if not isinstance(request, dict):
         raise ValueError("Inspection request must be an object")
     if request.get("view") == "instructions":
@@ -538,12 +543,49 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
     if activation is None:
         raise ValueError("Unknown node execution in this workflow run")
     task = selected_task(activation, task_id)
-    if task is None or task.get("execution_kind") != "native_subagent":
+    settled = activation.get("status") in SETTLED and not any(t.get("status") in LIVE for t in activation.get("tasks", []))
+    if allow_live_activity and not settled:
+        pass  # A running node's activity is readable by a verified direct caller.
+    elif task is None or task.get("execution_kind") != "native_subagent":
         activation = execution(target_run, execution_id)
+    base = {"workflow_run_id": target_run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"]}
     if task is None:
+        if allow_live_activity and not settled:
+            return {**base, "task_id": None, "events": [], "has_more": False, "next_before_seq": None, "next_after_seq": None, "skipped_oversized": 0,
+                    "attempt_status": None, "settled": False, "activity_state": "not_started"}
         raise ValueError("Node execution has no dispatched task activity")
-    page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after, layout=resolve_layout(root=root))
-    return {"workflow_run_id": target_run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
+    path = events_path(root / "tasks", task["task_id"])
+    # The settled-only read keeps reading the log exactly as before; only the live-capable read classifies it.
+    state, reason = (("not_started", None) if task.get("status") == "reserved" else _log_state(path)) if allow_live_activity else ("available", None)
+    if state != "available":
+        page = PageResult(events=[], has_more=False)
+    else:
+        page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=resolve_layout(root=root))
+    result = {**base, "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
+    if allow_live_activity:
+        result.update(attempt_status=task.get("status"), settled=settled, activity_state=state)
+        if reason is not None:
+            result["reason"] = reason
+    return result
+
+
+def _log_state(path: Any) -> tuple[str, str | None]:
+    """`available`, `not_started` (no log yet) or `unavailable` with a reason, without following links."""
+    import os
+    import stat
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "not_started", None
+    except OSError:
+        return "unavailable", "log_unreadable"
+    if not stat.S_ISREG(info.st_mode):
+        return "unavailable", "log_not_regular_file"
+    try:
+        os.close(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK))
+    except OSError:
+        return "unavailable", "log_unreadable"
+    return "available", None
 
 
 def guard_saved_workflow_authority(caller: Any, value: Any) -> None:
