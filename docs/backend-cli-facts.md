@@ -267,6 +267,12 @@ rather than reasoning about it, and record the new measurements here. Do not "ti
 - Reproduce with `HARFLOW_CLI_INTEGRATION=1 uv run pytest tests/test_vibe_cli.py`. Portable captures are in `tests/fixtures/vibe-denials/`. Classification matches structured schema and exact refusal text; the stream does not disclose a runtime version, so `classification_basis.measured_versions` names the measurement rather than claiming an observed executable version. Unknown reasons remain unclassified.
 - This section qualifies denial reporting. The separate ACP qualification below covers optional approvals, command grants and model selection (#35/#39).
 
+**Vibe 3.0.2 headless measurements (macOS, 2026-11-03)**
+
+- The reviewed isolated HOME/VIBE_HOME loopback fixture passed all 11 cases: start/resume/large stdin, denial, inherited-policy write allowance, turn cap, HTTP 402 and six structured refusal shapes. Connectors and telemetry were disabled, credentials were placeholders, and received requests targeted the local model endpoint. The inherited-policy case writes only in the temporary repository; `read_only` remains an approval policy, not write confinement.
+- The sandbox attempt failed while binding the fake API; the unchanged host-permission run passed in 35.48 seconds. This is no-paid fixture evidence, not an OS-enforced network-denial or paid-provider authentication claim.
+- Production qualification seeds and version gates were unchanged. Vibe 3.0.2 ACP caller approvals, caller write approvals, command grants and configured-model selection remain unsupported; explicit unit tests verify the relevant refusal gates. Denial parser measurement metadata remains unchanged at 3.0.3.
+
 **Vibe 3.0.3 ACP transport (macOS, 2026-11-02)**
 
 - `vibe-acp` is a separate Python entrypoint; it is not the Rust `vibe -p` stream. The adapter fingerprints its launcher, interpreter and shipped ACP/harness code, then checks protocol 1 and `agentInfo` name/version before creating or loading a session. Unsupported versions/platforms refuse optional ACP features; ordinary headless dispatch remains available.

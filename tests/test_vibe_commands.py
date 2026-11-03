@@ -6,6 +6,8 @@ import pytest
 
 from harflow_mcp.backends.base import Invocation, UnsupportedCapability
 from harflow_mcp.backends import vibe_commands as grants
+from harflow_mcp.backends import vibe_acp
+from harflow_mcp.backends.vibe import VibeBackend
 from harflow_mcp.command_grants import CommandGrantError
 
 
@@ -79,6 +81,31 @@ def test_metadata_is_frozen_and_retains_unrelated_native_settings(tmp_path):
 def test_unknown_versions_refuse(tmp_path, version):
     with pytest.raises(UnsupportedCapability):
         grants.configure(Invocation(["vibe"]), ("make test",), "publish", tmp_path, version)
+
+
+def test_vibe302_command_grant_configuration_refuses(tmp_path):
+    with pytest.raises(UnsupportedCapability, match="qualified Vibe 3.0.3"):
+        grants.configure(Invocation(["vibe"]), ("make test",), "write_in_repo", tmp_path, "3.0.2")
+
+
+@pytest.mark.parametrize("approval", ["caller", "caller_write"])
+def test_vibe302_acp_approval_preparation_refuses_before_prompt(tmp_path, approval):
+    write = approval == "caller_write"
+    invocation = Invocation(["vibe"], caller_approvals=True)
+    with pytest.raises(UnsupportedCapability, match="qualified only on 3.0.3"):
+        vibe_acp.prepare(
+            invocation,
+            {"repo": tmp_path, "prompt": "isolated approval test"},
+            "write_in_repo",
+            version="3.0.2",
+            write=write,
+            caller_approvals=True,
+        )
+
+
+def test_vibe302_caller_write_approval_validation_refuses():
+    with pytest.raises(UnsupportedCapability, match="qualified Vibe 3.0.3"):
+        VibeBackend().validate_caller_write_approvals(True, True, "3.0.2")
 
 
 def test_read_only_and_shell_program_grants_refuse(tmp_path):

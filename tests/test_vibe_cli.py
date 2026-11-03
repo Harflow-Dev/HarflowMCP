@@ -20,11 +20,13 @@ pytestmark = [pytest.mark.cli_integration, pytest.mark.skipif(
 @contextmanager
 def provider(mode, tool_call=None):
     requests = []
+    paths = []
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_POST(self):
+            paths.append(self.path)
             requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
             if mode == "limit":
                 self.send_response(402)
@@ -48,7 +50,7 @@ def provider(mode, tool_call=None):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/v1", requests
+        yield f"http://127.0.0.1:{server.server_port}/v1", requests, paths
     finally:
         server.shutdown()
         server.server_close()
@@ -61,8 +63,8 @@ def test_vibe3_actual_stream(tmp_path, mode):
     if not binary:
         pytest.skip("Vibe not installed")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
-    if version.stdout.strip() not in ("vibe 3.0.1", "vibe 3.0.3"):
-        pytest.skip("qualified against Vibe 3.0.1 and 3.0.3")
+    if version.stdout.strip() not in ("vibe 3.0.1", "vibe 3.0.2", "vibe 3.0.3"):
+        pytest.skip("measurement fixture supports Vibe 3.0.1, 3.0.2, and 3.0.3")
     home = tmp_path / "home"
     config = tmp_path / "vibe"
     repo = tmp_path / "repo"
@@ -72,8 +74,10 @@ def test_vibe3_actual_stream(tmp_path, mode):
     env = {k: v for k, v in os.environ.items() if k in ("PATH", "TMPDIR", "SYSTEMROOT", "LANG")}
     env.update(HOME=str(home), VIBE_HOME=str(config), VIBE_CLI="python", DO_NOT_TRACK="1", HARFLOW_LOCAL_TEST_KEY="local-only-placeholder", MISTRAL_API_KEY="local-only-placeholder")
     backend = VibeBackend()
-    with provider(mode) as (url, requests):
+    with provider(mode) as (url, requests, paths):
         (config / "config.toml").write_text(f'''active_model="local"
+enable_connectors=false
+enable_telemetry=false
 api_retry_max_elapsed_time=0.1
 [[providers]]
 name="local"
@@ -103,6 +107,9 @@ thinking="off"
             return process, acc, entries
         process, acc, entries = run("isolated assignment")
         assert requests
+        assert len(paths) == len(requests)
+        assert all(path == "/v1/chat/completions" and request.get("model") == "local"
+                   for path, request in zip(paths, requests))
         assert acc.session_id
         if mode == "text":
             assert process.returncode == 0, process.stderr
@@ -144,14 +151,14 @@ thinking="off"
     "policy-never", "bash-denylist", "standalone-denylist",
     "command-pattern", "outside-directory", "file-pattern",
 ])
-def test_vibe303_refusal_shapes(tmp_path, case):
+def test_vibe_refusal_shapes(tmp_path, case):
     """Measure real runtime refusals; the provider cannot choose to skip the tool."""
     binary = shutil.which("vibe")
     if not binary:
         pytest.skip("Vibe not installed")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
-    if version.stdout.strip() != "vibe 3.0.3":
-        pytest.skip("denial shapes qualified against Vibe 3.0.3")
+    if version.stdout.strip() not in ("vibe 3.0.2", "vibe 3.0.3"):
+        pytest.skip("measurement fixture supports refusal shapes on Vibe 3.0.2 and 3.0.3")
     home, config, repo = (tmp_path / name for name in ("home", "vibe", "repo"))
     for directory in (home, config, repo):
         directory.mkdir()
@@ -174,8 +181,10 @@ def test_vibe303_refusal_shapes(tmp_path, case):
     env = {k: v for k, v in os.environ.items() if k in ("PATH", "TMPDIR", "SYSTEMROOT", "LANG")}
     env.update(HOME=str(home), VIBE_HOME=str(config), VIBE_CLI="python", DO_NOT_TRACK="1", HARFLOW_LOCAL_TEST_KEY="local-only-placeholder", MISTRAL_API_KEY="local-only-placeholder")
     backend = VibeBackend()
-    with provider("denial-shape", tool_call) as (url, requests):
+    with provider("denial-shape", tool_call) as (url, requests, paths):
         (config / "config.toml").write_text(f'''active_model="local"
+enable_connectors=false
+enable_telemetry=false
 api_retry_max_elapsed_time=0.1
 [[providers]]
 name="local"
@@ -196,6 +205,9 @@ thinking="off"
                                  input=invocation.initial_input or b"", capture_output=True, timeout=30)
     assert process.returncode == 0, process.stderr
     assert len(requests) == 2
+    assert len(paths) == len(requests)
+    assert all(path == "/v1/chat/completions" and request.get("model") == "local"
+               for path, request in zip(paths, requests))
     assert not target.exists()
     entries = [json.loads(line) for line in process.stdout.splitlines()]
     fixture = json.loads((Path(__file__).parent / "fixtures" / "vibe-denials" / f"{case}.json").read_text())
