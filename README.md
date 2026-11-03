@@ -142,6 +142,12 @@ Clients require capability `statistics-page.v1`; older engines remain unsupporte
 disclose retention, missing accounting and bounded preparation rather than assuming complete
 history or zero usage. See [statistics contracts](docs/contracts.md#finished-retained-history-statistics).
 
+Verified direct callers can read one task's history through ctl: `harflow-ctl task-events TASK_ID --json`
+pages its normalized events in both directions with opaque cursors, a lifecycle `log.state` and
+gap reporting (capability `task-event-page.v1`), and `harflow-ctl task-prompt TASK_ID --json` returns its
+stored prompt with an integrity state (capability `task-prompt.v1`). Clients require the capability
+on the version-info handshake before using either command. See [task event pages and prompts](docs/contracts.md#task-event-pages-and-prompts).
+
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at
 `write_in_repo` as well as `publish`. Initial transitions refuse dirty checkouts without stashing

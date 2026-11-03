@@ -150,6 +150,23 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     statistics_p.add_argument("--cursor")
     statistics_p.add_argument("--json", action="store_true")
 
+    from .event_pages import DEFAULT_LIMIT
+    from .task_prompt_read import DEFAULT_MAX_BYTES
+    events_p = sub.add_parser("task-events", help="bounded pages of one task's normalized events; direct callers only")
+    events_p.add_argument("task_id")
+    events_origin = events_p.add_mutually_exclusive_group()
+    events_origin.add_argument("--from", dest="origin", choices=("newest", "oldest"), help="first page to read (default newest)")
+    events_origin.add_argument("--cursor", help="an older_cursor or newer_cursor from a previous page")
+    events_p.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="decoded lines per page, 1..200")
+    events_kinds = events_p.add_mutually_exclusive_group()
+    events_kinds.add_argument("--kinds", help="comma-separated event kinds (default: every kind but assistant_delta)")
+    events_kinds.add_argument("--all-kinds", action="store_true", help="include assistant_delta")
+    events_p.add_argument("--json", action="store_true", help="required")
+    prompt_p = sub.add_parser("task-prompt", help="one task's stored prompt, bounded; direct callers only")
+    prompt_p.add_argument("task_id")
+    prompt_p.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="UTF-8 bytes of text to return, 1..131072")
+    prompt_p.add_argument("--json", action="store_true", help="required")
+
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
         "--since", default=None, help="only tasks started within this long ago, e.g. 7d, 12h"
@@ -664,6 +681,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         artifact_p,
         artifacts_p,
         notification_p,
+        events_p,
+        prompt_p,
         *workflow_parsers,
     )
 
@@ -847,7 +866,19 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observ
     id, so a batch entry and a direct status call can never disagree. `task_id` must already be
     validated (invariant 8: an id is validated before it can become a path).
     """
-    record = store.read(log_dir, task_id)
+    record = _read_task_record(log_dir, task_id, managed)
+    from .workflow_inspection import decorate_tasks
+    snapshot = store.snapshot(log_dir, record, ctl_observation=True, parent_observer=parent_observer)
+    return decorate_tasks([snapshot], log_dir)[0]
+
+
+def _read_task_record(log_dir: Path, task_id: str, managed: Any, *, include_prompt: bool = True) -> store.TaskRecord:
+    """One task's record after the workflow read guard, or the refusal `status` reports for it.
+
+    Raises `_StatusReadRefused` for a guard refusal, a pending launch (`task_pending_launch`) and an
+    unknown or retention-removed task (`unknown_task`).
+    """
+    record = store.read(log_dir, task_id, include_prompt=include_prompt)
     from .workflow_inspection import guard_task_read
     try:
         guard_task_read(task_id, managed)
@@ -866,9 +897,7 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observ
                 f"task {task_id} has not started: its launch is {receipt['state']}; no task record exists until it spawns",
                 {"launch_state": receipt["state"], **({"not_started_reason": receipt["not_started_reason"]} if receipt.get("not_started_reason") else {})})
         raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
-    from .workflow_inspection import decorate_tasks
-    snapshot = store.snapshot(log_dir, record, ctl_observation=True, parent_observer=parent_observer)
-    return decorate_tasks([snapshot], log_dir)[0]
+    return record
 
 
 def _status_observer_options(args):
@@ -1770,6 +1799,9 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+    if args.command in {"task-events", "task-prompt"}:
+        from .ctl_task_reads import validate_arguments
+        validate_arguments(args, parser)
     if args.command == "slot" and args.slot_action == "enable":
         from . import phase_slots
         try:
@@ -1798,6 +1830,11 @@ def _main(argv: list[str] | None = None) -> int:
         refusal = caller_refusal(default_log_dir())
         if refusal:
             return _fail(args, refusal[0], "Statistics require a verified direct caller: " + refusal[1])
+    if args.command in {"task-events", "task-prompt"}:
+        from .takeover import caller_refusal
+        refusal = caller_refusal(default_log_dir())
+        if refusal:
+            return _fail(args, refusal[0], "Task history reads require a verified direct caller: " + refusal[1])
     # Informational backend/config inspection does not access engine state.
     config_only = args.command == "backends" or (
         args.command == "mcp-allowlist" and args.allow is None and args.remove is None)
@@ -1845,6 +1882,9 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, getattr(exc, "code", "invalid_params"), str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
         return 0
+    if args.command in {"task-events", "task-prompt"}:
+        from .ctl_task_reads import cmd_task_events, cmd_task_prompt
+        return (cmd_task_events if args.command == "task-events" else cmd_task_prompt)(args)
     if args.command == "statistics-page":
         from .statistics import statistics_page, StatisticsError
         try:

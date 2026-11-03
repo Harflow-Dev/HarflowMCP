@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities: ["ctl.v1", "setup.v1", "events.v1", "version-info.v1", "state-recovery.v1", "caller-approvals.monitor-respond.v1"]`. `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -629,6 +629,197 @@ Statistics describes retained history only. `retention` reports days (default 30
 unknown; selecting 90 days does not imply 90-day history exists. This query never runs retention,
 reconstructs deleted data, replays raw logs, starts models or scans N task statuses.
 
+
+## Task event pages and prompts
+
+`harflow-ctl task-events` and `task-prompt` are the ctl reads for one task's history. They are
+additive: no existing document changes shape, and no MCP tool changes (`get_task_events` and
+`get_task_event_page` keep their output byte for byte; the Electron and web clients use ctl only).
+Both are limited to a verified direct caller. The caller check runs before the id is resolved, so
+a refused caller (`agent_caller`, `caller_undecidable`) learns nothing about which ids exist. After
+that the task id is resolved and guarded exactly as `status` does: prefix ids are accepted and the
+reply echoes `resolved_from`; a pending launch answers `task_pending_launch`, and an unknown or
+retention-removed task the existing unknown-task code. Only standalone task records are served;
+the logs of workflow native executions stay on `workflow-inspect`. Error precedence is usage, then
+authority, then task, then cursor.
+
+### `task-events` (`task-event-page.v1`)
+
+```bash
+harflow-ctl task-events TASK_ID [--from newest|oldest | --cursor C] [--limit N]
+    [--kinds k1,k2 | --all-kinds] --json
+```
+
+`--json` is required, `--cursor` excludes `--from`, and `--kinds` excludes `--all-kinds`; any
+violation is a usage error (exit 2). `--limit` is 1..200 (default 100) and bounds the decoded
+lines of one page; `--kinds` names known event kinds. The default filter is every kind except
+`assistant_delta`; `--all-kinds` adds it. The older `event_history` reader and the MCP tools are
+newest-first only; this page is always ascending.
+
+`result`:
+
+| Field | Meaning |
+| --- | --- |
+| `task_id`, `order: "ascending"` | the resolved task; events are oldest first |
+| `events` | normalized events with the event envelope, truncated and stubbed as the MCP pages are (at most 16384 bytes each) |
+| `kinds` | `"default"`, `"all"` or the sorted explicit list |
+| `older_cursor`, `newer_cursor` | opaque cursors; `older_cursor` is `null` at the start of the log, `newer_cursor` is present for every readable log and `null` only for an `unavailable` one |
+| `has_older`, `has_newer` | more history before this page, and complete lines after it when read; a partial trailing line never sets `has_newer`. After an older cursor it reflects complete lines found within one scan window (1 MiB) past the cursor, so a single line longer than that window reports false until polled |
+| `span` | `{first_seq, last_seq}` of every line the page accounted for, returned or filtered; `null` if none |
+| `skipped` | `{malformed, oversized}`: lines skipped; `oversized` counts scan windows (or whole lines) skipped without decoding, so one very long line can count more than once; it is best effort |
+| `gaps` | `[{after_seq, before_seq, reason}]`, at most `limit`: seq values no parsed line of the span accounts for; `reason` is `unreadable_records` when skipped lines lie between them, else `unknown` |
+| `log` | `{state, task_status, output_drained, capture_state, final_seq}`, below |
+| `change_token`, `observed_at` | opaque digest and a UTC ISO8601 timestamp |
+
+A cursor's direction is part of it: pass `older_cursor` to read the page before, `newer_cursor` to
+read the page after. Cursors bound the byte span a page consumed, including filtered, malformed
+and skipped lines, so a page can be empty while `has_older` or `has_newer` is true, and pages never
+overlap. Reversing direction from any page is supported. Polling for appends is re-issuing
+`newer_cursor`: a poll with nothing new returns an empty page with an equal cursor, and a partial
+trailing line is held back until its newline arrives. `--from oldest` reads forward from the start;
+the default is the newest page. A cursor carries the last accounted seq on its side, and whether skipped lines lie between that seq and its boundary, so the
+adjacent page attributes a gap at a page boundary (`unreadable_records` when they do); where it cannot, a client treats a discontinuous
+`span` across pages as an unexplained gap. Trimming is direction-aware: a page that would pass the
+document bound drops events from its far side (the oldest for the newest and older pages, the newest
+for newer and oldest-forward pages) and moves its cursor with them, so dropped events stay
+reachable.
+
+Cursors are at most 2048 characters. A cursor checks file identity, length and two 64-byte
+anchors (the first bytes of the log and the bytes ending at its boundary) before and after the
+read; it does not certify content immutability between the anchors, and appends never expire it,
+including a cursor issued for an empty or short log. Any engine may expire cursors at any time, and
+a Rust engine's cursors are a new generation. Refusals carry exit 1 and `error.data.reload:
+"newest"`: `event_cursor_invalid` for a malformed cursor, another task's, a changed filter or an
+unknown cursor version; `event_cursor_expired` for a well-formed cursor that no longer applies (a
+different generation, a replaced, truncated or rewritten log, or one that disappeared). The reader
+opens the log without following symlinks and only if it is a regular file; a symlink, FIFO or
+directory is an `unavailable` log, not an error. A line longer than the 1 MiB scan window
+is skipped without decoding: a backward read moves its boundary past it and a forward read
+resynchronizes at the next newline, each advancing a window per call.
+
+`log.state` tells a client whether more events can arrive:
+
+| State | Meaning |
+| --- | --- |
+| `open` | the owner is alive; more events may append |
+| `final` | the task finished and drained, and the last complete line is a `task_finished` event ending exactly at EOF (checked whatever `--kinds` says); `final_seq` is its seq. No further appends are possible. It does not prove complete history: an event the writer dropped as unserializable leaves no trace |
+| `settling` | finished and drained, `task_finished` not yet in the log, less than 30 seconds since `finished_at` |
+| `incomplete` | history may be missing: the owner is lost, output was not drained, or `task_finished` is missing after the grace period (or its line is longer than the scan window) |
+| `unknown` | liveness cannot be decided |
+| `unavailable` | no regular log file exists for the task yet or any more; on a live task it can later become `open` |
+
+The task record is read again after the log, and the state is judged from that. The 30-second grace
+is a presentation heuristic, not closure evidence: an `incomplete` log may later become `final`, so
+keep polling until `final`. `capture_state` is the supervision `output_capture` evidence and
+`task_status` the status recorded in the task record (it is not re-resolved, which would replay the raw stream on every poll; the lifecycle is `capture_state`'s job).
+
+`change_token` digests the record file's identity, size and mtime, the log's identity and size, the
+computed `log` object and the cursor generation. Equal tokens mean equal sampled sources and
+lifecycle evidence for the same task; they do not establish equal page contents or anything that
+happened between samples. Keep refreshing lifecycle reads at a slow cadence.
+
+The whole ctl document is at most 262144 bytes, a bound of this command only. Canonical examples are
+`contracts/v1/ctl-task-events-*.json`: newest, older, newer, oldest-forward, empty final newer poll,
+settling, incomplete, unavailable, open, gaps and skipped lines, default filtering with hidden delta
+seqs, all kinds, the cursor, unknown-task, pending-launch and direct-caller refusals. They are
+regenerated with `uv run python scripts/generate-task-read-fixtures.py` (`--check` compares two fresh
+isolated runs with the bundle). The generator owns only `ctl-task-events-*.json` and
+`ctl-task-prompt-*.json`, verifies the recorded hashes of every other file, and controls the clock,
+process liveness and the device and inode cursors bind to.
+
+### `task-prompt` (`task-prompt.v1`)
+
+```bash
+harflow-ctl task-prompt TASK_ID [--max-bytes N] --json
+```
+
+`--max-bytes` is 1..131072 (default 65536). `result` is `{task_id, title, prompt: {state, text,
+returned_bytes, total_bytes, truncated, complete, integrity}}`. The text is verbatim; whitespace is
+never collapsed. A prompt of at most 2000 characters is stored in the record; a longer one is also
+stored in a private sidecar `{task_id}.prompt.{sha256}.txt`, which is opened without following
+symlinks and only if it is a regular file within the selected state root.
+
+| `state` | Meaning |
+| --- | --- |
+| `available` | the full stored prompt |
+| `preview_only` | the sidecar is missing or unreadable; `text` is the 2000-character preview, `complete` is false and it is not authoritative |
+| `integrity_failed` | the sidecar does not match the digest in its name; `text` is `null` |
+| `unavailable` | the record's sidecar name is not the task-bound pattern; `text` is `null` |
+
+`total_bytes` is the UTF-8 size of the stored prompt, or `null` when unknown; `returned_bytes` is the
+size of `text`. `truncated` means `text` was cut at a character boundary by `--max-bytes`, and
+`complete` that `text` is the whole prompt. `integrity` is `verified` (sidecar read whole, up to
+4 MiB, and its digest checked), `failed` (the digest did not match: state `integrity_failed`),
+`unverified` (a larger sidecar: only a bounded prefix is read) or `not_applicable` (inline prompts,
+previews and `unavailable`). A cut drops only an incomplete trailing character; invalid bytes
+elsewhere, possible only in an unverified prefix, are replaced by U+FFFD. The document size is set by
+`--max-bytes`, not trimmed: JSON escaping can enlarge text of 131072 bytes beyond 262144 bytes, so
+clients should not assume the event-page bound here. The read ceiling is enforced during the read. A
+continuation's prompt belongs to the successor task's own `task-prompt`; successor discovery has no
+ctl read yet. Examples: `contracts/v1/ctl-task-prompt-*.json`.
+
+### Reconnect and history rules
+
+Rules a client applies when it loses or resumes a connection, all already implemented:
+
+- `task-list-page`, `task-list-compact` and `workflow-list-page` keyset cursors do not shift when
+  new tasks or runs arrive; to refresh, read again without a cursor.
+- While a page reports `bootstrap_pending`, keep the headers already shown and retry.
+- Retention removes whole tasks, never lines of a log. `statistics-page.retention` reports the
+  window; a removed task answers the unknown-task code.
+- A `task-events` `event_cursor_expired` or `event_cursor_invalid` means: reload the newest page and
+  discard what was derived from older cursors of that task.
+- Not yet on ctl, for later design and contracts: loss, reconnect and unavailable presentations,
+  successor discovery (`predecessor_task_id` is MCP-only), and activity of running workflow nodes.
+
+### Proposed, not implemented: `task-changes`
+
+Decided direction (owner, 2026-11-03): stored, bounded diffs, implemented in a separate session after
+capture settles. Nothing below exists yet: there is no command, capability, fixture or stored data.
+The contract is written down so the implementation session starts from it.
+
+```bash
+harflow-ctl task-changes TASK_ID [--repository-root R] [--path-b64 P] [--cursor C] [--limit N] --json
+```
+
+Capability `task-changes.v1`; direct callers only, same authority as the reads above.
+
+- **Capture** happens once, after settlement (after `task_finished` and `Task.done`), as a bounded
+  background step of 2 seconds per task and at most 8 repositories, with streaming and termination
+  bounds. It never delays settlement and never alters the existing `outcome` fields. Until the file
+  lands a repository is `pending`; a timeout makes it `incomplete`. A change to the checkout between
+  settlement and capture is a disclosed race: the terminal head commit is pinned, but the working-tree
+  scope reflects capture time and carries its own `observed_at`.
+- **Isolation**: a new hardened diff path, not `GitProbe.read()`. It reuses the disposable git
+  directory of `GitProbe.status()` (objects and refs linked, `HEAD` checked as a regular file,
+  minimal config, original index), extracted as a shared helper, because environment variables
+  cannot suppress repository config or attribute filters. It adds `--no-ext-diff --no-textconv
+  --no-color`, `-c core.quotepath=false -c diff.noprefix=false -c diff.renames=false`, disabled
+  filters, fsmonitor and hooks, literal pathspecs and no remote.
+- **Scopes per repository**: `committed_range` is a two-dot tree diff between the pinned observed
+  commits `base_commit` and `head_commit` (`not_captured` with a reason if the base is missing or not
+  an ancestor); `working_tree` is the terminal working tree against the pinned terminal head. Untracked
+  files are names only (`status: untracked`, `content: not_captured`). Working-tree counts and patches
+  are separate observations that may disagree, and the scope says so.
+- **Rows**: `{path, old_path, status, additions, deletions, binary, content}`. Paths are UTF-8 strings
+  when valid, otherwise `path_bytes_b64`. Renames are off; unmerged entries have `status: unmerged`;
+  submodules have `status: submodule` and no text.
+- **Provenance per repository**: `base_commit`, `base_provenance` (dispatch, replaced and why,
+  first seen mid-run), `head_commit`, `observed_at`, `baseline_dirty` (`true`, `false` or `unknown`) and
+  the fixed `attribution: "Observed repository differences; not evidence of task authorship."`. A
+  shared checkout's working-tree scope includes other writers' and pre-existing changes.
+- **Limits**: at most 500 rows per scope (then `rows_truncated`); text is allocated in sorted-path
+  order, at most 64 KiB per file and 1 MiB per task, after which `content` is `omitted_size`; each page
+  is at most 262144 bytes including JSON escaping, and text is chunked by cursor so that each page fits.
+- **Storage**: one private file `{task_id}.changes.json` (0600, atomic publication), swept by
+  retention's `{task_id}.*` pattern. This is new data at rest and includes the user's pre-existing
+  dirty edits. Diff text can contain secrets; read authority is direct callers only and no redaction
+  is claimed.
+- **States**: repository `pending | available | incomplete | unavailable | not_captured`; file content
+  `available | truncated | binary | omitted_size | not_captured`; distinct reason codes; an empty diff
+  is `available` with zero rows.
+- Tests must cover malicious filters, external diff, textconv, symlinked paths and submodules in
+  isolated repositories.
 
 ## Recent usage-limit hits
 

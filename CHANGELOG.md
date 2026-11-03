@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `harflow-ctl task-events TASK_ID [--from newest|oldest | --cursor C] [--limit N] [--kinds K | --all-kinds] --json` (capability `task-event-page.v1`, read-only, direct callers only): ascending, bounded pages of a task's normalized events with older and newer cursors, polling by `newer_cursor`, a `log` lifecycle object (`open`, `final`, `settling`, `incomplete`, `unknown`, `unavailable`), per-page `span`, `skipped` and `gaps`, a `change_token`, and the stable refusals `event_cursor_invalid` and `event_cursor_expired`. A whole document is at most 262144 bytes. MCP `get_task_events` and `get_task_event_page` are unchanged.
+- Add `harflow-ctl task-prompt TASK_ID [--max-bytes N] --json` (capability `task-prompt.v1`, read-only, direct callers only): a task's stored prompt, verbatim and bounded, with `state` (`available`, `preview_only`, `integrity_failed`, `unavailable`), byte counts and an `integrity` report.
+- Document the `task-changes` contract as proposed and not implemented, and the reconnect rules for history reads (`docs/contracts.md`). The version-info example lists every capability.
+- HarflowMac must re-vendor, for S06: the new `contracts/v1/ctl-task-events-*.json` (`all-kinds`, `cursor-expired`, `cursor-invalid`, `default-filter-delta-seqs`, `direct-caller-refused`, `gaps-skipped`, `incomplete`, `kinds-filtered`, `newer-empty-final`, `newer`, `newest`, `older`, `oldest-forward`, `open`, `pending-launch`, `settling`, `unavailable`, `unknown-task`) and `ctl-task-prompt-*.json` (`available`, `integrity-failed`, `preview-only`, `truncated`) fixtures, the updated `version-info.json` (two new capabilities) and `manifest.json`/`manifest.sha256`. No existing fixture other than `version-info.json` changes.
+
 ## 0.0.7
 
 - Support qualified Vibe 3.0.3 ACP caller approvals, exact command grants, configured-model selection and start/resume lifecycle; retain structured refusal reasons and permission scopes without rewriting native policy lists (#35, #39).

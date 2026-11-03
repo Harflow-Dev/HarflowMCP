@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Regenerate the `task-events` and `task-prompt` fixtures in contracts/v1 from actual `harflow-ctl` output.
+
+    uv run python scripts/generate-task-read-fixtures.py            # rewrite contracts/v1
+    uv run python scripts/generate-task-read-fixtures.py --check    # fail if contracts/v1 differs from fresh, isolated runs
+
+Owns only `ctl-task-events-*.json` and `ctl-task-prompt-*.json`, plus their manifest entries; every other
+file named in the manifest is verified against its recorded hash and left alone. Each document is the output of
+`ctl.main` against an isolated HOME and state root. Event logs are written by the production `EventLog` writer;
+task records by `store.write`. Controlled facts: the wall clock (event stamps, `observed_at`, the settling
+grace), process liveness (`identity.identity_check`, `store.record_process_alive`), the file identity cursors bind to (device and inode) and
+the record file's mtime, none of which can be reproduced across machines. The temporary base directory never
+appears in a document.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "contracts" / "v1"
+EVENTS_PREFIX, PROMPT_PREFIX = "ctl-task-events-", "ctl-task-prompt-"
+EVENTS_CAPABILITY, PROMPT_CAPABILITY = "task-event-page.v1", "task-prompt.v1"
+EPOCH = 1_792_000_000.0
+OWNER = {"pid": 5678, "start_time": "bridge-start", "markers": []}
+WORKSPACE = "/workspace/repo"
+
+
+def canonical_bytes(document) -> bytes:
+    return (json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
+def manifest_bytes(manifest: dict) -> bytes:
+    return (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+class World:
+    def __init__(self, base: Path) -> None:
+        self.base = Path(os.path.realpath(base))
+        self.now = EPOCH
+        self.documents: dict[str, dict] = {}
+
+    # --- environment ------------------------------------------------------------------------------------
+
+    def enter(self, stack: contextlib.ExitStack) -> None:
+        from harflow_mcp import ctl, event_pages, events, identity, lineage, state_ownership, store, takeover, task_event_read
+        from harflow_mcp.state_layout import resolve_layout
+        self.ctl, self.events, self.store, self.takeover, self.lineage = ctl, events, store, takeover, lineage
+        self.real_refusal = takeover.caller_refusal
+        self.layout = resolve_layout(root=self.base / ".harflow")
+        stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(self.base), "TMPDIR": str(self.base)}))
+        for key in ("HARFLOW_STATE_ROOT", "HARFLOW_TASK_ID", "HARFLOW_DEPTH"):
+            os.environ.pop(key, None)
+        stack.enter_context(state_ownership.state_session(self.layout))
+        self.tasks = self.layout.tasks_directory
+        self.tasks.mkdir(parents=True)
+        stamp = lambda: datetime.fromtimestamp(self.now, timezone.utc)
+        stack.enter_context(mock.patch.object(events, "_now_iso", lambda: stamp().isoformat()))
+        stack.enter_context(mock.patch.object(task_event_read, "_now", stamp))
+        stack.enter_context(mock.patch.object(event_pages, "identity_of", lambda info: (1, 1)))
+        stack.enter_context(mock.patch.object(identity, "identity_check", lambda value: "alive" if value == OWNER else "undecidable"))
+        stack.enter_context(mock.patch.object(store, "record_process_alive", lambda record: record.pid is not None))
+        stack.enter_context(mock.patch.object(takeover, "caller_refusal", lambda *_: None))
+
+    # --- seeding ----------------------------------------------------------------------------------------
+
+    def iso(self, offset: float = 0.0) -> str:
+        return datetime.fromtimestamp(EPOCH + offset, timezone.utc).isoformat()
+
+    def task(self, task_id: str, *, status: str = "completed", drained: bool = True, finished: float | None = -60.0,
+             prompt: str = "", title: str | None = None, **extra) -> None:
+        record = self.store.TaskRecord(
+            task_id=task_id, backend="claude", session_id="session-" + task_id, markers=["session-" + task_id],
+            repo_path=WORKSPACE, started_at=self.iso(-120), status=status,
+            exit_code=0 if status == "completed" else None, finished_at=None if finished is None else self.iso(finished),
+            output_drained=drained, owner=OWNER, prompt=prompt, title=title, **extra)
+        self.store.write(self.tasks, record)
+        # The record's mtime is part of the change token; pin it.
+        os.utime(self.store.record_path(self.tasks, task_id), (EPOCH, EPOCH))
+
+    def log(self, task_id: str, script, *, finish: bool = True) -> None:
+        """Write the events with the production writer; `script(writer)` may add or skip events."""
+        path = self.events.events_path(self.tasks, task_id)
+        writer = self.events.EventLog(path, task_id, layout=self.layout)
+        try:
+            script(writer)
+            if finish:
+                self.now += 1
+                writer.write("task_finished", {"status": "completed", "exit_code": 0})
+        finally:
+            writer.close()
+
+    # --- invocation -------------------------------------------------------------------------------------
+
+    def call(self, name: str | None, *argv: str, capability: str = EVENTS_CAPABILITY, undecidable: bool = False) -> dict:
+        """Run one ctl command, keep its document as fixture `name` (None: do not keep), and return its `result` or `error`."""
+        self.now = EPOCH
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            if undecidable:
+                # The production gate, over a process table that cannot answer, with no ambient environment.
+                stack.enter_context(mock.patch.object(self.lineage, "detect_caller_detail",
+                                                      lambda *a, **k: self.lineage.Detection(None, "the process table is unavailable")))
+                stack.enter_context(mock.patch.object(self.takeover, "caller_refusal", lambda log_dir, environ=None: self.real_refusal(log_dir, {})))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = self.ctl.main([*argv, "--json"])
+        lines = [line for line in out.getvalue().splitlines() if line.strip()]
+        if len(lines) != 1:
+            raise SystemExit(f"{name}: expected one document, got {len(lines)} (exit {code}): {err.getvalue()}")
+        document = json.loads(lines[0])
+        assert (code == 0) == ("result" in document), (name, code, document)
+        if name is not None:
+            self.documents[name] = {"document": document, "capability": capability}
+        return document.get("result") or document["error"]
+
+
+def build(world: World) -> None:
+    import base64
+    text = lambda log, body: log.write("assistant_text", {"text": body}, raw_offset=None)
+
+    def conversation(log):
+        log.write("task_started", {"backend": "claude", "model": None})
+        log.write("assistant_delta", {"text": "Looking"})
+        log.write("assistant_delta", {"text": " at the code."})
+        text(log, "Looking at the code.")
+        log.write("tool_call", {"tool": "Read", "call_id": "call-1", "input": {"file_path": WORKSPACE + "/README.md"}})
+        log.write("tool_result", {"call_id": "call-1", "output": "Readme body", "is_error": False})
+        log.write("usage", {"input_tokens": 120, "output_tokens": 30})
+        text(log, "Done.")
+
+    world.task("task-events-final", prompt="Describe the repository.")
+    world.log("task-events-final", conversation)
+    newest = world.call("newest", "task-events", "task-events-final", "--limit", "4")
+    older = world.call("older", "task-events", "task-events-final", "--cursor", newest["older_cursor"], "--limit", "4")
+    world.call("oldest-forward", "task-events", "task-events-final", "--from", "oldest", "--limit", "3")
+    first = world.call(None, "task-events", "task-events-final", "--from", "oldest", "--limit", "2")
+    world.call("newer", "task-events", "task-events-final", "--cursor", first["newer_cursor"], "--limit", "3")
+    world.call("newer-empty-final", "task-events", "task-events-final", "--cursor", newest["newer_cursor"])
+    world.call("all-kinds", "task-events", "task-events-final", "--all-kinds", "--limit", "10")
+    world.call("kinds-filtered", "task-events", "task-events-final", "--kinds", "tool_call,tool_result", "--limit", "10")
+    # A well-formed cursor from another engine generation, as a Rust engine would have issued.
+    foreign = json.loads(base64.urlsafe_b64decode(older["newer_cursor"]))
+    foreign["gen"] = "rs-events-1"
+    world.call("cursor-expired", "task-events", "task-events-final", "--cursor",
+               base64.urlsafe_b64encode(json.dumps(foreign, separators=(",", ":")).encode()).decode())
+    world.call("cursor-invalid", "task-events", "task-events-final", "--cursor", "not-a-cursor")
+    world.call("unknown-task", "task-events", "task-events-missing")
+    world.call("direct-caller-refused", "task-events", "task-events-final", undecidable=True)
+
+    world.task("task-events-settling", drained=True, finished=-5.0)
+    world.log("task-events-settling", conversation, finish=False)
+    world.call("settling", "task-events", "task-events-settling", "--limit", "3")
+
+    world.task("task-events-incomplete", drained=False, finished=-300.0)
+    world.log("task-events-incomplete", conversation, finish=False)
+    world.call("incomplete", "task-events", "task-events-incomplete", "--limit", "3")
+
+    world.task("task-events-unavailable", finished=-300.0)
+    world.call("unavailable", "task-events", "task-events-unavailable")
+
+    world.task("task-events-open", status="running", drained=False, finished=None, pid=9999)
+    world.log("task-events-open", conversation, finish=False)
+    world.call("open", "task-events", "task-events-open", "--limit", "3")
+
+    def damaged(log):
+        log.write("task_started", {"backend": "claude", "model": None})
+        text(log, "Before the loss.")
+        log._seq += 2  # two events that were dropped before they reached the log
+        text(log, "After the loss.")
+        log._handle.write(b"{ this line is not json\n")
+        text(log, "After the unreadable line.")
+    world.task("task-events-damaged")
+    world.log("task-events-damaged", damaged)
+    world.call("gaps-skipped", "task-events", "task-events-damaged")
+
+    def streaming(log):
+        for index in range(6):
+            log.write("assistant_delta", {"text": f"chunk {index} "})
+        text(log, "chunk 0 chunk 1 chunk 2 chunk 3 chunk 4 chunk 5 ")
+    world.task("task-events-streaming")
+    world.log("task-events-streaming", streaming)
+    world.call("default-filter-delta-seqs", "task-events", "task-events-streaming")
+
+    world.task("task-events-pending", status="running", drained=False, finished=None)
+    from harflow_mcp import id_resolution, task_resources, task_supervision
+    with mock.patch.object(id_resolution, "resolve_task", lambda *a, **k: id_resolution.Resolution("task-events-pending", None)), \
+            mock.patch.object(world.store, "read", lambda *a, **k: None), \
+            mock.patch.object(task_supervision, "read_launch", lambda *a: {"state": "waiting_for_resources"}), \
+            mock.patch.object(task_resources, "is_pending_kind", lambda receipt: True):
+        world.call("pending-launch", "task-events", "task-events-pending")
+
+    long_prompt = "Review the change.\n" + "  Keep this indentation and wording verbatim.\n" * 60
+    world.task("task-prompt-available", prompt=long_prompt, title="Review the change")
+    world.call("available", "task-prompt", "task-prompt-available", capability=PROMPT_CAPABILITY)
+    world.call("truncated", "task-prompt", "task-prompt-available", "--max-bytes", "120", capability=PROMPT_CAPABILITY)
+    world.task("task-prompt-preview", prompt=long_prompt, title="Review the change")
+    next(world.tasks.glob("task-prompt-preview.prompt.*.txt")).unlink()
+    world.call("preview-only", "task-prompt", "task-prompt-preview", capability=PROMPT_CAPABILITY)
+    world.task("task-prompt-damaged", prompt=long_prompt, title="Review the change")
+    next(world.tasks.glob("task-prompt-damaged.prompt.*.txt")).write_text("tampered")
+    world.call("integrity-failed", "task-prompt", "task-prompt-damaged", capability=PROMPT_CAPABILITY)
+
+
+def finalize(world: World) -> tuple[dict[str, dict], dict[str, str]]:
+    documents, capabilities = {}, {}
+    for key, entry in world.documents.items():
+        prefix = PROMPT_PREFIX if entry["capability"] == PROMPT_CAPABILITY else EVENTS_PREFIX
+        name = f"{prefix}{key}.json"
+        documents[name], capabilities[name] = entry["document"], entry["capability"]
+    base = str(world.base)
+    for name, document in documents.items():
+        if base in json.dumps(document):
+            raise SystemExit(f"{name} leaks the temporary base directory")
+    return documents, capabilities
+
+
+def write_output(output: Path, documents: dict[str, dict], capabilities: dict[str, str]) -> None:
+    from harflow_mcp.wire_contracts import CTL_FORMAT, PRODUCT_VERSION, validate_envelope
+    output.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads((FIXTURES / "manifest.json").read_bytes())
+    owned = lambda name: name.startswith((EVENTS_PREFIX, PROMPT_PREFIX))
+    for name in [n for n in manifest["cases"] if owned(n) and n not in documents]:
+        manifest["cases"].pop(name)
+        manifest["files"].pop(name, None)
+    for stale in [p for p in output.glob("ctl-task-*.json") if owned(p.name) and p.name not in documents]:
+        stale.unlink()
+    written: dict[str, bytes] = {}
+    for name, document in sorted(documents.items()):
+        validate_envelope(document, CTL_FORMAT, live=True, expected_version=PRODUCT_VERSION)
+        written[name] = canonical_bytes(document)
+        manifest["cases"][name] = {"encoding": "json", "expected_product_version": PRODUCT_VERSION, "format": CTL_FORMAT,
+                                   "required_capabilities": [capabilities[name]], "valid": True}
+    for name, payload in written.items():
+        (output / name).write_bytes(payload)
+        manifest["files"][name] = hashlib.sha256(payload).hexdigest()
+    for name, recorded in manifest["files"].items():
+        if name not in written and name != "manifest.json":
+            if hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() != recorded:
+                raise SystemExit(f"{name} differs from its recorded hash; this generator does not own it")
+    payload = manifest_bytes(manifest)
+    (output / "manifest.json").write_bytes(payload)
+    (output / "manifest.sha256").write_text(f"{hashlib.sha256(payload).hexdigest()}  manifest.json\n")
+
+
+def generate(output: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="harflow-task-read-fixtures-") as base:
+        world = World(Path(base))
+        with contextlib.ExitStack() as stack:
+            world.enter(stack)
+            build(world)
+        documents, capabilities = finalize(world)
+    write_output(output, documents, capabilities)
+
+
+def owned_files(directory: Path) -> dict[str, bytes]:
+    names = {p.name for p in directory.glob("ctl-task-*.json") if p.name.startswith((EVENTS_PREFIX, PROMPT_PREFIX))}
+    names |= {"manifest.json", "manifest.sha256"}
+    return {name: (directory / name).read_bytes() for name in sorted(names) if (directory / name).exists()}
+
+
+def check() -> int:
+    """Generate twice in separate processes into temporary directories and compare both with contracts/v1."""
+    with tempfile.TemporaryDirectory(prefix="harflow-task-read-check-") as scratch:
+        outputs = []
+        for index in (1, 2):
+            target = Path(scratch) / f"run{index}"
+            subprocess.run([sys.executable, str(Path(__file__).resolve()), "--output", str(target)], check=True)
+            outputs.append(owned_files(target))
+        committed = owned_files(FIXTURES)
+    problems = []
+    if outputs[0] != outputs[1]:
+        problems.append("two fresh runs differ (non-deterministic): " + ", ".join(sorted(n for n in set(outputs[0]) | set(outputs[1]) if outputs[0].get(n) != outputs[1].get(n))))
+    if outputs[0] != committed:
+        problems.append("contracts/v1 differs from a fresh run: " + ", ".join(sorted(n for n in set(outputs[0]) | set(committed) if outputs[0].get(n) != committed.get(n))))
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 1 if problems else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--output", type=Path, default=FIXTURES, help="directory to write (default: contracts/v1)")
+    parser.add_argument("--check", action="store_true", help="verify contracts/v1 is exactly reproducible; writes nothing there")
+    arguments = parser.parse_args()
+    if arguments.check:
+        return check()
+    generate(arguments.output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
