@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -755,8 +755,8 @@ previews and `unavailable`). A cut drops only an incomplete trailing character; 
 elsewhere, possible only in an unverified prefix, are replaced by U+FFFD. The document size is set by
 `--max-bytes`, not trimmed: JSON escaping can enlarge text of 131072 bytes beyond 262144 bytes, so
 clients should not assume the event-page bound here. The read ceiling is enforced during the read. A
-continuation's prompt belongs to the successor task's own `task-prompt`; successor discovery has no
-ctl read yet. Examples: `contracts/v1/ctl-task-prompt-*.json`.
+continuation's prompt belongs to the successor task's own `task-prompt`; find successors with
+`task-list-page --predecessor-task-id` (below). Examples: `contracts/v1/ctl-task-prompt-*.json`.
 
 ### Reconnect and history rules
 
@@ -770,7 +770,31 @@ Rules a client applies when it loses or resumes a connection, all already implem
 - A `task-events` `event_cursor_expired` or `event_cursor_invalid` means: reload the newest page and
   discard what was derived from older cursors of that task.
 - Not yet on ctl, for later design and contracts: loss, reconnect and unavailable presentations,
-  successor discovery (`predecessor_task_id` is MCP-only), and activity of running workflow nodes.
+  and activity of running workflow nodes.
+
+### Successor discovery (`task-successors.v1`)
+
+```bash
+harflow-ctl task-list-page --predecessor-task-id ID [--limit N] [--cursor C] [--active-only] [--session-id S] --json
+```
+
+Lists the recorded direct successors of one task: tasks whose `parent_task_id` (a resume) or
+`continuation_of_task_id` (a continuation) is the predecessor. The flag is limited to a verified
+direct caller (`agent_caller`, `caller_undecidable`), checked before the id is resolved; without the
+flag `task-list-page` keeps its existing authority. It cannot be combined with `--task-ids` (usage
+error). Error precedence is usage, authority, task, cursor.
+
+The predecessor is resolved and guarded as `status` does: a unique prefix is accepted and the reply
+echoes `resolved_from_predecessor_task_id`; `invalid_task_id`, `unknown_task` and
+`task_pending_launch` are reported as for `status`. Items, ordering (newest first), the limit
+(1..100), the 128 KiB row bound, the filter-bound keyset cursor, `history_incomplete` and the count
+fields are the existing `task-list-page` document; items gain no keys. With the flag the result adds
+`predecessor_task_id` (the resolved full id) and `successor_scope: "recorded_tasks"`. A successor
+whose launch is still pending has no task record and is not listed. The match is unindexed, so a page
+or count over a sparse match can scan the whole disposable catalog; clients should not poll it
+tightly. Capability `task-successors.v1`; an older engine answers the flag with a usage error, which
+is "unsupported". MCP `list_task_page(predecessor_task_id=...)` is unchanged. Examples:
+`contracts/v1/ctl-task-page-successors-*.json`.
 
 ### Proposed, not implemented: `task-changes`
 

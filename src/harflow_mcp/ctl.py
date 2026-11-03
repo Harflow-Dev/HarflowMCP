@@ -179,6 +179,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     page_p.add_argument('--active-only', action='store_true')
     page_p.add_argument('--session-id')
     page_p.add_argument('--task-ids')
+    page_p.add_argument('--predecessor-task-id', help='list the recorded direct resumes and continuations of this task; direct callers only, not with --task-ids')
 
     compact_p = sub.add_parser('task-list-compact', help='bounded filtered task headers for direct callers only (since is ISO8601)')
     compact_p.add_argument('--json', action='store_true')
@@ -898,6 +899,11 @@ def _read_task_record(log_dir: Path, task_id: str, managed: Any, *, include_prom
                 {"launch_state": receipt["state"], **({"not_started_reason": receipt["not_started_reason"]} if receipt.get("not_started_reason") else {})})
         raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
     return record
+
+
+def _successor_scope(result: dict[str, Any], predecessor: id_resolution.Resolution) -> dict[str, Any]:
+    """Name the resolved predecessor and what a successor listing covers (`task-successors.v1`)."""
+    return {**result, "predecessor_task_id": predecessor.id, "successor_scope": "recorded_tasks"}
 
 
 def _status_observer_options(args):
@@ -1802,6 +1808,8 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command in {"task-events", "task-prompt"}:
         from .ctl_task_reads import validate_arguments
         validate_arguments(args, parser)
+    if args.command == "task-list-page" and args.predecessor_task_id is not None and args.task_ids is not None:
+        parser.error("--predecessor-task-id cannot be combined with --task-ids")
     if args.command == "slot" and args.slot_action == "enable":
         from . import phase_slots
         try:
@@ -1835,6 +1843,11 @@ def _main(argv: list[str] | None = None) -> int:
         refusal = caller_refusal(default_log_dir())
         if refusal:
             return _fail(args, refusal[0], "Task history reads require a verified direct caller: " + refusal[1])
+    if args.command == "task-list-page" and args.predecessor_task_id is not None:
+        from .takeover import caller_refusal
+        refusal = caller_refusal(default_log_dir())
+        if refusal:
+            return _fail(args, refusal[0], "Successor discovery requires a verified direct caller: " + refusal[1])
     # Informational backend/config inspection does not access engine state.
     config_only = args.command == "backends" or (
         args.command == "mcp-allowlist" and args.allow is None and args.remove is None)
@@ -2045,10 +2058,16 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
     if args.command == 'task-list-page':
         try:
             from .workflow_inspection import filter_task_reads, managed_page_reader
+            predecessor = None
+            if args.predecessor_task_id is not None:
+                from .ctl_task_reads import resolve_predecessor
+                predecessor = resolve_predecessor(default_log_dir(), args.predecessor_task_id)
             ready, managed = managed_page_reader(default_log_dir())
             if not ready:
                 from .workflow_inspection import page_indexing_response
                 result = page_indexing_response(default_log_dir())
+                if predecessor is not None:
+                    result = _successor_scope(result, predecessor)
                 print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
                 return 0
             listed = []
@@ -2063,8 +2082,10 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                     listed.append(id_resolution.Resolution(raw, None))
                 except store.InvalidTaskId:
                     listed.append(id_resolution.Resolution(raw, None))
-            result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=[item.id for item in listed] if args.task_ids is not None else None)
-            result = id_resolution.echo(result, task_ids=listed)
+            result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=[item.id for item in listed] if args.task_ids is not None else None, filters={'predecessor_task_id': predecessor.id} if predecessor is not None else None)
+            result = id_resolution.echo(result, task_ids=listed, predecessor_task_id=predecessor)
+            if predecessor is not None:
+                result = _successor_scope(result, predecessor)
             result['items'] = filter_task_reads(result['items'], managed)
             result['related_headers'] = filter_task_reads(result.get('related_headers', []), managed)
             if managed is not None:

@@ -147,6 +147,8 @@ pages its normalized events in both directions with opaque cursors, a lifecycle 
 gap reporting (capability `task-event-page.v1`), and `harflow-ctl task-prompt TASK_ID --json` returns its
 stored prompt with an integrity state (capability `task-prompt.v1`). Clients require the capability
 on the version-info handshake before using either command. See [task event pages and prompts](docs/contracts.md#task-event-pages-and-prompts).
+`harflow-ctl task-list-page --predecessor-task-id TASK_ID --json` lists a task's recorded resumes and
+continuations (capability `task-successors.v1`; see [successor discovery](docs/contracts.md#successor-discovery-task-successorsv1)).
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at

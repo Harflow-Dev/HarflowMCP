@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Regenerate the `task-events` and `task-prompt` fixtures in contracts/v1 from actual `harflow-ctl` output.
+"""Regenerate the task-read fixtures in contracts/v1 from actual `harflow-ctl` output.
 
     uv run python scripts/generate-task-read-fixtures.py            # rewrite contracts/v1
     uv run python scripts/generate-task-read-fixtures.py --check    # fail if contracts/v1 differs from fresh, isolated runs
 
-Owns only `ctl-task-events-*.json` and `ctl-task-prompt-*.json`, plus their manifest entries; every other
+Owns only the fixtures named by the prefixes in `PREFIXES` (task events, task prompts, successor discovery,
+live workflow node activity and statistics cost), plus their manifest entries; every other
 file named in the manifest is verified against its recorded hash and left alone. Each document is the output of
 `ctl.main` against an isolated HOME and state root. Event logs are written by the production `EventLog` writer;
 task records by `store.write`. Controlled facts: the wall clock (event stamps, `observed_at`, the settling
-grace), process liveness (`identity.identity_check`, `store.record_process_alive`), the file identity cursors bind to (device and inode) and
+grace), the catalog identity that task-page cursors bind to, process liveness (`identity.identity_check`, `store.record_process_alive`, `identity.own_identity`), the file identity cursors bind to (device and inode) and
 the record file's mtime, none of which can be reproduced across machines. The temporary base directory never
 appears in a document.
 """
@@ -29,8 +30,14 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "contracts" / "v1"
-EVENTS_PREFIX, PROMPT_PREFIX = "ctl-task-events-", "ctl-task-prompt-"
 EVENTS_CAPABILITY, PROMPT_CAPABILITY = "task-event-page.v1", "task-prompt.v1"
+SUCCESSORS_CAPABILITY = "task-successors.v1"
+# The fixture-name prefix each capability's documents are written under.
+PREFIXES = {
+    EVENTS_CAPABILITY: "ctl-task-events-",
+    PROMPT_CAPABILITY: "ctl-task-prompt-",
+    SUCCESSORS_CAPABILITY: "ctl-task-page-successors-",
+}
 EPOCH = 1_792_000_000.0
 OWNER = {"pid": 5678, "start_time": "bridge-start", "markers": []}
 WORKSPACE = "/workspace/repo"
@@ -69,6 +76,15 @@ class World:
         stack.enter_context(mock.patch.object(task_event_read, "_now", stamp))
         stack.enter_context(mock.patch.object(event_pages, "identity_of", lambda info: (1, 1)))
         stack.enter_context(mock.patch.object(identity, "identity_check", lambda value: "alive" if value == OWNER else "undecidable"))
+        from harflow_mcp import catalog
+        init = catalog.Catalog.__init__
+
+        def pinned_catalog(catalog_self, *args, **kwargs):
+            init(catalog_self, *args, **kwargs)
+            # Cursors are bound to a digest of the catalog directory, which is a temporary path here.
+            catalog_self.identity = "fixture-catalog0"
+        stack.enter_context(mock.patch.object(catalog.Catalog, "__init__", pinned_catalog))
+        stack.enter_context(mock.patch.object(identity, "own_identity", lambda: {"pid": 4242, "start_time": "ctl-start", "markers": []}))
         stack.enter_context(mock.patch.object(store, "record_process_alive", lambda record: record.pid is not None))
         stack.enter_context(mock.patch.object(takeover, "caller_refusal", lambda *_: None))
 
@@ -78,10 +94,10 @@ class World:
         return datetime.fromtimestamp(EPOCH + offset, timezone.utc).isoformat()
 
     def task(self, task_id: str, *, status: str = "completed", drained: bool = True, finished: float | None = -60.0,
-             prompt: str = "", title: str | None = None, **extra) -> None:
+             prompt: str = "", title: str | None = None, started: float = -120.0, **extra) -> None:
         record = self.store.TaskRecord(
             task_id=task_id, backend="claude", session_id="session-" + task_id, markers=["session-" + task_id],
-            repo_path=WORKSPACE, started_at=self.iso(-120), status=status,
+            repo_path=WORKSPACE, started_at=self.iso(started), status=status,
             exit_code=0 if status == "completed" else None, finished_at=None if finished is None else self.iso(finished),
             output_drained=drained, owner=OWNER, prompt=prompt, title=title, **extra)
         self.store.write(self.tasks, record)
@@ -121,7 +137,7 @@ class World:
         document = json.loads(lines[0])
         assert (code == 0) == ("result" in document), (name, code, document)
         if name is not None:
-            self.documents[name] = {"document": document, "capability": capability}
+            self.documents[PREFIXES[capability] + name] = {"document": document, "capability": capability}
         return document.get("result") or document["error"]
 
 
@@ -211,12 +227,40 @@ def build(world: World) -> None:
     next(world.tasks.glob("task-prompt-damaged.prompt.*.txt")).write_text("tampered")
     world.call("integrity-failed", "task-prompt", "task-prompt-damaged", capability=PROMPT_CAPABILITY)
 
+    build_successors(world)
+
+
+def build_successors(world: World) -> None:
+    from harflow_mcp import id_resolution, task_resources, task_supervision
+    cap = SUCCESSORS_CAPABILITY
+    root = "task-succ-root"
+    world.task(root, prompt="Start the work.")
+    world.task("task-succ-resume", parent_task_id=root, started=-100.0)
+    world.task("task-succ-continuation", continuation_of_task_id=root, chain_root_task_id=root)
+    world.task("task-succ-unrelated")
+    world.task("task-succ-leaf", prompt="No follow-up yet.")
+    for _ in range(10):  # the first reads only build the bounded catalog
+        if not world.call(None, "task-list-page", capability=cap).get("bootstrap_pending"):
+            break
+    else:
+        raise SystemExit("the task catalog did not become ready")
+    world.call("found", "task-list-page", "--predecessor-task-id", root, capability=cap)
+    world.call("found-first-page", "task-list-page", "--predecessor-task-id", root, "--limit", "1", capability=cap)
+    world.call("none-found", "task-list-page", "--predecessor-task-id", "task-succ-leaf", capability=cap)
+    world.call("unknown-predecessor", "task-list-page", "--predecessor-task-id", "task-succ-missing", capability=cap)
+    world.call("direct-caller-refused", "task-list-page", "--predecessor-task-id", root, capability=cap, undecidable=True)
+    world.task("task-succ-pending", status="running", drained=False, finished=None)
+    with mock.patch.object(id_resolution, "resolve_task", lambda *a, **k: id_resolution.Resolution("task-succ-pending", None)), \
+            mock.patch.object(world.store, "read", lambda *a, **k: None), \
+            mock.patch.object(task_supervision, "read_launch", lambda *a: {"state": "waiting_for_resources"}), \
+            mock.patch.object(task_resources, "is_pending_kind", lambda receipt: True):
+        world.call("pending-launch-predecessor", "task-list-page", "--predecessor-task-id", "task-succ-pending", capability=cap)
+
 
 def finalize(world: World) -> tuple[dict[str, dict], dict[str, str]]:
     documents, capabilities = {}, {}
     for key, entry in world.documents.items():
-        prefix = PROMPT_PREFIX if entry["capability"] == PROMPT_CAPABILITY else EVENTS_PREFIX
-        name = f"{prefix}{key}.json"
+        name = f"{key}.json"
         documents[name], capabilities[name] = entry["document"], entry["capability"]
     base = str(world.base)
     for name, document in documents.items():
@@ -229,11 +273,11 @@ def write_output(output: Path, documents: dict[str, dict], capabilities: dict[st
     from harflow_mcp.wire_contracts import CTL_FORMAT, PRODUCT_VERSION, validate_envelope
     output.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((FIXTURES / "manifest.json").read_bytes())
-    owned = lambda name: name.startswith((EVENTS_PREFIX, PROMPT_PREFIX))
+    owned = lambda name: name.startswith(tuple(PREFIXES.values()))
     for name in [n for n in manifest["cases"] if owned(n) and n not in documents]:
         manifest["cases"].pop(name)
         manifest["files"].pop(name, None)
-    for stale in [p for p in output.glob("ctl-task-*.json") if owned(p.name) and p.name not in documents]:
+    for stale in [p for p in output.glob("ctl-*.json") if owned(p.name) and p.name not in documents]:
         stale.unlink()
     written: dict[str, bytes] = {}
     for name, document in sorted(documents.items()):
@@ -264,7 +308,7 @@ def generate(output: Path) -> None:
 
 
 def owned_files(directory: Path) -> dict[str, bytes]:
-    names = {p.name for p in directory.glob("ctl-task-*.json") if p.name.startswith((EVENTS_PREFIX, PROMPT_PREFIX))}
+    names = {p.name for p in directory.glob("ctl-*.json") if p.name.startswith(tuple(PREFIXES.values()))}
     names |= {"manifest.json", "manifest.sha256"}
     return {name: (directory / name).read_bytes() for name in sorted(names) if (directory / name).exists()}
 

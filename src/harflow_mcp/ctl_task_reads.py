@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Any
 
 from . import event_pages, id_resolution, store, task_event_read, task_prompt_read
@@ -37,6 +38,18 @@ def _print(result: dict[str, Any], resolution: id_resolution.Resolution) -> int:
     from .ctl import CTL_JSON_VERSION
     print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": id_resolution.echo(result, primary=resolution)})))
     return 0
+
+
+def resolve_predecessor(log_dir: Path, raw: str) -> id_resolution.Resolution:
+    """Resolve and verify the task whose successors `task-list-page` lists, as `status` would for it.
+
+    Raises `ctl._StatusReadRefused` (`invalid_task_id`, `unknown_task`, `task_pending_launch`) and
+    `IdResolutionError`. The caller has already passed the direct-caller gate.
+    """
+    from . import ctl
+    resolution, managed = ctl._resolve_task_arg(log_dir, raw, guarded=True)
+    ctl._read_task_record(log_dir, resolution.id, managed, include_prompt=False)
+    return resolution
 
 
 def _record(args: argparse.Namespace) -> tuple[id_resolution.Resolution, store.TaskRecord] | int:
