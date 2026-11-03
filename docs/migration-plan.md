@@ -44,6 +44,8 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
       inventory, MCP schema and supported backend qualification evidence.
 - [ ] B0-MC-02 Review a v1 parity ledger against specification and observed
       behavior; record discrepancies as defects rather than adopting them blindly.
+      The [S03 receipt](migration-receipts/S03.md) supplies the final contribution,
+      pending acceptance.
 - [x] B0-MC-03 Qualify the reproducible baseline and document failures and
       limits without waiting for unrelated feature tickets. S01 and the
       [S02 qualified baseline receipt](../../HarflowMac/docs/migration-receipts/S02.md)
