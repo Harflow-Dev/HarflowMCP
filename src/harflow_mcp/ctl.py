@@ -166,6 +166,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     prompt_p.add_argument("task_id")
     prompt_p.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="UTF-8 bytes of text to return, 1..131072")
     prompt_p.add_argument("--json", action="store_true", help="required")
+    changes_p = sub.add_parser("task-changes", help="one task's stored repository differences, bounded; direct callers only")
+    changes_p.add_argument("task_id")
+    changes_p.add_argument("--repository-root", help="with --scope and --path-b64: read the stored patch text of one row")
+    changes_p.add_argument("--scope", choices=("committed_range", "working_tree"))
+    changes_p.add_argument("--path-b64", help="the row's path bytes, base64 (a row's path_bytes_b64, or its path as UTF-8)")
+    changes_p.add_argument("--cursor", help="a next_cursor from a previous page")
+    changes_p.add_argument("--limit", type=int, default=None, help="rows per listing page, 1..500 (default 200)")
+    changes_p.add_argument("--json", action="store_true", help="required")
 
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
@@ -1810,7 +1818,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
-    if args.command in {"task-events", "task-prompt"}:
+    if args.command in {"task-events", "task-prompt", "task-changes"}:
         from .ctl_task_reads import validate_arguments
         validate_arguments(args, parser)
     if args.command == "task-list-page" and args.predecessor_task_id is not None and args.task_ids is not None:
@@ -1843,7 +1851,7 @@ def _main(argv: list[str] | None = None) -> int:
         refusal = caller_refusal(default_log_dir())
         if refusal:
             return _fail(args, refusal[0], "Statistics require a verified direct caller: " + refusal[1])
-    if args.command in {"task-events", "task-prompt"}:
+    if args.command in {"task-events", "task-prompt", "task-changes"}:
         from .takeover import caller_refusal
         refusal = caller_refusal(default_log_dir())
         if refusal:
@@ -1900,9 +1908,9 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, getattr(exc, "code", "invalid_params"), str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
         return 0
-    if args.command in {"task-events", "task-prompt"}:
-        from .ctl_task_reads import cmd_task_events, cmd_task_prompt
-        return (cmd_task_events if args.command == "task-events" else cmd_task_prompt)(args)
+    if args.command in {"task-events", "task-prompt", "task-changes"}:
+        from .ctl_task_reads import cmd_task_changes, cmd_task_events, cmd_task_prompt
+        return {"task-events": cmd_task_events, "task-prompt": cmd_task_prompt, "task-changes": cmd_task_changes}[args.command](args)
     if args.command == "statistics-page":
         from .statistics import statistics_page, StatisticsError
         try:

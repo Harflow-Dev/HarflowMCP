@@ -143,29 +143,7 @@ class GitProbe:
         if not git_dir or not common or not worktree or object_format not in ("sha1", "sha256"):
             return None
         with tempfile.TemporaryDirectory(prefix="harflow_mcp-git-observation-") as directory:
-            isolated = Path(directory)
-            (isolated / "objects").symlink_to(Path(common) / "objects", target_is_directory=True)
-            (isolated / "refs").symlink_to(Path(common) / "refs", target_is_directory=True)
-            for source, name in ((Path(git_dir) / "HEAD", "HEAD"), (Path(common) / "packed-refs", "packed-refs")):
-                if source.exists():
-                    descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK)
-                    with os.fdopen(descriptor, "rb") as metadata:
-                        if not stat.S_ISREG(os.fstat(metadata.fileno()).st_mode):
-                            raise ValueError("Git metadata is not a regular file")
-                        if name == "HEAD":
-                            data = metadata.read(MAX_OUTPUT + 1)
-                            if len(data) > MAX_OUTPUT:
-                                raise ValueError("HEAD metadata exceeds input limit")
-                            (isolated / name).write_bytes(data)
-                        else:
-                            # Large packed ref databases are inputs, not retained output. Let
-                            # Git read them under the subprocess time/output ceiling, just as
-                            # it reads the refs and objects symlinked above.
-                            (isolated / name).symlink_to(source)
-            config = "[core]\nrepositoryformatversion = 0\nbare = false\n"
-            if object_format == "sha256":
-                config = "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = sha256\n"
-            (isolated / "config").write_text(config)
+            build_isolated_git_dir(Path(directory), git_dir, common, object_format)
             environment = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
                            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
                            "GIT_CONFIG_PARAMETERS": "", "GIT_COMMON_DIR": directory,
@@ -173,6 +151,37 @@ class GitProbe:
             return self.read("--git-dir=" + directory, "--work-tree=" + worktree, "status",
                              "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all",
                              environment=environment)
+
+
+def build_isolated_git_dir(isolated: Path, git_dir: str, common: str, object_format: str) -> None:
+    """Populate `isolated` (an existing empty directory) as a disposable Git directory.
+
+    Objects and refs are linked from the common directory, `HEAD` (checked as a regular file) comes from
+    `git_dir`, and the configuration is minimal, so no repository, global or system config, hook or
+    filter driver applies. Callers add their own index and environment.
+    """
+    (isolated / "objects").symlink_to(Path(common) / "objects", target_is_directory=True)
+    (isolated / "refs").symlink_to(Path(common) / "refs", target_is_directory=True)
+    for source, name in ((Path(git_dir) / "HEAD", "HEAD"), (Path(common) / "packed-refs", "packed-refs")):
+        if source.exists():
+            descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as metadata:
+                if not stat.S_ISREG(os.fstat(metadata.fileno()).st_mode):
+                    raise ValueError("Git metadata is not a regular file")
+                if name == "HEAD":
+                    data = metadata.read(MAX_OUTPUT + 1)
+                    if len(data) > MAX_OUTPUT:
+                        raise ValueError("HEAD metadata exceeds input limit")
+                    (isolated / name).write_bytes(data)
+                else:
+                    # Large packed ref databases are inputs, not retained output. Let
+                    # Git read them under the subprocess time/output ceiling, just as
+                    # it reads the refs and objects symlinked above.
+                    (isolated / name).symlink_to(source)
+    config = "[core]\nrepositoryformatversion = 0\nbare = false\n"
+    if object_format == "sha256":
+        config = "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = sha256\n"
+    (isolated / "config").write_text(config)
 
 
 def empty_baseline() -> dict[str, Any]:

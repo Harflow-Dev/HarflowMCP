@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -866,54 +866,119 @@ tightly. Capability `task-successors.v1`; an older engine answers the flag with 
 is "unsupported". MCP `list_task_page(predecessor_task_id=...)` is unchanged. Examples:
 `contracts/v1/ctl-task-page-successors-*.json`.
 
-### Proposed, not implemented: `task-changes`
-
-Decided direction (owner, 2026-11-03): stored, bounded diffs, implemented in a separate session after
-capture settles. Nothing below exists yet: there is no command, capability, fixture or stored data.
-The contract is written down so the implementation session starts from it.
+### Stored task changes (`task-changes.v1`)
 
 ```bash
-harflow-ctl task-changes TASK_ID [--repository-root R] [--path-b64 P] [--cursor C] [--limit N] --json
+harflow-ctl task-changes TASK_ID [--limit N] [--cursor C] --json
+harflow-ctl task-changes TASK_ID --repository-root R --scope committed_range|working_tree --path-b64 P [--cursor C] --json
 ```
 
-Capability `task-changes.v1`; direct callers only, same authority as the reads above.
+Capability `task-changes.v1`; read-only. Authority is the direct-caller gate of the reads above,
+decided before the id is resolved (`agent_caller`, `caller_undecidable`), then the same guarded
+resolution as `status` (`resolved_from`, `unknown_task`, `task_pending_launch`). Usage errors come
+first: `--json` is required; `--limit` is 1..500 (default 200); `--repository-root`, `--scope` and
+`--path-b64` (standard base64 of the row's path bytes) come together or not at all; the three are a
+usage error with `--cursor` or with `--limit`. Diff text can contain secrets and the user's own
+uncommitted edits; no redaction is claimed, which is why only direct callers read it. MCP has no
+equivalent. Examples: `contracts/v1/ctl-task-changes-*.json` (the `text-chunk` fixtures are generated
+with a lowered document bound so that a small patch pages; the real bound is 262144 bytes).
 
-- **Capture** happens once, after settlement (after `task_finished` and `Task.done`), as a bounded
-  background step of 2 seconds per task and at most 8 repositories, with streaming and termination
-  bounds. It never delays settlement and never alters the existing `outcome` fields. Until the file
-  lands a repository is `pending`; a timeout makes it `incomplete`. A change to the checkout between
-  settlement and capture is a disclosed race: the terminal head commit is pinned, but the working-tree
-  scope reflects capture time and carries its own `observed_at`.
-- **Isolation**: a new hardened diff path, not `GitProbe.read()`. It reuses the disposable git
-  directory of `GitProbe.status()` (objects and refs linked, `HEAD` checked as a regular file,
-  minimal config, original index), extracted as a shared helper, because environment variables
-  cannot suppress repository config or attribute filters. It adds `--no-ext-diff --no-textconv
-  --no-color`, `-c core.quotepath=false -c diff.noprefix=false -c diff.renames=false`, disabled
-  filters, fsmonitor and hooks, literal pathspecs and no remote.
-- **Scopes per repository**: `committed_range` is a two-dot tree diff between the pinned observed
-  commits `base_commit` and `head_commit` (`not_captured` with a reason if the base is missing or not
-  an ancestor); `working_tree` is the terminal working tree against the pinned terminal head. Untracked
-  files are names only (`status: untracked`, `content: not_captured`). Working-tree counts and patches
-  are separate observations that may disagree, and the scope says so.
-- **Rows**: `{path, old_path, status, additions, deletions, binary, content}`. Paths are UTF-8 strings
-  when valid, otherwise `path_bytes_b64`. Renames are off; unmerged entries have `status: unmerged`;
-  submodules have `status: submodule` and no text.
-- **Provenance per repository**: `base_commit`, `base_provenance` (dispatch, replaced and why,
-  first seen mid-run), `head_commit`, `observed_at`, `baseline_dirty` (`true`, `false` or `unknown`) and
-  the fixed `attribution: "Observed repository differences; not evidence of task authorship."`. A
-  shared checkout's working-tree scope includes other writers' and pre-existing changes.
-- **Limits**: at most 500 rows per scope (then `rows_truncated`); text is allocated in sorted-path
-  order, at most 64 KiB per file and 1 MiB per task, after which `content` is `omitted_size`; each page
-  is at most 262144 bytes including JSON escaping, and text is chunked by cursor so that each page fits.
-- **Storage**: one private file `{task_id}.changes.json` (0600, atomic publication), swept by
-  retention's `{task_id}.*` pattern. This is new data at rest and includes the user's pre-existing
-  dirty edits. Diff text can contain secrets; read authority is direct callers only and no redaction
-  is claimed.
-- **States**: repository `pending | available | incomplete | unavailable | not_captured`; file content
-  `available | truncated | binary | omitted_size | not_captured`; distinct reason codes; an empty diff
-  is `available` with zero rows.
-- Tests must cover malicious filters, external diff, textconv, symlinked paths and submodules in
-  isolated repositories.
+**Capture.** The owner that supervises the task captures once, after the task and its launch receipt
+have settled, only when the task has an observed exit and its persisted `outcome.repositories` is not
+empty. It runs while the owner still holds its locks, bounded by one 2-second monotonic deadline per
+task and at most 8 repositories, so settlement and `outcome` never wait for it and are never
+changed; recovery sees the task as locked for that short window. Tasks run in-process by tests, and
+tasks recovered after their owner died, are not captured. A continuation is its own supervised task
+(its own launch, owner and capture). Inputs are only the persisted `repository_root`, `worktree`,
+`git_common_dir`, `base_commit`, `head_commit`, `base_provenance` and the baseline's
+`working_tree_status`; a change to the checkout between settlement and capture is a disclosed race:
+the commits are pinned, the working-tree scope reflects capture time and carries its own `observed_at`.
+
+**Isolation.** Git never runs inside the agent-writable tree to find its Git directory, and never
+with a repository's own configuration. The per-worktree Git directory is proven from files (a linked
+worktree's `.git` file, the admin directory's `commondir` and `gitdir`; a main checkout's real `.git`
+directory), else the working-tree scope is `not_captured` / `git_dir_unverified` and the committed
+scope still runs. Every command uses a disposable Git directory (objects and refs linked, `HEAD`
+checked as a regular file, minimal config), replace objects off, no system or global config, no
+hooks, fsmonitor, external diff, textconv or filter drivers, literal pathspecs and no network;
+submodules are never entered. The working tree is read through a private copy of the index (a split
+index's shared part is copied too); the original index is never touched. The copy is refreshed so
+stat-only differences are not reported; if that fails the working-tree scope is `incomplete` /
+`index_refresh_failed` with no rows.
+
+**Scopes.** Per repository, `committed_range` is the two-dot tree diff from `base_commit` to
+`head_commit`; `working_tree` is the working tree against the pinned `head_commit`, plus untracked
+files. `committed_range` is `not_captured` with `head_missing`, `base_missing` (no recorded base, or
+the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`,
+`git_dir_unverified`, `index_too_large` (over 32 MiB), `index_unsupported` (an unreadable or
+unsupported index) or `index_unreadable`. Working-tree counts and patches are separate observations
+and may disagree (`counts_and_patch_separate: true`).
+
+**Rows** (at most 500 per scope including untracked, then `rows_truncated`; sorted by path bytes):
+`path` (UTF-8) or `path_bytes_b64`, `path_truncated`, `old_path` (always `null`: renames are off,
+so a rename is a deletion and an addition), `status` (`added`, `modified`, `deleted`, `typechange`,
+`unmerged`, `submodule`, `untracked`, `unknown`), `additions` and `deletions` (`null` for binary),
+`binary` and `content {state, reason, bytes}`. Paths over 4096 bytes keep a truncated form with
+`content` `not_captured` / `path_too_long`. Symlinks are never followed: their text is the link-target
+diff. Content `state` and `reason`: `available`; `truncated` (`file_limit` over 64 KiB, `task_limit`
+when the 1 MiB task allowance ran out, or the stream cause below); `binary`; `omitted_size`
+(`task_limit`); `not_captured` with `untracked`, `submodule`, `unmerged`, `path_too_long`,
+`patch_alignment_failed`, `patch_failed`, `capture_timeout` or `output_ceiling`. Text is allocated in
+sorted-path order across repositories, then scopes (`committed_range` first).
+
+**States.** Scope and repository `state` is `available | incomplete | unavailable | not_captured`,
+with a `reason`. A repository is `unavailable` when all its scopes are, `incomplete` when any scope is
+`incomplete` or `unavailable`, `not_captured` when all are, else `available`. Three causes are
+distinct: retained-text limits change only a row (the scope stays `available`); the deadline makes the
+scope `incomplete` / `capture_timeout`; the 8 MiB per-command output ceiling makes it `incomplete` /
+`output_ceiling` (a partial patch is kept only as `truncated`). A repository not started before the
+deadline is `incomplete` / `budget_exhausted`; one whose directory is gone is `unavailable` /
+`repository_unavailable`; a failure confined to one repository is `unavailable` / `capture_error`.
+Other scope reasons: `git_failed`, `listing_unparsable`, `patch_alignment_failed`, `patch_failed`,
+`spawn_failed`. An empty diff is `available` with zero rows. Provenance per repository:
+`repository_root`, `worktree`, `git_common_dir`, `base_commit`, `base_provenance`, `head_commit`,
+`observed_at`, `baseline_dirty` (`true`, `false` or `"unknown"`) and the fixed
+`attribution: "Observed repository differences; not evidence of task authorship."`; a shared
+checkout's working-tree scope includes other writers' and pre-existing changes.
+
+**Result, listing mode** (no selectors): `{task_id, mode: "list", capture: {state, reason}, repositories,
+limit, has_more, next_cursor, observed_at}`. Each repository carries its provenance, `state`, `reason`
+and `scopes` (`state`, `reason`, `row_count`, `rows_truncated`, `observed_at`, `rows` for this page).
+Rows are filled in repository, scope, path order until `--limit` or the 262144-byte document bound
+(including a `resolved_from` reserve), at least one per page. `capture.state` is `available`
+(`reason` null, or `no_repository`), `incomplete` (a repository was incomplete or unavailable),
+`unavailable` (`capture_error`, `capture_too_large`, or `changes_document_invalid` for a stored file
+that fails validation or the 8 MiB cap), `pending` or `not_captured`.
+
+**Result, text mode** (selectors, or a cursor from text mode): `{task_id, mode: "text", capture,
+repository_root, scope, path | path_bytes_b64, path_truncated, status, additions, deletions, binary,
+content, text, text_b64, offset, returned_bytes, total_bytes, has_more, next_cursor, observed_at}`.
+The stored patch is judged as a whole: `text` when it is valid UTF-8 (chunks cut on character
+boundaries) else `text_b64`; the other key is `null`. Offsets are bytes of the stored text; a row
+without stored text answers empty text with its `content` state. An unknown repository, scope or path
+(or no stored document) is `changes_entry_not_found`.
+
+**Cursors** are opaque (at most 2048 characters) and bind the task, the mode, the stored document's
+sha256 and a compact entry position plus offset. A malformed cursor, one for another task or one that
+does not address a stored row is `changes_cursor_invalid`. A cursor whose stored document changed,
+disappeared or became unreadable, or from another generation, is `changes_cursor_expired` with
+`data.reload: "first"`: start again without a cursor.
+
+**Capture state before a document exists**, from evidence: the task is not terminal, `pending` /
+`task_running`; its outcome was never observed (`outcome_unobserved`, lost with its owner, recovered as
+failed), `not_captured` / `outcome_unobserved`; observed terminal without outcome repositories,
+`available` / `no_repository`; otherwise by the supervising owner named in the launch receipt: dead,
+`not_captured` / `capture_missing`; alive, `pending` / `capture_settling`; undecidable or no receipt, a
+30 second grace on `finished_at` (`pending` / `capture_settling`, then `not_captured` /
+`capture_missing`). `capture_missing` also covers a capture that was not published because the task's
+record lock stayed busy (record writers hold it too) or the record was gone or replaced.
+
+**Storage.** One private file `{task_id}.changes.json` (0600; format `harflow.task-changes`, `v: 1`;
+patch text as base64), published atomically under `{task_id}.lock` after re-checking the record's
+identity, swept by retention's `{task_id}.*` pattern (an orphaned temporary file is never read as the
+document). Above 8 MiB a small `unavailable` / `capture_too_large` document is stored instead; any
+other failure stores `unavailable` / `capture_error`. A client requires `task-changes.v1` on the
+fresh handshake; an older engine answers the command with a usage error, which is "unsupported".
 
 ## Recent usage-limit hits
 

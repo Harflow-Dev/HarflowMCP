@@ -7,11 +7,13 @@ MCP server.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 from pathlib import Path
 from typing import Any
 
-from . import event_pages, id_resolution, store, task_event_read, task_prompt_read
+from . import event_pages, id_resolution, store, task_changes_read, task_event_read, task_prompt_read
 from .events import EVENT_KINDS
 from .wire_contracts import CTL_FORMAT, envelope
 
@@ -20,6 +22,9 @@ def validate_arguments(args: argparse.Namespace, parser: argparse.ArgumentParser
     """Usage errors, which precede every other refusal."""
     if not args.json:
         parser.error(f"{args.command} requires --json")
+    if args.command == "task-changes":
+        _validate_changes(args, parser)
+        return
     if args.command == "task-prompt":
         if not 1 <= args.max_bytes <= task_prompt_read.MAX_MAX_BYTES:
             parser.error(f"--max-bytes must be 1..{task_prompt_read.MAX_MAX_BYTES}")
@@ -32,6 +37,24 @@ def validate_arguments(args: argparse.Namespace, parser: argparse.ArgumentParser
         if unknown:
             parser.error("unknown event kinds: " + ", ".join(repr(kind) for kind in unknown))
         args.kinds = kinds
+
+
+def _validate_changes(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    selectors = (args.repository_root, args.scope, args.path_b64)
+    if any(value is not None for value in selectors) and any(value is None for value in selectors):
+        parser.error("--repository-root, --scope and --path-b64 must be given together")
+    selected = args.repository_root is not None
+    if selected and args.cursor is not None:
+        parser.error("--cursor cannot be combined with --repository-root, --scope and --path-b64")
+    if selected and args.limit is not None:
+        parser.error("--limit cannot be combined with --repository-root, --scope and --path-b64")
+    if args.limit is not None and not 1 <= args.limit <= task_changes_read.MAX_LIMIT:
+        parser.error(f"--limit must be 1..{task_changes_read.MAX_LIMIT}")
+    if selected:
+        try:
+            args.path_bytes = base64.b64decode(args.path_b64, validate=True)
+        except (binascii.Error, ValueError):
+            parser.error("--path-b64 must be valid base64")
 
 
 def _print(result: dict[str, Any], resolution: id_resolution.Resolution) -> int:
@@ -87,3 +110,20 @@ def cmd_task_prompt(args: argparse.Namespace) -> int:
         return found
     resolution, record = found
     return _print(task_prompt_read.task_prompt_result(ctl.default_log_dir(), record, args.max_bytes), resolution)
+
+
+def cmd_task_changes(args: argparse.Namespace) -> int:
+    from . import ctl
+    found = _record(args)
+    if isinstance(found, int):
+        return found
+    resolution, record = found
+    selector = (task_changes_read.Selector(args.repository_root, args.scope, args.path_bytes)
+                if args.repository_root is not None else None)
+    try:
+        result = task_changes_read.task_changes_result(
+            ctl.default_log_dir(), record, cursor=args.cursor,
+            limit=args.limit if args.limit is not None else task_changes_read.DEFAULT_LIMIT, selector=selector)
+    except task_changes_read.ChangesRefusal as exc:
+        return ctl._fail(args, exc.code, str(exc), exc.data)
+    return _print(result, resolution)

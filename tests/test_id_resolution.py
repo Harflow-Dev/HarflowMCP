@@ -676,7 +676,7 @@ CTL_RESOLVED = {
     ("approval-respond", "task_id"), ("cancel", "task_id"), ("cancel-message", "task_id"), ("continue", "task_id"),
     ("launch-settle", "--task-id"), ("recovery-activity", "task_id"), ("resume", "task_id"), ("send", "task_id"),
     ("status", "task_id"), ("status-batch", "--task-ids"), ("takeover", "task_id"), ("takeover-attach", "task_id"),
-    ("task-artifacts", "task_id"), ("task-events", "task_id"), ("task-list-page", "--predecessor-task-id"), ("task-list-page", "--task-ids"),
+    ("task-artifacts", "task_id"), ("task-changes", "task_id"), ("task-events", "task_id"), ("task-list-page", "--predecessor-task-id"), ("task-list-page", "--task-ids"),
     ("task-prompt", "task_id"),
     ("workflow-abandon-dispatch", "task_id"), ("workflow-abandon-dispatch", "workflow_run_id"),
     ("workflow-artifacts", "--task-id"), ("workflow-artifacts", "workflow_run_id"),

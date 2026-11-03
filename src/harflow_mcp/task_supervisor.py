@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -21,6 +22,7 @@ from .tasks import TaskRegistry, _before_spawn
 from .task_supervision import MAX_REQUEST, mark, read_launch
 from . import resources as resource_ledger
 from . import task_resources
+from . import task_changes_capture
 from datetime import datetime, timedelta, timezone
 
 
@@ -36,6 +38,8 @@ def restore_group_report_observations(prepared):
         if field in prepared:
             prepared[field] = freeze(prepared[field])
 
+
+log = logging.getLogger(__name__)
 
 REAP_INTERVAL_SECONDS = 2.0
 
@@ -200,6 +204,20 @@ def _release_followups(log_dir, task_id: str, request: dict, outcome: str) -> No
         pass
 
 
+async def _capture_changes(log_dir, task) -> None:
+    """Store the settled task's repository differences (`task-changes`), after settlement.
+
+    Runs while the supervisor still holds the launch lock and the state-session lease, bounded by the
+    capture's own deadline. A failure is contained: it never reaches the supervisor's error path.
+    """
+    try:
+        await asyncio.to_thread(task_changes_capture.capture_task_changes, log_dir, task.task_id)
+    except (asyncio.CancelledError, StateOwnershipError):
+        raise
+    except Exception:
+        log.warning('changes capture failed for task %s', task.task_id, exc_info=True)
+
+
 async def run(descriptor: int, task_id: str, generation: str):
     # No durable file can authorize execution. EOF before a complete bounded request refuses it.
     with os.fdopen(descriptor, 'rb') as handle:
@@ -291,6 +309,9 @@ async def run(descriptor: int, task_id: str, generation: str):
                 if (task.exit_code is not None and task.finished_at is not None
                         and task.status in store.TERMINAL_RECORD_STATUSES and task.latest_record_landed):
                     mark(registry.log_dir, task_id, generation, state='settled', continuation_scheduling='settled')
+                # Stored diffs are captured only after settlement, so neither the receipt nor `outcome` waits for them.
+                if task.exit_code is not None and task.latest_record_landed:
+                    await _capture_changes(registry.log_dir, task)
             except BaseException as exc:
                 # A record or ambiguous process creation means execution can never safely retry.
                 if not started and store.read(registry.log_dir, task_id) is None and getattr(exc, 'harflow_not_started', False):

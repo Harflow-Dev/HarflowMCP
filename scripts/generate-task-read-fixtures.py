@@ -5,7 +5,7 @@
     uv run python scripts/generate-task-read-fixtures.py --check    # fail if contracts/v1 differs from fresh, isolated runs
 
 Owns only the fixtures named by the prefixes in `PREFIXES` (task events, task prompts, successor discovery,
-live workflow node activity and statistics cost), plus their manifest entries; every other
+live workflow node activity, statistics cost and stored task changes), plus their manifest entries; every other
 file named in the manifest is verified against its recorded hash and left alone. Each document is the output of
 `ctl.main` against an isolated HOME and state root. Event logs are written by the production `EventLog` writer;
 task records by `store.write`. Controlled facts: the wall clock (event stamps, `observed_at`, the settling
@@ -34,6 +34,7 @@ EVENTS_CAPABILITY, PROMPT_CAPABILITY = "task-event-page.v1", "task-prompt.v1"
 SUCCESSORS_CAPABILITY = "task-successors.v1"
 LIVE_ACTIVITY_CAPABILITY = "workflow-live-activity.v1"
 COST_MODEL_CAPABILITY = "statistics-cost-model.v1"
+CHANGES_CAPABILITY = "task-changes.v1"
 # The fixture-name prefix each capability's documents are written under.
 PREFIXES = {
     EVENTS_CAPABILITY: "ctl-task-events-",
@@ -41,6 +42,7 @@ PREFIXES = {
     SUCCESSORS_CAPABILITY: "ctl-task-page-successors-",
     LIVE_ACTIVITY_CAPABILITY: "ctl-workflow-inspect-live-",
     COST_MODEL_CAPABILITY: "ctl-statistics-page-cost-",
+    CHANGES_CAPABILITY: "ctl-task-changes-",
 }
 EPOCH = 1_792_000_000.0
 OWNER = {"pid": 5678, "start_time": "bridge-start", "markers": []}
@@ -64,7 +66,7 @@ class World:
     # --- environment ------------------------------------------------------------------------------------
 
     def enter(self, stack: contextlib.ExitStack) -> None:
-        from harflow_mcp import ctl, event_pages, events, identity, lineage, state_ownership, store, takeover, task_event_read
+        from harflow_mcp import ctl, event_pages, events, identity, lineage, state_ownership, store, takeover, task_changes_read, task_event_read
         from harflow_mcp.state_layout import resolve_layout
         self.ctl, self.events, self.store, self.takeover, self.lineage = ctl, events, store, takeover, lineage
         self.real_refusal = takeover.caller_refusal
@@ -78,6 +80,7 @@ class World:
         stamp = lambda: datetime.fromtimestamp(self.now, timezone.utc)
         stack.enter_context(mock.patch.object(events, "_now_iso", lambda: stamp().isoformat()))
         stack.enter_context(mock.patch.object(task_event_read, "_now", stamp))
+        stack.enter_context(mock.patch.object(task_changes_read, "_now", stamp))
         stack.enter_context(mock.patch.object(event_pages, "identity_of", lambda info: (1, 1)))
         stack.enter_context(mock.patch.object(identity, "identity_check", lambda value: "alive" if value == OWNER else "undecidable"))
         from harflow_mcp import catalog
@@ -244,6 +247,7 @@ def build(world: World) -> None:
 
     build_successors(world)
     build_live_activity(world)
+    build_changes(world)
     build_statistics_cost(world)
 
 
@@ -303,6 +307,101 @@ def build_live_activity(world: World) -> None:
     world.call("reserved-attempt", "workflow-inspect", run_id, "reserved-node", "--view", "activity", capability=cap)
     world.call("no-attempt", "workflow-inspect", run_id, "waiting-node", "--view", "activity", capability=cap)
     world.call("agent-caller-settled-only", "workflow-inspect", run_id, "live-node", "--view", "activity", capability=cap, agent_caller=True)
+
+
+def build_changes(world: World) -> None:
+    """Stored task changes. The documents are seeded (capture itself is tested against real repositories),
+    so the fixtures need no Git; paths and commits are synthetic."""
+    import base64
+    from harflow_mcp.wire_contracts import PRODUCT, PRODUCT_VERSION
+    from harflow_mcp import id_resolution, task_changes_capture, task_changes_document as shape, task_changes_read, task_resources, task_supervision
+    cap = CHANGES_CAPABILITY
+    stamp = world.iso(-50.0)
+    sha = lambda digit: digit * 40
+
+    def row(path, text=None, *, status="modified", additions=1, deletions=0, state=None, reason=None, binary=False):
+        content = state or ("available" if text else "not_captured")
+        value = {"path": path, "path_bytes_b64": None, "path_truncated": False, "old_path": None, "status": status,
+                 "additions": additions, "deletions": deletions, "binary": binary,
+                 "content": {"state": content, "reason": reason, "bytes": len(text) if text else 0}}
+        if text:
+            value["text_b64"] = base64.b64encode(text).decode("ascii")
+        return value
+
+    def scope(name, rows, **extra):
+        value = {"state": "available", "reason": None, "row_count": len(rows), "rows_truncated": False, "observed_at": stamp,
+                 "rows": rows, **extra}
+        if name == "working_tree":
+            value["counts_and_patch_separate"] = True
+        return value
+
+    def repository(root, committed, working, **extra):
+        return {"repository_root": root, "worktree": root, "git_common_dir": root + "/.git", "base_commit": sha("a"),
+                "base_provenance": "dispatch", "head_commit": sha("b"), "observed_at": stamp, "baseline_dirty": False,
+                "attribution": shape.ATTRIBUTION, "state": "available", "reason": None,
+                "scopes": {"committed_range": scope("committed_range", committed), "working_tree": scope("working_tree", working)}, **extra}
+
+    def store_document(task_id, repositories, capture=None):
+        document = {"product": PRODUCT, "product_version": PRODUCT_VERSION, "format": shape.FORMAT, "v": 1, "task_id": task_id,
+                    "captured_at": stamp, "capture": capture or {"state": "available", "reason": None}, "repositories": repositories}
+        shape.validate(document, task_id)
+        (world.tasks / f"{task_id}{shape.SUFFIX}").write_bytes(task_changes_capture.serialize(document))
+
+    outcome = {"repositories": [{"repository_root": WORKSPACE}]}
+    patch = b"diff --git a/src/app.py b/src/app.py\nindex 1111111..2222222 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,2 @@\n print('a')\n+print('b')\n"
+    world.task("task-changes-available", outcome=outcome)
+    store_document("task-changes-available", [repository(
+        WORKSPACE, [row("README.md", b"diff --git a/README.md b/README.md\n+hello\n", status="added"), row("src/app.py", patch),
+                    row("assets/logo.png", status="added", additions=None, deletions=None, state="binary", binary=True)],
+        [row("src/app.py", patch), row("notes.txt", status="untracked", additions=None, deletions=None, state="not_captured", reason="untracked")])])
+    first = world.call("available-listing", "task-changes", "task-changes-available", "--limit", "2", capability=cap)
+    world.call("listing-next-page", "task-changes", "task-changes-available", "--cursor", first["next_cursor"], capability=cap)
+    selection = ("--repository-root", WORKSPACE, "--scope", "committed_range", "--path-b64", base64.b64encode(b"src/app.py").decode())
+    world.call("text-complete", "task-changes", "task-changes-available", *selection, capability=cap)
+    # Chunking is driven by the 262144-byte document bound; the fixture lowers it so a small patch needs several pages.
+    with mock.patch.object(task_changes_read, "DOCUMENT_MAX_BYTES", 1100):
+        chunk = world.call("text-chunk", "task-changes", "task-changes-available", *selection, capability=cap)
+        assert chunk["has_more"], chunk
+        world.call("text-chunk-next", "task-changes", "task-changes-available", "--cursor", chunk["next_cursor"], capability=cap)
+    expired = first["next_cursor"]
+    store_document("task-changes-available", [repository(WORKSPACE, [row("README.md", b"diff\n")], [])])
+    world.call("cursor-expired", "task-changes", "task-changes-available", "--cursor", expired, capability=cap)
+    world.call("cursor-invalid", "task-changes", "task-changes-available", "--cursor", "not-a-cursor", capability=cap)
+    world.call("entry-not-found", "task-changes", "task-changes-available", "--repository-root", WORKSPACE, "--scope", "working_tree",
+               "--path-b64", base64.b64encode(b"missing").decode(), capability=cap)
+
+    incomplete = repository(WORKSPACE, [row("big.txt", b"diff --git a/big.txt b/big.txt\n+partial\n", state="truncated", reason="capture_timeout")], [],
+                            state="incomplete", reason="capture_timeout")
+    incomplete["scopes"]["committed_range"].update(state="incomplete", reason="capture_timeout")
+    world.task("task-changes-incomplete", outcome=outcome)
+    store_document("task-changes-incomplete", [incomplete], {"state": "incomplete", "reason": "capture_timeout"})
+    world.call("incomplete", "task-changes", "task-changes-incomplete", capability=cap)
+    world.task("task-changes-unavailable", outcome=outcome)
+    store_document("task-changes-unavailable", [], {"state": "unavailable", "reason": "capture_error"})
+    world.call("unavailable", "task-changes", "task-changes-unavailable", capability=cap)
+    world.task("task-changes-invalid", outcome=outcome)
+    (world.tasks / f"task-changes-invalid{shape.SUFFIX}").write_text("{ not a changes document")
+    world.call("document-invalid", "task-changes", "task-changes-invalid", capability=cap)
+
+    world.task("task-changes-running", status="running", drained=False, finished=None, pid=9999, outcome=None)
+    world.call("pending-running", "task-changes", "task-changes-running", capability=cap)
+    world.task("task-changes-settling", finished=-5.0, outcome=outcome)
+    world.call("pending-settling", "task-changes", "task-changes-settling", capability=cap)
+    world.task("task-changes-missing", finished=-300.0, outcome=outcome)
+    world.call("not-captured-missing", "task-changes", "task-changes-missing", capability=cap)
+    world.task("task-changes-unobserved", status="failed", finished=-300.0, outcome=outcome)
+    world.call("not-captured-unobserved", "task-changes", "task-changes-unobserved", capability=cap)
+    world.task("task-changes-none", outcome={"repositories": []})
+    world.call("no-repository", "task-changes", "task-changes-none", capability=cap)
+
+    world.call("unknown-task", "task-changes", "task-changes-nothing", capability=cap)
+    world.call("direct-caller-refused", "task-changes", "task-changes-available", capability=cap, undecidable=True)
+    world.task("task-changes-pending", status="running", drained=False, finished=None)
+    with mock.patch.object(id_resolution, "resolve_task", lambda *a, **k: id_resolution.Resolution("task-changes-pending", None)), \
+            mock.patch.object(world.store, "read", lambda *a, **k: None), \
+            mock.patch.object(task_supervision, "read_launch", lambda *a: {"state": "waiting_for_resources"}), \
+            mock.patch.object(task_resources, "is_pending_kind", lambda receipt: True):
+        world.call("pending-launch", "task-changes", "task-changes-pending", capability=cap)
 
 
 def build_statistics_cost(world: World) -> None:

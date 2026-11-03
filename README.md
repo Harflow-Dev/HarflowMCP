@@ -152,6 +152,7 @@ on the version-info handshake before using either command. See [task event pages
 continuations (capability `task-successors.v1`; see [successor discovery](docs/contracts.md#successor-discovery-task-successorsv1)).
 A verified direct caller can also read the activity of a running workflow node with `harflow-ctl workflow-inspect --view activity`
 (capability `workflow-live-activity.v1`; see [live node activity](docs/contracts.md#live-workflow-node-activity-workflow-live-activityv1)).
+`harflow-ctl task-changes TASK_ID --json` returns the repository differences captured when a task settled (committed range and working tree, bounded rows and patch text; capability `task-changes.v1`; see [stored task changes](docs/contracts.md#stored-task-changes-task-changesv1)). The text can contain secrets or uncommitted edits, so only verified direct callers can read it.
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at
