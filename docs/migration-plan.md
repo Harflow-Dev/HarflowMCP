@@ -53,9 +53,10 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
 
 ## C0 — contract and conformance foundations
 
-- [ ] C0-MC-01 Specify and fixture necessary additive event paging, status and
+- [x] C0-MC-01 Specify and fixture necessary additive event paging, status and
       read gaps, including bounded pages, cursor expiry, retention gaps, drain
-      and change semantics.
+      and change semantics. The [S04 receipt](migration-receipts/S04.md) supplies
+      the final evidence; G-DIFF implementation and recorded read gaps remain.
 - [ ] C0-MC-02 Specify version handshake and validate compatibility and unknown
       optional fields without breaking existing v1 consumers.
 - [ ] C0-MC-03 Fixture ctl unknown/exit behavior and run/resume payloads; capture
