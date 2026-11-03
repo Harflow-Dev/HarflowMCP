@@ -125,3 +125,22 @@ def duration(start: float, end: float, intervals=()) -> dict:
     wait = sum(b - a for a, b in merged)
     return {"elapsed_seconds": end - start, "execution_seconds": end - start - wait,
             "wait_seconds": wait, "time_qualification": "qualified_waits" if merged else "elapsed_may_include_waits"}
+
+
+def cost_value(value: Any) -> float | None:
+    """A reported dollar cost as a finite non-negative float, else None; unknown never becomes zero."""
+    if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+        return float(value)
+    return None
+
+
+def observed_model_value(value: Any) -> dict | None:
+    """`{model, provenance}` with bounded strings (`model` may be None for a disagreeing stream), else None."""
+    if type(value) is not dict:
+        return None
+    model, provenance = value.get("model"), value.get("provenance")
+    if type(provenance) is not str or not 1 <= len(provenance) <= 128:
+        return None
+    if model is not None and (type(model) is not str or not 1 <= len(model) <= 256):
+        return None
+    return {"model": model, "provenance": provenance}

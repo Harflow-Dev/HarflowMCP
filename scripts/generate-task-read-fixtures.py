@@ -9,7 +9,7 @@ live workflow node activity and statistics cost), plus their manifest entries; e
 file named in the manifest is verified against its recorded hash and left alone. Each document is the output of
 `ctl.main` against an isolated HOME and state root. Event logs are written by the production `EventLog` writer;
 task records by `store.write`. Controlled facts: the wall clock (event stamps, `observed_at`, the settling
-grace), the catalog identity that task-page cursors bind to, process liveness (`identity.identity_check`, `store.record_process_alive`, `identity.own_identity`), the file identity cursors bind to (device and inode) and
+grace), the catalog identity that task-page cursors bind to, the statistics clock and source witnesses (inode and ctime, for the statistics fixture only), process liveness (`identity.identity_check`, `store.record_process_alive`, `identity.own_identity`), the file identity cursors bind to (device and inode) and
 the record file's mtime, none of which can be reproduced across machines. The temporary base directory never
 appears in a document.
 """
@@ -33,12 +33,14 @@ FIXTURES = ROOT / "contracts" / "v1"
 EVENTS_CAPABILITY, PROMPT_CAPABILITY = "task-event-page.v1", "task-prompt.v1"
 SUCCESSORS_CAPABILITY = "task-successors.v1"
 LIVE_ACTIVITY_CAPABILITY = "workflow-live-activity.v1"
+COST_MODEL_CAPABILITY = "statistics-cost-model.v1"
 # The fixture-name prefix each capability's documents are written under.
 PREFIXES = {
     EVENTS_CAPABILITY: "ctl-task-events-",
     PROMPT_CAPABILITY: "ctl-task-prompt-",
     SUCCESSORS_CAPABILITY: "ctl-task-page-successors-",
     LIVE_ACTIVITY_CAPABILITY: "ctl-workflow-inspect-live-",
+    COST_MODEL_CAPABILITY: "ctl-statistics-page-cost-",
 }
 EPOCH = 1_792_000_000.0
 OWNER = {"pid": 5678, "start_time": "bridge-start", "markers": []}
@@ -86,6 +88,14 @@ class World:
             # Cursors are bound to a digest of the catalog directory, which is a temporary path here.
             catalog_self.identity = "fixture-catalog0"
         stack.enter_context(mock.patch.object(catalog.Catalog, "__init__", pinned_catalog))
+        from harflow_mcp import statistics
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(EPOCH, tz)
+        stack.enter_context(mock.patch.object(statistics, "datetime", FixedDatetime))
+        os.environ.pop("HARFLOW_RETENTION_DAYS", None)
         stack.enter_context(mock.patch.object(identity, "own_identity", lambda: {"pid": 4242, "start_time": "ctl-start", "markers": []}))
         stack.enter_context(mock.patch.object(store, "record_process_alive", lambda record: record.pid is not None))
         stack.enter_context(mock.patch.object(takeover, "caller_refusal", lambda *_: None))
@@ -234,6 +244,7 @@ def build(world: World) -> None:
 
     build_successors(world)
     build_live_activity(world)
+    build_statistics_cost(world)
 
 
 def build_successors(world: World) -> None:
@@ -292,6 +303,34 @@ def build_live_activity(world: World) -> None:
     world.call("reserved-attempt", "workflow-inspect", run_id, "reserved-node", "--view", "activity", capability=cap)
     world.call("no-attempt", "workflow-inspect", run_id, "waiting-node", "--view", "activity", capability=cap)
     world.call("agent-caller-settled-only", "workflow-inspect", run_id, "live-node", "--view", "activity", capability=cap, agent_caller=True)
+
+
+def build_statistics_cost(world: World) -> None:
+    import shutil
+    cap = COST_MODEL_CAPABILITY
+    # Statistics read every retained record: start from an empty store so the page covers only its own tasks.
+    for entry in world.tasks.iterdir():
+        entry.unlink() if entry.is_file() or entry.is_symlink() else shutil.rmtree(entry)
+    for entry in (world.base / ".harflow").glob("workflow-*"):
+        shutil.rmtree(entry)
+    reported = {"model": "observed-model", "provenance": "harness_initialization_event"}
+    world.task("cost-reported", model="requested-model", total_cost_usd=0.4321, observed_model=reported, started=-300.0)
+    world.task("cost-silent", model="requested-model", started=-200.0)
+    world.task("cost-mixed-model", model="requested-model", total_cost_usd=1.5, started=-100.0,
+               observed_model={"model": None, "provenance": "harness_initialization_event_mixed"})
+    # Source witnesses carry inode and ctime, which differ per machine; keep what a fixture can reproduce.
+    from harflow_mcp import statistics_index
+    patch = mock.patch.object(statistics_index, "witness", lambda info: [0, 0, info.st_mtime_ns, 0, info.st_size])
+    patch.start()
+    argv = ("statistics-page", "--since", world.iso(-86400.0), "--before", world.iso(86400.0), "--limit", "10")
+    for _ in range(10):  # the first reads only prepare the bounded derivative index
+        got = world.call(None, *argv, capability=cap)
+        if got.get("state") == "ready":
+            break
+    else:
+        raise SystemExit("the statistics index did not become ready")
+    world.call("reported-and-silent", *argv, capability=cap)
+    patch.stop()
 
 
 def finalize(world: World) -> tuple[dict[str, dict], dict[str, str]]:

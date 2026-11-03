@@ -419,6 +419,10 @@ class Accumulator:
     is_error: bool | None = None
     num_turns: int | None = None
     total_cost_usd: float | None = None
+    observed_model: dict[str, Any] | None = None
+    """The model the harness itself reported (`{"model": str | None, "provenance": str}`), never the
+    requested one. None when the backend reports none; `model` is None when the stream disagreed with
+    itself."""
     usage: dict[str, Any] | None = None
     denials: list[dict[str, Any]] = field(default_factory=list)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)

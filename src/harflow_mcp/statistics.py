@@ -63,6 +63,20 @@ def _confirm(index, sources, lower, upper, generation):
         raise StatisticsError("snapshot_expired", "Statistics cohort ownership changed during observation")
 
 
+def _cost_and_model(cost, observed, *, native):
+    """Cost and observed-model facts of one execution; unknown stays null, never zero.
+
+    A native execution carries no cost of its own (its transport's cost already includes the child's
+    work), so only task-backed rows are cost-additive.
+    """
+    cost = accounting.cost_value(cost)
+    observed = accounting.observed_model_value(observed)
+    return {"cost_usd": cost, "cost_provenance": "backend_reported" if cost is not None else None,
+            "cost_additive": not native and cost is not None,
+            "observed_model": observed["model"] if observed else None,
+            "observed_model_provenance": observed["provenance"] if observed else None}
+
+
 def _common(run, root, start, end, kind, identity):
     return {"id": identity, "kind": kind, "cohort_started_at": root.get("created_at", start) if root else start,
             "started_at": start, "finished_at": end, "status": run.get("status"),
@@ -282,10 +296,12 @@ def project(sources, since_epoch, before_epoch, *, deadline=None):
                     requested_harness=task.get("backend"), requested_model=task.get("model"),
                     accounting=evidence, execution_kind=kind, duration_additive=True,
                     usage_additive=evidence["additive"], owner_task_id=None)
-        if attempt.get("execution_kind") in {"native", "native_subagent"}:
+        native = attempt.get("execution_kind") in {"native", "native_subagent"}
+        if native:
             item.update(execution_kind="native", duration_additive=False, usage_additive=False, owner_task_id=attempt.get("transport_task_id") or attempt.get("owner_task_id"))
             if item["owner_task_id"]:
                 item["accounting"] = accounting.unavailable(item["owner_task_id"], "native_owner_contribution")
+        item.update(_cost_and_model(None if native else task.get("total_cost_usd"), task.get("observed_model") or attempt.get("observed_model"), native=native))
         items.append(item)
 
     # Native logical children have no TaskRecord; their recorded lifecycle is
@@ -317,6 +333,7 @@ def project(sources, since_epoch, before_epoch, *, deadline=None):
                     requested_harness=candidate.get("backend"), requested_model=candidate.get("model"),
                     accounting=accounting.unavailable(owner or task_id, "native_owner_contribution"),
                     execution_kind="native", duration_additive=False, usage_additive=False, owner_task_id=owner)
+        item.update(_cost_and_model(None, attempt.get("observed_model"), native=True))
         if owner in tasks:
             relevant.add("task:" + owner)
         items.append(item)
@@ -363,6 +380,7 @@ def _base():
             "generation": None, "observed_at": datetime.now(timezone.utc).isoformat(), "items": [],
             "next_cursor": None, "has_more": False, "history_complete": False, "ownership_complete": False,
             "accounting_coverage": {"eligible_executions": 0, "available_executions": 0},
+            "cost_coverage": {"eligible_executions": 0, "available_executions": 0},
             "retained_history_only": True, "retention": _retention(), "diagnostics": []}
 
 
@@ -417,6 +435,8 @@ def statistics_page(layout, *, since, before, limit=100, cursor=None):
         result.update(state="ready", snapshot_id=generation, generation=generation, history_complete=True,
                       ownership_complete=True, accounting_coverage={"eligible_executions": len(executions),
                       "available_executions": sum(i["accounting"]["total_tokens"] is not None and i["usage_additive"] for i in executions)},
+                      cost_coverage={"eligible_executions": sum(i["execution_kind"] != "native" for i in executions),
+                                     "available_executions": sum(i["cost_additive"] for i in executions)},
                       diagnostics=projection["diagnostics"])
         offset = old["offset"] if old else 0
         items = projection["items"]

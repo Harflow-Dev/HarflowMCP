@@ -1316,6 +1316,15 @@ class ClaudeBackend(ExtraPathsUnsupported):
             tools = event.get("tools")
             if isinstance(tools, list):
                 acc.available_tool_count = len(tools)
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                model = model[:256]
+                seen = acc.observed_model
+                if seen is None:
+                    acc.observed_model = {"model": model, "provenance": "harness_initialization_event"}
+                elif seen["model"] != model:
+                    # A run spanning several processes that disagree on the model reports none.
+                    acc.observed_model = {"model": None, "provenance": "harness_initialization_event_mixed"}
             version = event.get("claude_code_version")
             if isinstance(version, str) and version:
                 # Runs that span several processes with different versions are never trusted as measured.

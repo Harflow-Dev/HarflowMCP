@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -592,6 +592,42 @@ workflow/node/activation IDs, start/end timestamps, duration qualification and a
 Requested model null means Unknown; effective or observed models never replace it. Filtered chart
 and ranking time sums matching `execution_seconds`; unfiltered time uses root wall time plus
 standalone execution time. These measures differ when work overlaps.
+
+### Cost and observed model (`statistics-cost-model.v1`)
+
+With this capability every execution fact (`kind: execution`) also carries `cost_usd`,
+`cost_provenance`, `cost_additive`, `observed_model` and `observed_model_provenance`, and the page
+carries `cost_coverage {eligible_executions, available_executions}`. Clients require the capability
+before reading them; an older engine omits all six, and the static `ctl-statistics-page-*.json`
+examples (product 0.0.4) predate them, so a client treats an absent field as unknown. The generated
+example is `contracts/v1/ctl-statistics-page-cost-reported-and-silent.json`.
+
+- `cost_usd` is the dollar cost the backend reported for the task (a finite number, zero or more),
+  or `null`. `null` means unknown and is never zero: only Claude Code and opencode report a cost, and
+  a record written before the field existed has none. `cost_provenance` is `backend_reported` when
+  `cost_usd` is set, else `null`.
+- `cost_additive` is `true` exactly when the row is a task-backed, non-native execution with a
+  `cost_usd`. It is independent of token qualification: a known cost beside
+  `accounting_evidence_error` still counts. A native logical child reports `cost_usd: null` because
+  its transport's cost already includes the child's work; sum `cost_usd` over rows whose
+  `cost_additive` is `true` and never add a native row's.
+- `observed_model` is the model the harness itself reported, with `observed_model_provenance`
+  (`harness_initialization_event`, `harness_session_configuration`, `observed_native_child`, ...);
+  `null` when nothing was observed. A Claude run whose initialization events disagree reports
+  `observed_model: null` with provenance `harness_initialization_event_mixed`. A configured but
+  unobserved model is not an observation. `requested_model` is never replaced.
+- Sources: a task's own record (`total_cost_usd`, `observed_model`, written at every persist from the
+  stream so far; cumulative, so the terminal write holds the final value and mid-run writes the value
+  so far); for a workflow attempt without a record observation, the attempt's observed harness
+  metadata (`observed` or `observed_configuration`); for a native child, its observed model.
+- `cost_coverage` is in the same scope as `accounting_coverage` (the whole snapshot, repeated on
+  every page) with a narrower denominator: `eligible_executions` counts task-backed, non-native
+  executions and `available_executions` those with a `cost_usd`. Native rows are excluded from both.
+  Totals are authoritative only when every page of one generation was read and the coverage shows
+  how many executions reported a cost.
+
+Task records gain the optional `total_cost_usd` and `observed_model` fields; both are `null` for
+older records and when a value was invalid, and no rewrite of a record erases a recorded value.
 
 Accounting is an optional bounded v1 object written atomically with the task outcome. Legacy
 records remain usage-unavailable; current writers distinguish pending normalization. Adapter

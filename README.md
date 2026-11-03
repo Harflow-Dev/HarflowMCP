@@ -140,7 +140,8 @@ Finished retained-history statistics are available to verified direct callers th
 `harflow-ctl statistics-page --since=<ISO8601> --before=<ISO8601> --json`.
 Clients require capability `statistics-page.v1`; older engines remain unsupported. Results
 disclose retention, missing accounting and bounded preparation rather than assuming complete
-history or zero usage. See [statistics contracts](docs/contracts.md#finished-retained-history-statistics).
+history or zero usage. Executions also report the backend-reported dollar cost and the model the harness observed
+(capability `statistics-cost-model.v1`; unknown stays `null`, never zero). See [statistics contracts](docs/contracts.md#finished-retained-history-statistics).
 
 Verified direct callers can read one task's history through ctl: `harflow-ctl task-events TASK_ID --json`
 pages its normalized events in both directions with opaque cursors, a lifecycle `log.state` and

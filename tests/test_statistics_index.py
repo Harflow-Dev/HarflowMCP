@@ -7,7 +7,7 @@ import pytest
 
 from harflow_mcp import state_ownership, store
 from harflow_mcp.state_layout import resolve_layout
-from harflow_mcp.statistics_index import IndexLimit, StatisticsIndex
+from harflow_mcp.statistics_index import SCHEMA_VERSION, IndexLimit, StatisticsIndex
 
 
 @pytest.fixture
@@ -171,5 +171,5 @@ def test_unknown_derivative_schema_rebuilds_cache_without_touching_sources(owned
     assert prepared["state"] == "ready"
     assert source_path.read_bytes() == source_before
     connection = sqlite3.connect(index_path)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     connection.close()

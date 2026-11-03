@@ -119,6 +119,13 @@ class TaskRecord:
     chain_prompt: str | None = None
     stderr_tail: list[str] = field(default_factory=list)
     accounting: dict[str, Any] | None = None
+    total_cost_usd: float | None = None
+    """The dollar cost the backend reported for this task so far (cumulative; the final write carries
+    the total). None when the backend reports none or the value was invalid; never a zero stand-in.
+    Additive: None for every record written before the field existed."""
+    observed_model: dict[str, Any] | None = None
+    """`{model, provenance}` as reported by the harness itself, not the requested model; `model` is None
+    when the stream disagreed with itself. Additive: None when nothing was observed."""
     failure_diagnostic: dict[str, Any] | None = None
     interruption: dict[str, Any] | None = None
     workflow_builder: bool = False
@@ -275,6 +282,11 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         return False
     if existing is not None and existing.interruption is not None and record.interruption is None:
         record = replace(record, interruption=existing.interruption)
+    if existing is not None:
+        # Both values are cumulative: a rewrite that observed nothing never erases what was recorded.
+        kept = {key: getattr(existing, key) for key in ("total_cost_usd", "observed_model") if getattr(record, key) is None and getattr(existing, key) is not None}
+        if kept:
+            record = replace(record, **kept)
     expected_source = getattr(existing, "_source_identity", None)
     if (
         existing is not None

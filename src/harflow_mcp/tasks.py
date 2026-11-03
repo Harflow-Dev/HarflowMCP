@@ -3403,7 +3403,7 @@ class TaskRegistry:
             raise TypeError("Cannot persist an attached task; only its supervisor owns metadata")
         task.latest_record_landed = False
         task.persistence_error = None
-        from .accounting import snapshot, unavailable
+        from .accounting import cost_value, observed_model_value, snapshot, unavailable
         accounting = None
         try:
             accounting_task_id = store.validate_task_id(task.task_id)
@@ -3456,6 +3456,8 @@ class TaskRegistry:
                 stderr_tail=list(task.stderr_tail),
                 failure_diagnostic=task.acc.failure_diagnostic,
                 accounting=accounting,
+                total_cost_usd=cost_value(task.acc.total_cost_usd),
+                observed_model=observed_model_value(task.acc.observed_model),
                 workflow_builder=task.workflow_builder,
                 prompt=(task.display_prompt if task.display_prompt is not None else task.prompt),
                 status=task.status,

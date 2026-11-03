@@ -23,7 +23,7 @@ DEADLINE_SECONDS = 2.0
 INDEX_FILENAME = ".statistics.v1.sqlite3"
 INDEX_BYTES = 64 * 1024 * 1024
 SOURCE_BYTES = 128 * 1024
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 
@@ -245,7 +245,9 @@ class StatisticsIndex:
             keep = ("task_id", "backend", "model", "repo_path", "started_at", "finished_at", "status", "title",
                     "parent_task_id", "continuation_of_task_id", "chain_root_task_id", "spawned_by", "root_task_id",
                     "accounting", "exit_code", "workflow_builder")
-            return {key: record[key] for key in keep}
+            from .accounting import cost_value, observed_model_value
+            return {**{key: record[key] for key in keep}, "total_cost_usd": cost_value(record["total_cost_usd"]),
+                    "observed_model": observed_model_value(record["observed_model"])}
         if row["kind"] == "owner":
             from .workflow_receipt_documents import decode
             return decode(document, row["id"])
@@ -261,6 +263,7 @@ class StatisticsIndex:
             projected["tasks"] = [{key: attempt[key] for key in (
                 "task_id", "status", "started_at", "finished_at", "execution_kind", "owner_task_id", "transport_task_id",
                 "native_owner_execution_id", "candidate", "resume_task_id", "native_child_id") if key in attempt}
+                | {"observed_model": _attempt_observed_model(attempt)}
                 for attempt in activation.get("tasks", [])]
             activations.append(projected)
         result["activations"] = activations
@@ -359,3 +362,23 @@ class StatisticsIndex:
         # never leaves callers mixing an old and partially updated source list.
         sources[:] = refreshed
         return True
+
+
+def _attempt_observed_model(attempt):
+    """The `{model, provenance}` a workflow attempt's own evidence reports, else None.
+
+    A task-backed attempt counts only observed metadata (`observed`, `observed_configuration`); a
+    native attempt reports the child's observed model from its metadata or settled result.
+    """
+    from .accounting import observed_model_value
+    metadata = attempt.get("harness_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    observed = metadata.get("observed")
+    observed = observed if isinstance(observed, dict) else {}
+    if attempt.get("execution_kind") in {"native", "native_subagent"}:
+        result = attempt.get("result")
+        model = observed.get("model") or (result.get("observed_model") if isinstance(result, dict) else None)
+        return observed_model_value({"model": model, "provenance": "observed_native_child"}) if model else None
+    if metadata.get("verification_status") in {"observed", "observed_configuration"} and observed.get("model"):
+        return observed_model_value({"model": observed["model"], "provenance": metadata.get("provenance")})
+    return None
