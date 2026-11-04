@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add S07 isolated conformance infrastructure with pinned source/binary identities, independent contract/capture/process checks and standalone fake-harness self-checks. Task/authority and workflow acceptance remain separate sessions.
+
 - Add `harflow-ctl task-events TASK_ID [--from newest|oldest | --cursor C] [--limit N] [--kinds K | --all-kinds] --json` (capability `task-event-page.v1`, read-only, direct callers only): ascending, bounded pages of a task's normalized events with older and newer cursors, polling by `newer_cursor`, a `log` lifecycle object (`open`, `final`, `settling`, `incomplete`, `unknown`, `unavailable`), per-page `span`, `skipped` and `gaps`, a `change_token`, and the stable refusals `event_cursor_invalid` and `event_cursor_expired`. A whole document is at most 262144 bytes. MCP `get_task_events` and `get_task_event_page` are unchanged.
 - Add `harflow-ctl task-prompt TASK_ID [--max-bytes N] --json` (capability `task-prompt.v1`, read-only, direct callers only): a task's stored prompt, verbatim and bounded, with `state` (`available`, `preview_only`, `integrity_failed`, `unavailable`), byte counts and an `integrity` report.
 - Document the reconnect rules for history reads (`docs/contracts.md`). The version-info example lists every capability.

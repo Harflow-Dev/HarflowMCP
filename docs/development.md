@@ -66,3 +66,18 @@ Shared caller/Monitor answering is covered by `test_workflow_shared_interactions
 `test_interaction_events.py` against isolated retained state; these tests never post
 macOS notifications or send provider messages. Contract fixtures include explicit
 synthetic shared-answer specimens and actual isolated approval CLI output.
+
+## Isolated conformance infrastructure
+
+`conformance/` is the S07 black-box foundation; see its
+[maintained guide](../conformance/README.md) for explicit source/binary selection,
+manifest pinning, isolated roots and report validation. Run its independent
+self-checks with `.venv/bin/python -m pytest conformance/tests -q`. They do not
+load the engine test tree's autouse fixtures, require providers or install agents.
+macOS process observation may require access beyond a filesystem sandbox; blocked
+observations fail closed. The guide's source check invokes only public
+version-info/state-inspect operations on a fresh missing root. Standalone fake
+execution does not qualify engine-to-fake integration, task/authority behavior,
+workflows, a managed runtime or a real harness; those need their assigned later
+sessions and authorization. Runtime hashes describe selected observed bytes, not
+publisher authenticity or a complete OS/stdlib dependency closure.
