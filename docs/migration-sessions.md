@@ -1,6 +1,6 @@
 # HarflowMCP migration sessions
 
-Status: S01–S07 evidence delivered 2026-11-04; receipt acceptance pending; S08 onward remains unstarted. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
+Status: S01–S08 evidence delivered 2026-11-04; receipt acceptance pending; S09 onward remains unstarted. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
 
 ## Dispatch protocol
 
@@ -86,11 +86,18 @@ The [v2 coverage ledger](../../HarflowDesign/v2/docs/migration-coverage.md) is a
 
 ### S08 — Task and authority conformance
 
-- Status: planned. Lead: HarflowMCP. Co-owned: None.
+- Status: evidence delivered; owner acceptance pending. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S07.
 - Checklist coverage: C0-MC-04 (partial).
 - Scope and acceptance: Run task lifecycle, messaging and approval scenarios against pinned Python, recording external effects, limitations and defects.
 - Output: lead receipt `docs/migration-receipts/S08.md`, with the evidence and identities required by the dispatch protocol.
+- Delivered: implementation `125d37d38b038259c6f0302ce123e708411d50c3`,
+  [receipt](migration-receipts/S08.md) and [checks](migration-receipts/S08-checks.json).
+  Final primary 198 self-checks and all 9 controlled source task/authority cases
+  passed; retained validation rechecked 164 command captures and registered exits.
+  Source remains 0.0.7 at `95b696e` with existing Python 3.11.15; no managed runtime,
+  real backend, Rust or full C0 claim. C0-MC-04 remains partial. Mac freeze waiver
+  preserved; S09 unstarted. All changes local only.
 
 ### S09 — Workflow and resource conformance
 
