@@ -152,7 +152,7 @@ async def test_unsafe_optional_blocker_cannot_bypass(storage, tmp_path, category
     next(n for n in graph["nodes"] if n["id"] == "right").update(optional=True, title="right")
     output = {"status": "blocked", "result": {"summary": "Must inspect", "blocker_category": category}, "evidence": []}
     # Each blocker category exercises durable state transitions under CI latency.
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}), timeout_seconds=10)
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}), timeout_seconds=20)
     assert run["status"] != "completed"
     activation = next(a for a in run["activations"] if a["role"] == "node" and a["node_id"] == "right")
     assert not activation.get("optional_failure")
@@ -190,7 +190,7 @@ async def test_closed_group_retry_creates_distinct_generations(storage, tmp_path
         return policy(context, registry)
     # Two generations persist many transitions; allow shared CI scheduling and
     # filesystem latency without changing production polling or graph assertions.
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, repeat_policy), timeout_seconds=15)
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, repeat_policy), timeout_seconds=25)
     assert run["status"] == "completed"
     assert len(run["released_parallel_groups"]) == 2
     assert run["retry_counts"]["repeat-group"] == 1

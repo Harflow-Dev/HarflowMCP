@@ -92,7 +92,8 @@ def setup(tmp_path, monkeypatch):
 async def execute(storage, registry, tmp_path, definition=None):
     run = storage.create_run(w.validate_definition(definition or codex_graph()), "Review", tmp_path)
     supervisor = w.WorkflowSupervisor(registry, storage)
-    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 5)
+    # Shared CI scheduling can push native setup past the old 5s fixture guard.
+    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 20)
     return storage.get_run(run["workflow_run_id"]), supervisor
 
 
@@ -189,7 +190,7 @@ async def test_codex_cancel_and_timeout_preserve_unresolved_child(setup, tmp_pat
         task.done.set()
 
     registry.resume, registry.cancel_cascade = hanging, cancel
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     attempt = next(a for a in observed["activations"] if a["role"] == "node")["tasks"][0]
     assert observed["status"] == "needs_attention"

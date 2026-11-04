@@ -112,7 +112,7 @@ def test_pinned_tree_policy_is_frozen_before_first_reservation(native_setup, tmp
 async def test_native_node_uses_owner_transport_and_no_child_process_record(native_setup, tmp_path):
     storage, registry = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed", observed.get("attention_reason")
     worker = next(a for a in observed["activations"] if a["role"] == "node")
@@ -144,7 +144,7 @@ async def test_native_observed_configuration_preserves_adapter_provenance(native
 
     monkeypatch.setattr(ClaudeNativeAdapter, "observe", observe)
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed"
     worker = next(a for a in observed["activations"] if a["role"] == "node")
@@ -157,7 +157,7 @@ async def test_unproven_native_never_falls_back_or_completes(native_setup, tmp_p
     storage, _ = native_setup
     registry = NativeRegistry(tmp_path, terminal=terminal, forged=forged)
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"
     worker = next(a for a in observed["activations"] if a["role"] == "node")
@@ -173,7 +173,7 @@ async def test_unsupported_model_falls_back_before_child_launch(native_setup, tm
     definition = native_graph()
     definition["nodes"][1]["agent"]["model"] = "other-model"
     run = storage.create_run(w.validate_definition(definition), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     worker = next(a for a in observed["activations"] if a["role"] == "node")
     assert not registry.native_calls
@@ -371,7 +371,7 @@ async def test_parent_permission_evidence_preserved_on_native_child(native_setup
     monkeypatch.setattr(__import__(__name__), "native_events", blocked_events)
     registry = NativeRegistry(tmp_path)
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     execution = next(a for a in observed["activations"] if a["role"] == "node")
     assert execution["tasks"][0]["result"]["permission_denials"] == [denial]
@@ -402,7 +402,7 @@ async def test_native_timeout_and_root_cancel_cannot_invent_child_settlement(nat
     definition = native_graph()
     definition["nodes"][1]["timeout_seconds"] = 1
     run = storage.create_run(w.validate_definition(definition), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     execution = next(a for a in observed["activations"] if a["role"] == "node")
     attempt = execution["tasks"][0]
@@ -447,7 +447,7 @@ async def test_duplicate_native_child_identity_across_same_owner_session_is_fenc
     definition["connections"][1]["target"] = "second"
     definition["connections"].append({"id": "second-finish", "source": "second", "target": "end"})
     run = storage.create_run(w.validate_definition(definition), "Review twice", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"
     workers = [a for a in observed["activations"] if a["role"] == "node"]
@@ -483,7 +483,7 @@ async def test_native_resume_refusal_releases_only_proven_no_spawn(native_setup,
     registry = RefusingRegistry(tmp_path)
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
     supervisor = w.WorkflowSupervisor(registry, storage)
-    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     node = next(a for a in observed["activations"] if a["role"] == "node")
     transport = next(a for a in observed["activations"] if a["role"] == "native_control")
@@ -507,7 +507,7 @@ async def test_native_resume_refusal_releases_only_proven_no_spawn(native_setup,
     assert w.CheckoutLease(storage, str(tmp_path), True)._orphan_owner() is None
     registry.refuse = False
     storage.control(run["workflow_run_id"], "resume")
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
     assert len(registry.native_calls) == 1
 
@@ -555,7 +555,7 @@ async def test_parent_tool_requires_reconciliation_without_headless_duplicate(na
         return events
     monkeypatch.setattr("test_workflow_native.native_events", unexpected)
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"
     workers = [t for a in observed["activations"] if a["role"] == "node" for t in a["tasks"]]

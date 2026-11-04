@@ -16,8 +16,8 @@ from execution_helper import run_bounded, workflow_snapshot
 
 
 # Ordinary structural graphs exceeded 3s on macOS Python 3.11 CI (3.2-3.6s).
-# Match delegation's finite 10s liveness guard; this is not a performance assertion.
-DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 10
+# Match delegation's finite liveness guard; this is not a performance assertion.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 20
 
 
 def definition(role="task"):

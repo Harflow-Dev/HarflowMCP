@@ -16,7 +16,8 @@ from execution_helper import run_bounded, workflow_snapshot
 
 
 # Finite whole-graph fixture liveness guard, not a performance assertion.
-DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 10
+# Ubuntu 3.13 shared runners needed headroom above 10s for durable parallel graphs.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 20
 
 
 def graph(role="task"):
@@ -540,7 +541,7 @@ async def test_parallel_input_suspension_settles_sibling_and_resume_does_not_rep
     run = storage.create_run(w.validate_definition(definition), "Request", tmp_path)
     registry = ControlledRegistry(storage.root, policy)
     executing = asyncio.create_task(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]))
-    await asyncio.wait_for(input_accepted.wait(), 3)
+    await asyncio.wait_for(input_accepted.wait(), 10)
     pending = storage.get_run(run["workflow_run_id"])
     assert pending["status"] == "needs_input" and pending["settling"]
     from harflow_mcp import identity
@@ -548,7 +549,7 @@ async def test_parallel_input_suspension_settles_sibling_and_resume_does_not_rep
     with pytest.raises(w.WorkflowError, match="Unresolved"):
         storage.control(run["workflow_run_id"], "resume", instructions="Continue")
     release_right.set()
-    await asyncio.wait_for(executing, 3)
+    await asyncio.wait_for(executing, 10)
     suspended = storage.get_run(run["workflow_run_id"])
     assert suspended["status"] == "needs_input" and not suspended["settling"]
     right = next(a for a in suspended["activations"] if a["role"] == "node" and a["node_id"] == "right")
