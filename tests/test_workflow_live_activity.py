@@ -23,8 +23,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def event_line(task_id: str, seq: int) -> bytes:
-    document = {"product": "harflow", "format": "harflow.event", "v": 1, "product_version": PRODUCT_VERSION,
+def event_line(task_id: str, seq: int, *, product_version: str = PRODUCT_VERSION) -> bytes:
+    document = {"product": "harflow", "format": "harflow.event", "v": 1, "product_version": product_version,
                 "seq": seq, "kind": "assistant_text", "observed_at": "2027-01-01T00:00:00+00:00",
                 "task_id": task_id, "text": f"text {seq}"}
     return (json.dumps(document) + "\n").encode()
@@ -48,8 +48,8 @@ def activation(identifier: str, status: str, *tasks: dict, **extra) -> dict:
             "tasks": list(tasks), **extra}
 
 
-def log(storage, task_id: str, count: int) -> None:
-    events_path(storage.root / "tasks", task_id).write_bytes(b"".join(event_line(task_id, i) for i in range(count)))
+def log(storage, task_id: str, count: int, *, product_version: str = PRODUCT_VERSION) -> None:
+    events_path(storage.root / "tasks", task_id).write_bytes(b"".join(event_line(task_id, i, product_version=product_version) for i in range(count)))
 
 
 def inspect(capsys, run_id: str, execution_id: str, *args: str, expect: int = 0):
@@ -233,7 +233,8 @@ async def test_mcp_never_gets_live_activity_and_settled_output_is_unchanged(tmp_
         activation("done", "completed", {"task_id": "att-s", "status": "completed", "result": {"summary": "ok"}},
                    node_result={"status": "succeeded", "summary": "done"}),
         activation("live", "running", {"task_id": "att-1", "status": "running"})])
-    log(storage, "att-s", 3)
+    # Preserve the historical input provenance as well as its unchanged hash.
+    log(storage, "att-s", 3, product_version="0.0.9")
     log(storage, "att-1", 1)
     monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=storage.root / "tasks"))
     page = await server.inspect_workflow_node(run_id, "done", view="activity")

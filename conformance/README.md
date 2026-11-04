@@ -23,7 +23,7 @@ S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
   --commit "$(git rev-parse v0.0.10^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 54cb52437bb96ff9ae1994e950ca6fbf49010fc6a355ca8f470c71622d0079ae \
+  --manifest-sha256 ceb336216b8e5b0938f101b2a8b2ba5f85e3d939e281c446461499a2ae5c4906 \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```

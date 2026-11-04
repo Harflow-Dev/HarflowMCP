@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import stat
 
-PINNED_MANIFEST_SHA256 = '54cb52437bb96ff9ae1994e950ca6fbf49010fc6a355ca8f470c71622d0079ae'
+PINNED_MANIFEST_SHA256 = 'ceb336216b8e5b0938f101b2a8b2ba5f85e3d939e281c446461499a2ae5c4906'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""

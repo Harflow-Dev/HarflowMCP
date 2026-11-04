@@ -487,21 +487,21 @@
     },
     "ctl-workflow-limit-hits-ready.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-workflow-limit-hits-empty.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-workflow-limit-hits-preparing.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
@@ -1770,9 +1770,9 @@
     "ctl-limit-hits-ready.json": "68b664607ee868f1f934b34df858c53130dd12ec8414b70f6cfc468c943be919",
     "ctl-limit-hits-empty.json": "b840858677977f4e2da31bce3c54941b8b97312c9de25f46b269507c4bf8bf81",
     "ctl-limit-hits-preparing.json": "54b41785c74df221b750ba45c7a5084b885c6dcbb957c678c6b86aca663c7512",
-    "ctl-workflow-limit-hits-ready.json": "ae62b32db4e5ad3a7564e07620a72d44f7a74d124b65de911547d322cf699788",
-    "ctl-workflow-limit-hits-empty.json": "6acac4646871343f0393211f9b2ef411c4e3098f4b7e920080d3296dd3646fc8",
-    "ctl-workflow-limit-hits-preparing.json": "b4ecd28132ff0b9e2ed9323a07dd85fb0dba319dd81b94c99f6d9d09070b3967",
+    "ctl-workflow-limit-hits-ready.json": "ca40fb2e2284d83c452662ac2309b9eb1592fd47744ca2276d734d51e2b93fc3",
+    "ctl-workflow-limit-hits-empty.json": "30e9d573fbba72bae910e7408fcedc07b5cb6d0a39798448c73c7a9b0216a4d7",
+    "ctl-workflow-limit-hits-preparing.json": "8a15253ee51e1cf1cc3dbf373948ac93b0fd247ab4aaba9008dc631987a66bba",
     "ctl-phase-slot-held.json": "f716caf97a6a56df188a1907f24424dab0f771cfd35c7d3dca5a8f08f7efdfd5",
     "ctl-phase-slot-queued.json": "96896e44fac13df13c6d17fe55a69f7118cff8a9039897e0e5606eb19ff86505",
     "ctl-phase-slot-cleanup-uncertain.json": "85282f43120d938f2296d918a6ff4c4c1d97f55ea22fcb639b6ee4ca5911394e",

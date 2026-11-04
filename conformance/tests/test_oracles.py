@@ -15,7 +15,7 @@ from conformance.oracles import (
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = '54cb52437bb96ff9ae1994e950ca6fbf49010fc6a355ca8f470c71622d0079ae'
+DIGEST = 'ceb336216b8e5b0938f101b2a8b2ba5f85e3d939e281c446461499a2ae5c4906'
 
 
 def envelope(format='harflow.ctl'):
