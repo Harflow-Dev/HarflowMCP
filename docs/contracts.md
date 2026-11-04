@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, `task-list-watch.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`, `task-list-watch.v1` for `task-list-watch`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -1039,6 +1039,53 @@ identity, swept by retention's `{task_id}.*` pattern (an orphaned temporary file
 document). Above 8 MiB a small `unavailable` / `capture_too_large` document is stored instead; any
 other failure stores `unavailable` / `capture_error`. A client requires `task-changes.v1` on the
 fresh handshake; an older engine answers the command with a usage error, which is "unsupported".
+
+### Task-list invalidation wait (`task-list-watch.v1`)
+
+```text
+harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json
+```
+
+Capability `task-list-watch.v1`; one bounded invalidation wait, not a daemon, NDJSON stream, event
+transcript or MCP tool. Existing `harflow.ctl` v1 envelope. `--wait-seconds` is an integer 0..30
+(default 30) and is ignored when `--cursor` is omitted. The opaque UTF-8 cursor is at most 2048
+bytes; the whole success document is at most 16 KiB. Measured setup/cancel overhead sits outside the
+wait argument (consumers should allow about two extra seconds of transport margin).
+
+Authority is verified before watch sources or root-sensitive cursor decode: direct callers only
+(`agent_caller` / `caller_undecidable`). The command never initializes a missing or unmarked state
+root; a missing root returns a successful `unavailable` observation with `reason: state_missing` and
+`cursor: null`. Unowned or incompatible roots keep the established ownership error envelopes.
+
+Successful `result` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `baseline`, `changed`, `timeout`, `reset` or `unavailable` |
+| `cursor` | Next opaque boundary for baseline/changed/timeout/reset; null only for unavailable |
+| `reason` | Required bounded code for reset/unavailable; otherwise absent |
+
+No cursor establishes a baseline immediately. `changed` means at least one admitted task-list
+publication since the boundary (coalescing and conservative false positives are allowed); it is not
+an authoritative task fact. `timeout` means no producer invalidation was observed under established
+continuity before the wait ceiling; it does **not** prove execution, owner liveness or displayed
+headers are unchanged — consumers must still deadline-reconcile. `reset` means continuity for the
+supplied cursor can no longer be guaranteed (expired epoch, reclaimed open fence, root discontinuity);
+a fresh boundary is returned. Malformed or wrong-scope cursors refuse with
+`task_list_watch_cursor_invalid`.
+
+Continuity is a producer-owned fence+revision file `<tasks>/.task-list-revision.v1.json` under the
+existing catalog lock. Admitted writers (`Catalog.invalidate` / `record` / `remove` for `.meta.json`)
+pre-bump then post-bump around durable publication. List-page liveness overlays do not bump.
+Pending-launch and continuation reservations are outside this invalidation scope. Mixed older writers
+that mutate catalog state without revision movement force `reset`/`unavailable`, never a trustworthy
+`timeout`. Supported correctness claim: macOS and Linux with flock + regular-file fsync on the
+selected state filesystem; the wait polls the revision file and does not require a kernel journal.
+
+Consumer protocol: obtain baseline **before** the first public snapshot; wait from that cursor;
+on changed/reset retain the new cursor before refresh; keep one watch in flight and pending/coalesce
+signals that arrive while a refresh is busy; timeout still schedules public lifecycle reconciliation.
+Examples: `contracts/v1/ctl-task-list-watch-*.json`.
 
 ## Recent usage-limit hits
 

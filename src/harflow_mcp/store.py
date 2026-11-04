@@ -301,11 +301,14 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         )
         return False
 
+    fenced = False
     try:
         from .catalog import Catalog
+        from . import task_list_watch
         payload = encode_task(asdict(record))
         decode_task(payload, record.task_id, TaskRecord)
         Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(record.task_id)
+        fenced = True
         log_dir.mkdir(parents=True, exist_ok=True)
         if len(record.prompt) > PROMPT_PREVIEW_CHARS:
             digest = hashlib.sha256(record.prompt.encode("utf-8")).hexdigest()
@@ -346,6 +349,12 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         except BaseException:
             Path(handle.name).unlink(missing_ok=True)
             raise
+        header, stamp, active = listing_header(record)
+        from .catalog import source_identity
+        header['_source_identity'] = source_identity(written_source)
+        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
+        fenced = False
+        return True
     except TaskDocumentError as exc:
         _write_error.set(exc)
         log.warning("refusing malformed task record %s", record.task_id)
@@ -354,12 +363,13 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         _write_error.set(TaskDocumentError(record.task_id, str(exc), code="task_unavailable"))
         log.warning("could not persist record for task %s", record.task_id, exc_info=True)
         return False
-    from .catalog import Catalog
-    header, stamp, active = listing_header(record)
-    from .catalog import source_identity
-    header['_source_identity'] = source_identity(written_source)
-    Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
-    return True
+    finally:
+        if fenced:
+            try:
+                from . import task_list_watch
+                task_list_watch.end_publication(log_dir, layout=task_layout(log_dir))
+            except Exception:
+                log.warning("task-list watch fence close unavailable for %s", record.task_id, exc_info=True)
 
 
 def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:

@@ -82,7 +82,8 @@ def generate():
     # canonical platform/root specimen; no host state or platform values leak in.
     version = json.loads((bundle / 'version-info.json').read_text())
     capabilities = ('task-event-page.v1', 'task-prompt.v1', 'task-successors.v1',
-                    'workflow-live-activity.v1', 'statistics-cost-model.v1', 'task-changes.v1')
+                    'workflow-live-activity.v1', 'statistics-cost-model.v1', 'task-changes.v1',
+                    'task-list-watch.v1')
     variants = [('version-info-s05-additive.json',
                  {**version, 'optional_future_field': {'value': True},
                   'capabilities': version['capabilities'] + ['future-capability.v99']}, [], True)]

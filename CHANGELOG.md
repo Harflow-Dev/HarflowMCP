@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.0.9
+
+- Add `harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json` (capability `task-list-watch.v1`, direct callers only): one bounded task-list invalidation wait over the existing `harflow.ctl` v1 envelope. States are `baseline`, `changed`, `timeout`, `reset` and `unavailable`; wait 0..30 seconds (default 30); opaque cursor at most 2048 bytes; document at most 16 KiB. Continuity is a producer-owned fence+revision file under the task catalog lock. The command never initializes a missing state root. Refusal `task_list_watch_cursor_invalid` covers malformed or wrong-scope cursors. No MCP tool, daemon or event stream. Canonical fixtures `ctl-task-list-watch-*.json` and `invalid-s05-missing-task-list-watch.json`; HarflowMac must re-vendor those plus the updated `version-info.json` and full `manifest.json`/`manifest.sha256` when adopting.
+
 ## 0.0.8
 
 - Retry Darwin `openat(O_CREAT)` races when creating qualification lock files so backend qualification does not fail with `ENOENT` under concurrent creates.

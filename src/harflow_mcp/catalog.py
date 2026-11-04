@@ -348,6 +348,13 @@ class Catalog:
     def invalidate(self, identifier: str) -> None:
         """Repair derivative failures and commit invalidation before replacing metadata."""
         with catalog_lock(self.directory, layout=self.state_layout):
+            if self.suffix == '.meta.json':
+                from . import task_list_watch
+                try:
+                    task_list_watch.begin_locked(self.directory)
+                except (OSError, StateIncompatible):
+                    logging.getLogger(__name__).warning('Task-list watch fence unavailable before invalidate', exc_info=True)
+                    raise
             try:
                 self._invalidate_locked(identifier)
             except sqlite3.Error:
@@ -726,6 +733,9 @@ class Catalog:
             with self.connect() as db:
                 self._put(db, header, stamp, active, identifier)
                 self._acknowledge_directory(db, previous_directory_mtime)
+                if self.suffix == '.meta.json':
+                    from . import task_list_watch
+                    task_list_watch.end_locked(self.directory)
         except (OSError, sqlite3.Error, DeferredRead):
             logging.getLogger(__name__).warning('Listing catalog update unavailable', exc_info=True)
 
@@ -734,6 +744,9 @@ class Catalog:
         with self.connect() as db:
             self._remove(db, identifier)
             self._acknowledge_directory(db, previous_directory_mtime)
+            if self.suffix == '.meta.json':
+                from . import task_list_watch
+                task_list_watch.end_locked(self.directory)
 
     @layout_operation
     def headers(self, identifiers: list[str], loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> list[dict[str, Any]]:

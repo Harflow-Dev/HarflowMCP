@@ -17,8 +17,8 @@ from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 TASK = "task-events-1"
-PAGE_GOLDEN = "70f448bc5547f976dbcfd3fe4c2db2baa59a4b65b01fed4e23d06f57ad3350f3"
-EVENTS_GOLDEN = "44c9b45c34ee9fb0775f0a740fa49aac3a465a58c9d516a1c23dc9fc0b3cf1f1"
+PAGE_GOLDEN = "1113c274118e7983fa6b021f77655878b3fd1296ff82a3b44c7285b541aab57a"
+EVENTS_GOLDEN = "bac69984259aa92776de8fc5796c45cbdea262199d18fc9d1ae6a5ff92a6d568"
 
 
 @pytest.fixture

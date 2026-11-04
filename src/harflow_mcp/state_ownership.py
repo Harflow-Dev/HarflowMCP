@@ -371,7 +371,7 @@ def _validate_layout(layout: StateLayout) -> None:
         raise _incompatible("selected layout paths are not normalized and coherent")
 
 
-def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease:
+def _acquire(layout: StateLayout, timeout: float, exclusive: bool, *, initialize: bool = True) -> StateLease:
     _validate_layout(layout)
     if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout < 0:
         raise ValueError("timeout must be finite and nonnegative")
@@ -386,7 +386,9 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
         try:
             root_id = _root_identity(root)
         except StateIncompatible:
-            if root.exists():
+            if root.exists() or not initialize:
+                if not root.exists() and not initialize:
+                    raise _incompatible("selected root is missing", reason="missing_root")
                 raise
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             root_id = _root_identity(root)
@@ -413,6 +415,8 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
             lock_info = _regular(lock)
             if lock_info is None and (marked or not empty):
                 raise _incompatible("marked root has no stable lock" if marked else "unmarked root is nonempty")
+            if lock_info is None and not initialize:
+                raise _incompatible("selected root is missing", reason="missing_root")
         fd = -1
         try:
             if lock_info is None:
@@ -439,13 +443,19 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
                 if _root_identity(root) != root_id or _identity(lock.lstat()) != lock_id:
                     raise _incompatible("root or lock changed before initialization")
                 if not _marker(root):
+                    if not initialize:
+                        raise _incompatible("selected root is missing", reason="missing_root")
                     if not _admissible_empty(root):
                         raise _incompatible("unmarked root is nonempty")
                     _publish(root)
                 _promote(root)
             elif not marked:
+                if not initialize:
+                    raise _incompatible("selected root is missing", reason="missing_root")
                 _initialize_shared(fd, root, deadline)
             elif parse_version(_read_marker(root)["product_version"])[:2] != parse_version(PRODUCT_VERSION)[:2]:
+                if not initialize:
+                    raise _incompatible("store requires promotion", reason="unsupported_source_line")
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 _wait(fd, fcntl.LOCK_EX, deadline)
                 if _root_identity(root) != root_id or _identity(lock.lstat()) != lock_id:
@@ -473,10 +483,14 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
 
 
 @contextmanager
-def state_session(layout: StateLayout, *, timeout: float = DEFAULT_TIMEOUT) -> Iterator[StateLease]:
-    """Hold validated shared ownership for a complete operation or process."""
+def state_session(layout: StateLayout, *, timeout: float = DEFAULT_TIMEOUT, initialize: bool = True) -> Iterator[StateLease]:
+    """Hold validated shared ownership for a complete operation or process.
+
+    When `initialize` is False, a missing or unmarked root is refused without creating a marker,
+    lock or directory. Watchers and other read-only observers use that mode.
+    """
     try:
-        lease = _acquire(layout, timeout, False)
+        lease = _acquire(layout, timeout, False, initialize=initialize)
     except OSError as exc:
         error = _incompatible("ownership infrastructure is unavailable")
         error.data.update(state_root=str(layout.root), engine_version=PRODUCT_VERSION, recovery_supported=False)

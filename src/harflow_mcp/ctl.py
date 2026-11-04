@@ -174,6 +174,19 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     changes_p.add_argument("--cursor", help="a next_cursor from a previous page")
     changes_p.add_argument("--limit", type=int, default=None, help="rows per listing page, 1..500 (default 200)")
     changes_p.add_argument("--json", action="store_true", help="required")
+    from .task_list_watch import DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS
+    watch_p = sub.add_parser(
+        "task-list-watch",
+        help="one bounded task-list invalidation wait; direct callers only; does not initialize a missing state root",
+    )
+    watch_p.add_argument("--cursor", help="opaque boundary from a previous baseline/changed/timeout/reset")
+    watch_p.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=DEFAULT_WAIT_SECONDS,
+        help=f"wait ceiling 0..{MAX_WAIT_SECONDS} (default {DEFAULT_WAIT_SECONDS}); ignored without --cursor",
+    )
+    watch_p.add_argument("--json", action="store_true", help="required")
 
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
@@ -1821,6 +1834,14 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command in {"task-events", "task-prompt", "task-changes"}:
         from .ctl_task_reads import validate_arguments
         validate_arguments(args, parser)
+    if args.command == "task-list-watch":
+        from . import task_list_watch
+        if not args.json:
+            parser.error("task-list-watch requires --json")
+        if not 0 <= args.wait_seconds <= task_list_watch.MAX_WAIT_SECONDS:
+            parser.error(f"--wait-seconds must be 0..{task_list_watch.MAX_WAIT_SECONDS}")
+        if args.cursor is not None and len(args.cursor.encode()) > task_list_watch.MAX_CURSOR_BYTES:
+            parser.error(f"--cursor must be at most {task_list_watch.MAX_CURSOR_BYTES} UTF-8 bytes")
     if args.command == "task-list-page" and args.predecessor_task_id is not None and args.task_ids is not None:
         parser.error("--predecessor-task-id cannot be combined with --task-ids")
     if args.command == "slot" and args.slot_action == "enable":
@@ -1856,6 +1877,39 @@ def _main(argv: list[str] | None = None) -> int:
         refusal = caller_refusal(default_log_dir())
         if refusal:
             return _fail(args, refusal[0], "Task history reads require a verified direct caller: " + refusal[1])
+    if args.command == "task-list-watch":
+        # Authority before watch sources or root-sensitive cursor decode. Never initialize a store.
+        # Env agent markers are checked without ownership; lineage runs only inside initialize=False.
+        from .takeover import caller_refusal
+        from .state_layout import resolve_layout
+        from . import task_list_watch
+        layout = resolve_layout()
+        refusal = task_list_watch.env_agent_refusal()
+        if refusal:
+            return _fail(args, refusal[0], "Task-list watch requires a verified direct caller: " + refusal[1])
+        try:
+            with state_session(layout, initialize=False):
+                refusal = caller_refusal(layout.tasks_directory)
+                if refusal:
+                    return _fail(args, refusal[0], "Task-list watch requires a verified direct caller: " + refusal[1])
+                try:
+                    result = task_list_watch.watch(layout, cursor=args.cursor, wait_seconds=args.wait_seconds)
+                except task_list_watch.TaskListWatchCursorInvalid as exc:
+                    return _fail(args, exc.code, str(exc))
+                except StateOwnershipError as exc:
+                    if getattr(exc, "reason", None) == "observation_unavailable":
+                        result = task_list_watch.unavailable(task_list_watch.REASON_OBSERVATION_UNAVAILABLE)
+                        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+                        return 0
+                    raise
+                print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+                return 0
+        except StateOwnershipError as exc:
+            if getattr(exc, "reason", None) == "missing_root":
+                result = task_list_watch.unavailable(task_list_watch.REASON_STATE_MISSING)
+                print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+                return 0
+            return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), exc.as_dict())
     if args.command == "task-list-page" and args.predecessor_task_id is not None:
         from .takeover import caller_refusal
         refusal = caller_refusal(default_log_dir())

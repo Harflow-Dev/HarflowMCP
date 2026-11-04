@@ -55,7 +55,7 @@ or `gh repo view --json` for supported reads. These are Harflow-supplied command
 not an OS Git sandbox; inherited settings and hooks can still allow or deny commands.
 Permission previews expose the actual mechanism and caveats. See [publication permissions](docs/contracts.md#publication-permission-policy).
 
-Version 0.0.8 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
+Version 0.0.9 is a pre-release candidate. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Task phase slots can serialize heavy commands while code-writing tasks overlap. Explicit human enable, durable FIFO leases and optional conservative host cleanup are documented in [phase slots](docs/resources-and-worktrees.md#task-phase-slots); Monitor queue UI remains outstanding. Phase operations distinguish a disabled layout with the stable error code `phase_slots_not_enabled`; see the [phase slot contract](docs/contracts.md#task-phase-slots).
 
@@ -153,6 +153,8 @@ continuations (capability `task-successors.v1`; see [successor discovery](docs/c
 A verified direct caller can also read the activity of a running workflow node with `harflow-ctl workflow-inspect --view activity`
 (capability `workflow-live-activity.v1`; see [live node activity](docs/contracts.md#live-workflow-node-activity-workflow-live-activityv1)).
 `harflow-ctl task-changes TASK_ID --json` returns the repository differences captured when a task settled (committed range and working tree, bounded rows and patch text; capability `task-changes.v1`; see [stored task changes](docs/contracts.md#stored-task-changes-task-changesv1)). The text can contain secrets or uncommitted edits, so only verified direct callers can read it.
+
+`harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json` is one bounded task-list invalidation wait (capability `task-list-watch.v1`; see [task-list invalidation wait](docs/contracts.md#task-list-invalidation-wait-task-list-watchv1)). It returns baseline/changed/timeout/reset/unavailable signals, not task facts; public paging and status remain authoritative. Direct callers only; it never initializes a missing state root.
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
 grants for fetch, fast-forward-only pull and non-force branch switching/creation work at
