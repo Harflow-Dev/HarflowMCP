@@ -13,7 +13,6 @@ import logging
 import os
 import secrets
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -197,7 +196,7 @@ def _ensure_locked(tasks_directory: Path) -> RevisionState:
     current = _read_unlocked(path)
     if current is not None:
         return current
-    state = RevisionState(epoch=uuid.uuid4().hex, revision=0, open=0, fence_pids=())
+    state = RevisionState(epoch=secrets.token_hex(16), revision=0, open=0, fence_pids=())
     _write_unlocked(path, state)
     return state
 
@@ -213,20 +212,20 @@ def begin_locked(tasks_directory: Path) -> None:
 
 
 def end_locked(tasks_directory: Path) -> None:
-    """Post-bump or solo bump; caller must hold `catalog_lock` on `tasks_directory`."""
+    """Close one open fence. No-op when nothing is open (observation/blocker catalog writes)."""
     current = _ensure_locked(tasks_directory)
-    if current.open > 0:
-        pid = os.getpid()
-        pids = list(current.fence_pids)
-        if pid in pids:
-            pids.remove(pid)
-        elif pids:
-            pids.pop()
-        state = RevisionState(current.epoch, current.revision + 1, len(pids), tuple(pids))
-    else:
-        # Snapshot/blocker paths that publish without invalidate.
-        state = RevisionState(current.epoch, current.revision + 1, 0, ())
-    _write_unlocked(revision_path(tasks_directory), state)
+    if current.open <= 0:
+        return
+    pid = os.getpid()
+    pids = list(current.fence_pids)
+    if pid in pids:
+        pids.remove(pid)
+    elif pids:
+        pids.pop()
+    _write_unlocked(
+        revision_path(tasks_directory),
+        RevisionState(current.epoch, current.revision + 1, len(pids), tuple(pids)),
+    )
 
 
 def begin_publication(tasks_directory: Path, *, layout: StateLayout | None = None) -> None:
@@ -262,7 +261,7 @@ def _snapshot(layout: StateLayout) -> tuple[RevisionState, str | None]:
             state = RevisionState(current.epoch, current.revision + 1, len(live), live)
             _write_unlocked(revision_path(tasks), state)
             return state, None
-        state = RevisionState(epoch=uuid.uuid4().hex, revision=0, open=0, fence_pids=())
+        state = RevisionState(epoch=secrets.token_hex(16), revision=0, open=0, fence_pids=())
         _write_unlocked(revision_path(tasks), state)
         return state, REASON_RECLAIMED
 

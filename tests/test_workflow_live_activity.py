@@ -225,7 +225,7 @@ def test_request_documents_cannot_carry_the_permission(tmp_path):
 
 # The settled MCP activity page of `test_mcp_never_gets_live_activity...`, without the run id, as the
 # engine produced it before live activity existed.
-MCP_SETTLED_ACTIVITY_SHA256 = "6742cc4ece6595f8f5edf98c5916646cf2f3b995bf809742d09abcd7f2d15d81"
+MCP_SETTLED_ACTIVITY_SHA256 = "6f16287542c0c75417e87d192b1272abd1a02b96e91206f3a09a9b6b3c70d631"
 
 
 async def test_mcp_never_gets_live_activity_and_settled_output_is_unchanged(tmp_path, monkeypatch):

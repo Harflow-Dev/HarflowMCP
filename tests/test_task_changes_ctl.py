@@ -53,7 +53,8 @@ def document(state, rows=None):
 
 
 def test_capability_is_declared():
-    assert CAPABILITIES[-1] == "task-changes.v1"
+    assert "task-changes.v1" in CAPABILITIES
+    assert CAPABILITIES[-1] == "task-list-watch.v1"
 
 
 def test_listing_text_and_continuation_through_ctl(state, capsys):
