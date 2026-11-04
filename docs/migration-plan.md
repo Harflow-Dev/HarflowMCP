@@ -75,6 +75,10 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
       first and record manifest hash and baseline defects.
 - [ ] C0-MC-05 Coordinate byte-identical fixture re-vendoring and compatibility
       checks with Mac before announcing a contract change complete.
+      [S06 evidence](../../HarflowMac/docs/migration-receipts/S06.md) vendors
+      S05 exactly and verifies scoped decoder/fallback behavior; three broad
+      native UI suite failures are preserved with the owner's S06 freeze waiver.
+      Receipt acceptance remains pending.
 
 ## E0 / R0 / O0 — support migration
 

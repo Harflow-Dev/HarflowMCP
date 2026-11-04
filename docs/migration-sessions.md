@@ -1,6 +1,6 @@
 # HarflowMCP migration sessions
 
-Status: S01–S05 evidence delivered 2026-11-04; S05 receipt acceptance pending; later sessions remain planned. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
+Status: S01–S06 evidence delivered 2026-11-04; S05/S06 receipt acceptance pending; S07 onward remains unstarted. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
 
 ## Dispatch protocol
 
@@ -70,7 +70,7 @@ The [v2 coverage ledger](../../HarflowDesign/v2/docs/migration-coverage.md) is a
 
 ### S06 — Mac fixture compatibility
 
-- Status: planned. Lead: HarflowMac. Co-owned: HarflowMCP.
+- Status: Evidence delivered with recorded validation limits and owner freeze waiver; receipt acceptance pending. Lead: HarflowMac. Co-owned: HarflowMCP.
 - Prerequisite receipts: S05.
 - Checklist coverage: C0-MC-05 (final contribution), C0-MA-01 (final contribution), C0-MA-02 (final contribution).
 - Scope and acceptance: Vendor the complete canonical bundle and prove matching digests, independent version gates, decoder compatibility and fallback.
