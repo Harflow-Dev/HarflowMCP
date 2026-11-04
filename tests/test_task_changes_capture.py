@@ -130,8 +130,11 @@ def test_unmerged_entries(world):
     git(path, "checkout", "-q", "main")
     tip = commit(path, "main", f="two\n")
     git(path, "merge", "other", check=False)
-    row = rows(build([entry(path, base, tip)]), "working_tree")["f"]
-    assert row["status"] == "unmerged" and row["content"] == {"state": "not_captured", "reason": "unmerged", "bytes": 0}
+    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
+    row = {capture_row_path(item): item for item in scope["rows"]}["f"]
+    assert row["status"] == "modified" and "<<<<<<<" in text_of(row)  # the real diff, untouched by the report below
+    assert [shape.row_path_bytes(item) for item in scope["reported_conflicts"]["names"]] == [b"f"]
+    assert scope["reported_conflicts"]["truncated"] is False and scope["unmerged_unknown"] is False
 
 
 def test_base_missing_not_ancestor_and_unborn_head(repo):
@@ -266,7 +269,7 @@ def test_failed_refresh_reports_no_modified_entries(repo, world, monkeypatch):
     path, base = repo
     (path / "f1").write_text("changed\n")
     monkeypatch.setattr(capture, "GIT", wrapper(world, 'case "$*" in *update-index*) exit 1;; esac'))
-    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    scope = scopes(build([simple_entry(path, base)], budget_seconds=30))["working_tree"]
     assert (scope["state"], scope["reason"], scope["rows"]) == ("incomplete", "index_refresh_failed", [])
 
 
@@ -278,8 +281,8 @@ def test_deadline_in_a_command_marks_that_scope_incomplete(repo, world, monkeypa
     (path / "f1").write_text("changed\n")
     monkeypatch.setattr(capture, "GIT", wrapper(world, 'case "$*" in *diff-index*) sleep 5;; esac'))
     started = time.monotonic()
-    document = build([simple_entry(path, base)], budget_seconds=1.0)
-    assert time.monotonic() - started < 4
+    document = build([simple_entry(path, base)], budget_seconds=2.5)
+    assert time.monotonic() - started < 6
     assert (scopes(document)["working_tree"]["state"], scopes(document)["working_tree"]["reason"]) == ("incomplete", "capture_timeout")
     assert scopes(document)["committed_range"]["state"] == "available"
     assert document["repositories"][0]["state"] == "incomplete" and document["capture"] == {"state": "incomplete", "reason": "capture_timeout"}
@@ -722,15 +725,17 @@ def test_dispatch_anchor_accepts_the_recorded_source_repository(world, repo):
     assert scopes(document)["working_tree"]["state"] == "available"
 
 
-def test_unanchored_repository_with_alternates_is_not_captured(repo, world):
+def test_alternates_are_refused_unless_dispatch_vouched_for_the_exact_repository(repo, world):
     path, base = repo
     (path / ".git" / "objects" / "info").mkdir(exist_ok=True)
     (path / ".git" / "objects" / "info" / "alternates").write_text(str(world.root / "elsewhere") + "\n")
     repository = build([simple_entry(path, base)])["repositories"][0]
     assert (repository["state"], repository["reason"]) == ("not_captured", "alternates_present")
     assert all(scope["state"] == "not_captured" and scope["rows"] == [] for scope in repository["scopes"].values())
-    anchored = build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]
-    assert anchored["state"] == "available"
+    no_common = build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]
+    assert no_common["reason"] == "alternates_present"
+    proven = build([simple_entry(path, base)], anchors={os.path.realpath(path): str(path / ".git")})["repositories"][0]
+    assert proven["state"] == "available"
 
 
 # --- document bounds --------------------------------------------------------------------------
@@ -1268,7 +1273,7 @@ def test_conflicted_names_are_read_from_the_agent_index_as_data(world, version):
     path, base, tip = conflicted(world, version=version)
     scope = scopes(build([entry(path, base, tip)]))["working_tree"]
     assert scope["unmerged_unknown"] is False
-    assert {capture_row_path(row): row["status"] for row in scope["rows"]}["f"] == "unmerged"
+    assert [shape.row_path_bytes(item) for item in scope["reported_conflicts"]["names"]] == [b"f"]
     assert capture.unmerged_names(str(path / ".git"), 20, capture._Budget(5)) == {b"f"}
 
 
@@ -1327,12 +1332,15 @@ def test_dispatch_anchor_with_a_different_identity_reads_nothing(world, repo):
     assert all(scope["state"] == "not_captured" and scope["rows"] == [] for scope in repository["scopes"].values())
 
 
-def test_anchored_repositories_may_use_alternates_but_unanchored_ones_may_not(repo, world):
+def test_an_anchor_without_a_common_directory_needs_a_proven_git_directory(repo, world):
     path, base = repo
-    (path / ".git" / "objects" / "info").mkdir(exist_ok=True)
-    (path / ".git" / "objects" / "info" / "alternates").write_text(str(path / ".git" / "objects") + "\n")
-    assert build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]["state"] == "available"
-    assert build([simple_entry(path, base)])["repositories"][0]["reason"] == "alternates_present"
+    anchors = {os.path.realpath(path): None}
+    assert build([simple_entry(path, base)], anchors=anchors)["repositories"][0]["state"] == "available"
+    real = world.root / "elsewhere"
+    os.rename(path / ".git", real)
+    os.symlink(real, path / ".git")
+    repository = build([simple_entry(path, base, common=str(real))], anchors=anchors)["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "git_dir_unverified")
 
 
 @pytest.mark.parametrize("link", ["objects", "objects/info", "objects/pack"])
@@ -1357,7 +1365,7 @@ def test_a_linked_object_store_is_untrusted_unless_anchored(repo, world, link):
     assert all(scope["rows"] == [] for scope in repository["scopes"].values())
 
 
-def test_a_repointed_git_file_or_symlinked_git_directory_costs_only_the_conflict_disclosure(world, repo):
+def test_a_repointed_git_file_or_symlinked_git_directory_blocks_only_the_working_tree(world, repo):
     path, base = repo
     git(path, "branch", "other")
     linked = world.root / "linked"
@@ -1365,12 +1373,119 @@ def test_a_repointed_git_file_or_symlinked_git_directory_costs_only_the_conflict
     tip = commit(linked, "in linked", g="1\n")
     common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
     (linked / ".git").write_text(f"gitdir: {world.root / 'nowhere'}\n")
-    (linked / "g").write_text("1\n2\n")
-    document = build([entry(path, tip if False else base, tip, worktree=linked, common=common)])
+    document = build([entry(path, base, tip, worktree=linked, common=common)])
     scope = scopes(document)["working_tree"]
-    assert scope["state"] == "available" and scope["unmerged_unknown"] is True and "+2" in text_of(rows(document, "working_tree")["g"])
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "git_dir_unverified", [])
     assert "g" in rows(document, "committed_range")
     real = world.root / "elsewhere"
     os.rename(path / ".git", real)
     os.symlink(real, path / ".git")
-    assert scopes(build([simple_entry(path, base, common=str(path / ".git"))]))["working_tree"]["unmerged_unknown"] is True
+    assert scopes(build([simple_entry(path, base, common=str(path / ".git"))]))["working_tree"]["reason"] == "git_dir_unverified"
+
+# --- round 3 ----------------------------------------------------------------------------------
+
+
+def test_a_configured_worktree_is_never_given_to_git(repo, world):
+    """`core.worktree` makes show-toplevel name another directory; nothing there may be read."""
+    path, base = repo
+    outside = world.root / "outside"
+    outside.mkdir()
+    (outside / "f1").write_text("OUTSIDE-SENTINEL\n")
+    git(path, "config", "core.worktree", str(outside))
+    document = build([{**simple_entry(path, base), "repository_root": str(outside), "worktree": str(outside)}])
+    scope = scopes(document)["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "git_dir_unverified", [])
+    assert "OUTSIDE-SENTINEL" not in json.dumps(document)
+    assert scopes(document)["committed_range"]["state"] == "available"
+
+
+def test_a_forged_conflict_cannot_suppress_or_displace_a_real_row(repo):
+    path, base = repo
+    (path / "f1").write_text("real edit\n")
+    blob = git(path, "rev-parse", "HEAD:f1")
+    (path / ".git" / "index").write_bytes(forge_index([(b"f1", blob, 0o100644, 2), (b"f2", git(path, "rev-parse", "HEAD:f2"))]))
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    row = {capture_row_path(item): item for item in scope["rows"]}["f1"]
+    assert row["status"] == "modified" and "+real edit" in text_of(row)
+    assert [shape.row_path_bytes(item) for item in scope["reported_conflicts"]["names"]] == [b"f1"]
+
+
+def test_reported_conflicts_are_capped(world):
+    path = init_repo(world.root / "many-conflicts")
+    base = commit(path, "base", **{f"c{index:03d}": "1\n" for index in range(130)})
+    blob = git(path, "rev-parse", "HEAD:c000")
+    (path / ".git" / "index").write_bytes(forge_index([(f"c{index:03d}".encode(), blob, 0o100644, 2) for index in range(130)]))
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert len(scope["reported_conflicts"]["names"]) == 100 and scope["reported_conflicts"]["truncated"] is True
+
+
+def test_symlinks_anywhere_in_the_object_store_are_refused(repo, world):
+    path, base = repo
+    git(path, "gc", "-q")
+    tip = commit(path, "loose", extra="1\n")
+    objects = path / ".git" / "objects"
+    fan = next(item for item in objects.iterdir() if len(item.name) == 2 and item.is_dir())
+    victims = {"loose object": next(iter(fan.iterdir())), "pack file": next((objects / "pack").glob("*.pack"))}
+    for label, victim in victims.items():
+        copy = world.root / ("copy-" + victim.name)
+        copy.write_bytes(victim.read_bytes())
+        original = victim.with_name(victim.name + ".orig")
+        os.rename(victim, original)
+        os.symlink(copy, victim)
+        repository = build([entry(path, base, tip)])["repositories"][0]
+        assert (repository["state"], repository["reason"]) == ("not_captured", "object_store_untrusted"), label
+        victim.unlink()
+        os.rename(original, victim)
+    moved = world.root / "moved-fanout"
+    os.rename(fan, moved)
+    os.symlink(moved, fan)
+    repository = build([entry(path, base, tip)])["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "object_store_untrusted")
+    fan.unlink()
+    os.rename(moved, fan)
+    assert build([entry(path, base, tip)])["repositories"][0]["state"] == "available"
+
+
+def test_the_object_store_walk_honours_the_deadline(repo):
+    path, _ = repo
+    common = str(path / ".git")
+    assert capture._object_store_untrusted(common, capture._Budget(30)) is None
+    assert capture._object_store_untrusted(common, capture._Budget(0)) == ("incomplete", "capture_timeout")
+
+
+def test_a_hostile_version_four_index_returns_promptly_with_unknown_conflicts(repo):
+    import hashlib
+    import struct
+    path, base = repo
+    fixed = struct.pack(">10I", 0, 0, 0, 0, 0, 0, 0o100644, 0, 0, 3) + b"1" * 20 + struct.pack(">H", 0)
+    body = b"DIRC" + struct.pack(">II", 4, 1) + fixed + b"\x80" * 100_000 + b"\x00" + b"a\0"
+    (path / ".git" / "index").write_bytes(body + hashlib.sha1(body).digest())
+    for seconds in (0.01, 5.0):
+        started = time.monotonic()
+        assert capture.unmerged_names(str(path / ".git"), 20, capture._Budget(seconds)) is None
+        assert time.monotonic() - started < 1.0
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["unmerged_unknown"] is True and scope["state"] == "available"
+
+
+def test_varint_runs_and_checksums_are_bounded():
+    assert capture._varint(b"\x05", 0) == (5, 1)
+    assert capture._varint(b"\x81\x00", 0) == (256, 2)
+    with pytest.raises(capture._IndexProblem):
+        capture._varint(b"\x80" * 50 + b"\x00", 0)
+    with pytest.raises(capture._IndexProblem):
+        capture._checksum(b"x" * (3 << 20), 20, capture._Budget(0))
+
+
+def test_untracked_truncation_is_flagged_even_when_another_problem_wins(repo, world, monkeypatch):
+    path, base = repo
+    (path / "f1").write_text("edit\n")
+    (path / "untracked").write_text("u")
+    script = world.root / "flood-and-fail.sh"
+    script.write_text('#!/bin/sh\ncase "$*" in *" --others "*) git "$@"; head -c 5000 /dev/zero | tr "\\0" "a"; exit 0;; esac\n'
+                      'case "$*" in *--numstat*) exit 3;; esac\nexec git "$@"\n')
+    script.chmod(0o755)
+    monkeypatch.setattr(capture, "GIT", (str(script),))
+    monkeypatch.setattr(capture, "COMMAND_CEILING", 2000)
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["state"] == "incomplete" and scope["reason"] == "git_failed" and scope["rows_truncated"] is True

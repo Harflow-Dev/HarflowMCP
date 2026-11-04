@@ -82,6 +82,7 @@ def blank_scope(name: str, rows: list[dict[str, Any]], *, state: str = "availabl
     if name == "working_tree":
         scope["counts_and_patch_separate"] = True
         scope["unmerged_unknown"] = False
+        scope["reported_conflicts"] = {"names": [], "truncated": False}
     return scope
 
 

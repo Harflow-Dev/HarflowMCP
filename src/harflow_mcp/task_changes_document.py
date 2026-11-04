@@ -21,6 +21,7 @@ MAX_REPOSITORIES = 8
 MAX_ROWS = 500
 MAX_PATH_BYTES = 4096
 MAX_TEXT_BYTES = 64 * 1024
+MAX_REPORTED_CONFLICTS = 100
 MAX_FIELD_CHARS = 8192
 MAX_REPOSITORY_FIELD = 4096  # JSON-escaped (ASCII) bytes; bounds the worst-case listing page
 
@@ -133,10 +134,27 @@ def _row(row: Any) -> None:
     _require(len(data) == content["bytes"] and 0 < len(data) <= MAX_TEXT_BYTES, "row text size")
 
 
+def _conflicts(value: Any) -> None:
+    _dict(value, {"names", "truncated"}, "reported_conflicts")
+    _require(type(value["truncated"]) is bool, "reported_conflicts truncated")
+    names = value["names"]
+    _require(isinstance(names, list) and len(names) <= MAX_REPORTED_CONFLICTS, "reported_conflicts names")
+    for name in names:
+        _dict(name, {"path", "path_bytes_b64"}, "reported conflict")
+        _string(name["path"], "reported conflict path", nullable=True)
+        _string(name["path_bytes_b64"], "reported conflict path_bytes_b64", nullable=True)
+        _require((name["path"] is None) != (name["path_bytes_b64"] is None), "reported conflict path")
+        try:
+            raw = row_path_bytes(name)
+        except (binascii.Error, ValueError, UnicodeError):
+            raise DocumentInvalid("reported conflict encoding") from None
+        _require(len(raw) <= MAX_PATH_BYTES, "reported conflict size")
+
+
 def _scope(name: str, scope: Any) -> None:
     expected = {"state", "reason", "row_count", "rows_truncated", "observed_at", "rows"}
     if name == "working_tree":
-        expected = expected | {"counts_and_patch_separate", "unmerged_unknown"}
+        expected = expected | {"counts_and_patch_separate", "unmerged_unknown", "reported_conflicts"}
     _dict(scope, expected, "scope")
     _member(scope["state"], SCOPE_STATES, "scope state")
     _string(scope["reason"], "scope reason", nullable=True, escaped=True)
@@ -145,6 +163,7 @@ def _scope(name: str, scope: Any) -> None:
     if name == "working_tree":
         _require(scope["counts_and_patch_separate"] is True, "counts_and_patch_separate")
         _require(type(scope["unmerged_unknown"]) is bool, "unmerged_unknown")
+        _conflicts(scope["reported_conflicts"])
     rows = scope["rows"]
     _require(isinstance(rows, list) and len(rows) <= MAX_ROWS, "scope rows")
     _require(type(scope["row_count"]) is int and scope["row_count"] == len(rows), "scope row_count")

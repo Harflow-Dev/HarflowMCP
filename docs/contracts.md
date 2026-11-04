@@ -899,8 +899,9 @@ the commits are pinned, the working-tree scope reflects capture time and carries
 **Isolation.** Git never runs inside the agent-writable tree to find its Git directory, and never
 with a repository's own configuration or index. The per-worktree Git directory is proven from files (a
 linked worktree's `.git` file, the admin directory's `commondir` and `gitdir`; a main checkout's real
-`.git` directory); it is used only to read the agent's index as data (below), so an unverified one costs
-that disclosure and nothing else. Every command uses a disposable Git directory (objects and refs linked,
+`.git` directory) in the very directory later given to Git as the work tree. If that fails (for
+example a `core.worktree` that names another directory, or a repointed `.git` file) the working-tree
+scope is `not_captured` / `git_dir_unverified` and no command is given a work tree. Every command uses a disposable Git directory (objects and refs linked,
 `HEAD` checked as a regular file, minimal config; an unusable `HEAD` falls back to the common directory's,
 as no capture command reads it), replace objects off, no system or global config, `HOME` and
 `XDG_CONFIG_HOME` pointing into the disposable directory, `index.threads=false`, no hooks, fsmonitor,
@@ -927,29 +928,34 @@ staged but not committed appears as an untracked name (`status: untracked`, no t
 skip-worktree or sparse that is absent from the work tree is a deletion relative to the head.
 
 **Conflicts.** Only the names of conflicted entries are taken from the agent's index, parsed as data
-under strict bounded rules (versions 2 to 4, checksum, declared name length against the NUL, zero
-padding, names of at most 4096 bytes, no split index, safe names, a bounded scan) and never given to
-Git. Matching rows get `status: unmerged`. On any inconsistency, a missing index, or an unverified Git
-directory nothing is marked and the working-tree scope carries `unmerged_unknown: true`; this is
-best-effort disclosure and the scope may stay `available`.
+under strict bounded rules (versions 2 to 4, checksum hashed in pieces, a varint of at most five bytes,
+declared name length against the NUL, zero padding, names of at most 4096 bytes, no split index, safe
+names, a scan bounded by the deadline) and never given to Git. They are advisory: they are listed in the
+scope's `reported_conflicts` (`names`, each `path` or `path_bytes_b64`, at most 100, and `truncated`) and
+never change, add or suppress a row of the real diff, whose conflicted files appear as ordinary
+modified rows with their text. On any inconsistency or a missing index the list is empty and the scope
+carries `unmerged_unknown: true`; the scope may stay `available`.
 
 **Trust anchor and object store.** The recorded `git_common_dir` and `worktree` come from the terminal
 observation, which an agent can influence. Where the task record holds dispatch-time values they must
-still match: a repository root recorded in the dispatch baseline is anchored, and for a task worktree
-its source repository's `.git` directory must still be the common directory, else the repository is
-`not_captured` / `repository_identity_changed` and nothing about it is read (both scopes). An anchored
-repository that still matches is trusted as dispatched, alternates included. A repository first seen
-mid-run has no anchor, so its `objects` must be a real directory directly inside the common directory,
-`objects/info` and `objects/pack` must not be links (otherwise both scopes are `not_captured` /
-`object_store_untrusted`) and it must have no `objects/info/alternates` (`alternates_present`).
-Anchoring cannot prove that a linked worktree not provisioned by Harflow came from the checkout it was
-started in.
+still match: a repository root recorded in the dispatch baseline is anchored, and for a task worktree its
+source repository's `.git` directory must still be the common directory, else the repository is
+`not_captured` / `repository_identity_changed` and nothing about it is read (both scopes). Only a
+repository that is anchored with a recorded common directory and still matches is trusted as dispatched,
+alternates included. Every other repository (first seen mid-run, or anchored without a recorded common
+directory, which must also pass the Git directory proof or is `not_captured` / `git_dir_unverified`) has
+its object store walked within the deadline: `objects`, every fan-out directory, loose object,
+`pack/*` and `info/*` entry must not be a symbolic link and `info` and `pack` must be real directories,
+otherwise both scopes are `not_captured` / `object_store_untrusted`; `objects/info/alternates` gives
+`alternates_present`; a walk cut by the deadline is `incomplete` / `capture_timeout`. Hard links are not
+detected. Anchoring cannot prove that a linked worktree not provisioned by Harflow came from the
+checkout it was started in.
 
 **Scopes.** Per repository, `committed_range` is the two-dot tree diff from `base_commit` to
 `head_commit`; `working_tree` is the working tree against the pinned `head_commit`, plus untracked
 files. `committed_range` is `not_captured` with `head_missing`, `base_missing` (no recorded base, or
-the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`, `index_unsafe_path` or `tree_unreadable` (see the working-tree
-method); a repository can be `not_captured` as a whole with `repository_identity_changed`,
+the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`, `git_dir_unverified`, `index_unsafe_path` or `tree_unreadable` (see the
+working-tree method); a repository can be `not_captured` as a whole with `repository_identity_changed`,
 `object_store_untrusted` or `alternates_present`. Working-tree counts and patches are separate observations
 and may disagree (`counts_and_patch_separate: true`).
 

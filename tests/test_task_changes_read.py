@@ -339,7 +339,9 @@ FIELD_PATHS = [("product",), ("format",), ("v",), ("task_id",), ("captured_at",)
                ("repositories", 0, "scopes", "committed_range", "state"), ("repositories", 0, "scopes", "committed_range", "reason"),
                ("repositories", 0, "scopes", "committed_range", "row_count"), ("repositories", 0, "scopes", "committed_range", "rows_truncated"),
                ("repositories", 0, "scopes", "committed_range", "observed_at"), ("repositories", 0, "scopes", "committed_range", "rows"),
-               ("repositories", 0, "scopes", "committed_range", "rows", 0), ("repositories", 0, "scopes", "working_tree", "counts_and_patch_separate")]
+               ("repositories", 0, "scopes", "committed_range", "rows", 0), ("repositories", 0, "scopes", "working_tree", "counts_and_patch_separate"), ("repositories", 0, "scopes", "working_tree", "unmerged_unknown"),
+               ("repositories", 0, "scopes", "working_tree", "reported_conflicts"), ("repositories", 0, "scopes", "working_tree", "reported_conflicts", "names"),
+               ("repositories", 0, "scopes", "working_tree", "reported_conflicts", "truncated")]
 ROW_FIELDS = ["path", "path_bytes_b64", "path_truncated", "old_path", "status", "additions", "deletions", "binary", "content", "text_b64"]
 
 
@@ -453,3 +455,11 @@ def test_deeply_nested_cursor_is_invalid_not_a_traceback(world, monkeypatch):
             result(world, task, cursor=nested)
     finally:
         sys.setrecursionlimit(previous)
+
+
+@pytest.mark.parametrize("names", [[{"path": 5, "path_bytes_b64": None}], [{"path": "a"}], [{"path": "a", "path_bytes_b64": "YQ=="}],
+                                   [{"path": None, "path_bytes_b64": "!!"}], [{"path": "a", "path_bytes_b64": None}] * 101, "a"])
+def test_malformed_reported_conflicts_are_rejected(world, names):
+    document = make_document([make_repository("/r", [make_row("a")])])
+    document["repositories"][0]["scopes"]["working_tree"]["reported_conflicts"]["names"] = names
+    assert served_or_invalid(world, document) is False

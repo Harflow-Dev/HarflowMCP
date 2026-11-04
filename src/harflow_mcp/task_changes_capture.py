@@ -323,10 +323,14 @@ def _varint(data: bytes, position: int) -> tuple[int, int]:
     byte = data[position]
     position += 1
     value = byte & 0x7F
-    while byte & 0x80:
+    for _ in range(4):  # a prefix length never needs more than five bytes; longer runs are hostile
+        if not byte & 0x80:
+            return value, position
         byte = data[position]
         position += 1
         value = ((value + 1) << 7) + (byte & 0x7F)
+    if byte & 0x80:
+        raise _IndexProblem("varint")
     return value, position
 
 
@@ -342,13 +346,13 @@ def _parse_unmerged(data: bytes, hash_length: int, budget: _Budget) -> set[bytes
     version, count = struct.unpack(">II", data[4:12])
     end = len(data) - hash_length
     fixed = 40 + hash_length + 2
-    if version not in (2, 3, 4) or _checksum(data[:end], hash_length) != data[end:] or count > (end - 12) // (fixed + 1):
+    if version not in (2, 3, 4) or _checksum(data[:end], hash_length, budget) != data[end:] or count > (end - 12) // (fixed + 1):
         raise _IndexProblem("header")
     limit = document_shape.MAX_PATH_BYTES
     position, previous, names = 12, b"", set()
     try:
         for index in range(count):
-            if index % 4096 == 0 and budget.expired():
+            if index % 256 == 0 and budget.expired():
                 raise _IndexProblem("deadline")
             start = position
             if start + fixed > end:
@@ -410,8 +414,14 @@ def unmerged_names(git_dir: str | None, hash_length: int, budget: _Budget) -> se
         return None
 
 
-def _checksum(data: bytes, hash_length: int) -> bytes:
-    return hashlib.new("sha256" if hash_length == 32 else "sha1", data).digest()
+def _checksum(data: bytes, hash_length: int, budget: _Budget | None = None) -> bytes:
+    """The index checksum of `data`, hashed in pieces so the deadline is honoured."""
+    digest = hashlib.new("sha256" if hash_length == 32 else "sha1")
+    for offset in range(0, len(data), 1 << 20):
+        if budget is not None and budget.expired():
+            raise _IndexProblem("deadline")
+        digest.update(data[offset:offset + (1 << 20)])
+    return digest.digest()
 
 
 
@@ -629,6 +639,7 @@ def _scope(state: str, reason: str | None, rows: list[dict[str, Any]] | None = N
     if working_tree:
         scope["counts_and_patch_separate"] = True
         scope["unmerged_unknown"] = False
+        scope["reported_conflicts"] = {"names": [], "truncated": False}
     return scope
 
 
@@ -636,7 +647,7 @@ def _scope(state: str, reason: str | None, rows: list[dict[str, Any]] | None = N
 
 
 def _diff_scope(context: _Context, budget: _Budget, raw_args: list[str], stat_args: list[str], patch_args: list[str], *,
-                unmerged: list[bytes] | None, untracked: list[bytes] | None, working_tree: bool) -> dict[str, Any]:
+                untracked: list[bytes] | None, working_tree: bool) -> dict[str, Any]:
     """One scope: the row listing, the counts, then the patch text allocated to the rows in path order."""
     data, listed = context.collect(raw_args)
     if not listed.cause and listed.returncode != 0:
@@ -647,13 +658,6 @@ def _diff_scope(context: _Context, budget: _Budget, raw_args: list[str], stat_ar
     problem: tuple[str, str | None] = ("incomplete", listed.cause) if listed.cause else ("available", None)
     patch_entries = list(entries)
     tracked = list(entries)
-    known = {entry.path: entry for entry in entries}
-    for path in unmerged or []:
-        if path in known:
-            known[path].status, known[path].forced = "unmerged", "unmerged"
-        else:
-            known[path] = _Entry(path=path, status="unmerged", forced="unmerged")
-            tracked.append(known[path])
     tracked.sort(key=lambda entry: entry.path)
     others = [_Entry(path=path, status="untracked", forced="untracked") for path in sorted(untracked or [])]
     # Tracked rows are allocated first, so untracked names can never evict them.
@@ -786,7 +790,7 @@ def _committed_scope(context: _Context, budget: _Budget, base: Any, head: Any) -
     return _diff_scope(context, budget, context.command("diff-tree", "-r", "-z", "--raw", *options, base, head, "--"),
                        context.command("diff-tree", "-r", "-z", "--numstat", *options, base, head, "--"),
                        context.command("diff-tree", "-r", "-p", *options, base, head, "--"),
-                       unmerged=None, untracked=None, working_tree=False)
+                       untracked=None, working_tree=False)
 
 
 def _private_write(path: Path, data: bytes) -> None:
@@ -876,6 +880,10 @@ def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: 
     """
     if not _valid_commit(head):
         return _scope("not_captured", "head_missing", working_tree=True)
+    if git_dir is None:
+        # No Git command is given a work tree unless `.git` in that very directory was proven to belong to this
+        # repository; a work tree named by configuration (`core.worktree`) can never pass.
+        return _scope("not_captured", "git_dir_unverified", working_tree=True)
     _, found = context.collect(context.command("cat-file", "-e", head + "^{commit}"))
     if found.cause:
         return _scope("incomplete", found.cause, working_tree=True)
@@ -906,11 +914,18 @@ def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: 
     scope = _diff_scope(context, budget, context.command("diff-index", "-z", "--raw", *options, head, "--", work_tree=True),
                         context.command("diff-index", "-z", "--numstat", *options, head, "--", work_tree=True),
                         context.command("diff-index", "-p", *options, head, "--", work_tree=True),
-                        unmerged=sorted(conflicted or ()), untracked=untracked, working_tree=True)
+                        untracked=untracked, working_tree=True)
     scope["unmerged_unknown"] = conflicted is None
-    if others_result.cause and scope["state"] == "available":
-        # The untracked listing was cut off: keep what was read and say why it is incomplete.
-        scope.update(state="incomplete", reason=others_result.cause, rows_truncated=True)
+    # Advisory only: names from the agent's index never alter, add or suppress a row of the real diff.
+    shown = sorted(conflicted or ())[:document_shape.MAX_REPORTED_CONFLICTS]
+    scope["reported_conflicts"] = {"names": [{"path": row["path"], "path_bytes_b64": row["path_bytes_b64"]}
+                                             for row in (_row(_Entry(path=name, status="unmerged")) for name in shown)],
+                                   "truncated": len(conflicted or ()) > len(shown)}
+    if others_result.cause:
+        # The untracked listing was cut off: keep what was read and say so, whatever else happened.
+        scope["rows_truncated"] = True
+        if scope["state"] == "available":
+            scope.update(state="incomplete", reason=others_result.cause)
     return scope
 
 
@@ -983,26 +998,41 @@ def _real(path: Any) -> str | None:
     return os.path.realpath(path) if isinstance(path, str) else None
 
 
-def _object_store_untrusted(common: str) -> str | None:
-    """A reason when the object store of an unanchored repository is not a plain directory of its own.
+def _object_store_untrusted(common: str, budget: _Budget) -> tuple[str, str] | None:
+    """`(state, reason)` when an object store cannot be trusted as plain content, else None.
 
-    `objects` must be a real directory (not a link) directly inside the common directory, `objects/info`
-    and `objects/pack` must not be links, and there must be no alternates, which could name another
-    repository's objects.
+    Walks `objects/` within the deadline: no entry at any level (the fan-out directories, loose
+    objects, `pack/*`, `info/*`) may be a symbolic link, `objects/info` and `objects/pack` must be real
+    directories, and there must be no `objects/info/alternates`. Hard links are not detected.
     """
     objects = os.path.join(common, "objects")
+    untrusted = ("not_captured", "object_store_untrusted")
     try:
         if not stat.S_ISDIR(os.lstat(objects).st_mode) or os.path.realpath(objects) != os.path.join(os.path.realpath(common), "objects"):
-            return "object_store_untrusted"
-        for name in ("info", "pack"):
-            try:
-                if not stat.S_ISDIR(os.lstat(os.path.join(objects, name)).st_mode):
-                    return "object_store_untrusted"
-            except FileNotFoundError:
-                continue
+            return untrusted
+        counter = 0
+        with os.scandir(objects) as top:
+            children = list(top)
+        for child in children:
+            if child.is_symlink():
+                return untrusted
+            if child.is_dir(follow_symlinks=False) and (child.name in ("info", "pack") or re.fullmatch("[0-9a-f]{2}", child.name)):
+                with os.scandir(child.path) as directory:
+                    for item in directory:
+                        counter += 1
+                        if counter % 512 == 0 and budget.expired():
+                            return "incomplete", "capture_timeout"
+                        if item.is_symlink():
+                            return untrusted
+                        if child.name == "info" and item.name == "alternates":
+                            return "not_captured", "alternates_present"
+            elif child.name in ("info", "pack"):
+                return untrusted
+            if budget.expired():
+                return "incomplete", "capture_timeout"
     except OSError:
-        return "object_store_untrusted"
-    return "alternates_present" if os.path.lexists(os.path.join(objects, "info", "alternates")) else None
+        return untrusted
+    return None
 
 
 def _capture_repository(entry: dict[str, Any], budget: _Budget, anchors: dict[str, str | None] | None) -> dict[str, Any]:
@@ -1019,12 +1049,15 @@ def _capture_repository(entry: dict[str, Any], budget: _Budget, anchors: dict[st
     if anchored and (_real(worktree) != _real(root) or (expected is not None and _real(expected) != _real(common))):
         # The repository is no longer the one dispatch recorded: nothing about it is read.
         return _skipped(entry, "not_captured", "repository_identity_changed")
-    if not anchored:
-        # Nothing recorded at dispatch vouches for this repository, so its object store must be plain.
-        untrusted = _object_store_untrusted(common)
-        if untrusted is not None:
-            return _skipped(entry, "not_captured", untrusted)
     git_dir = verified_git_dir(worktree, common)
+    if expected is None:
+        # Dispatch did not record a common directory (or the repository was first seen mid-run), so nothing but
+        # these checks vouches for it: its Git directory must be proven and its object store must be plain.
+        if anchored and git_dir is None:
+            return _skipped(entry, "not_captured", "git_dir_unverified")
+        untrusted = _object_store_untrusted(common, budget)
+        if untrusted is not None:
+            return _skipped(entry, untrusted[0] if untrusted[0] == "incomplete" else "not_captured", untrusted[1])
     with tempfile.TemporaryDirectory(prefix="harflow_mcp-changes-") as directory:
         context = _Context(Path(directory), worktree, budget)
         context.git_dir.mkdir()
