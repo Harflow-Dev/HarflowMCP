@@ -311,11 +311,5 @@ def unavailable(reason: str = REASON_STATE_MISSING) -> dict[str, Any]:
 
 def env_agent_refusal(environ: Any = None) -> tuple[str, str] | None:
     """Cheap agent-env refusal that never opens the state root."""
-    from . import lineage
-    env = os.environ if environ is None else environ
-    if any(key in env for key in (lineage.ENV_TASK_ID, "PB_TASK_ID", "HARFLOW_DEPTH", "PB_DEPTH")):
-        return (
-            "agent_caller",
-            "HARFLOW_TASK_ID, PB_TASK_ID or a worker depth is set; unset stale HARFLOW_TASK_ID, PB_TASK_ID, HARFLOW_DEPTH and PB_DEPTH in a human shell",
-        )
-    return None
+    from . import takeover
+    return takeover.env_agent_refusal(environ)

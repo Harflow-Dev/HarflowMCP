@@ -59,6 +59,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def env_agent_refusal(environ: Mapping[str, str] | None = None) -> tuple[str, str] | None:
+    """Cheap agent-env refusal that never opens the state root."""
+    env = os.environ if environ is None else environ
+    if any(key in env for key in (lineage.ENV_TASK_ID, "PB_TASK_ID", "HARFLOW_DEPTH", "PB_DEPTH")):
+        return (
+            "agent_caller",
+            "HARFLOW_TASK_ID, PB_TASK_ID or a worker depth is set; unset stale HARFLOW_TASK_ID, PB_TASK_ID, HARFLOW_DEPTH and PB_DEPTH in a human shell",
+        )
+    return None
+
+
 def caller_refusal(
     log_dir: Path, environ: Mapping[str, str] | None = None
 ) -> tuple[str, str] | None:
@@ -72,12 +83,9 @@ def caller_refusal(
     person" is open to exactly the environments where it cannot see. `lineage.detect_caller_detail`
     is looked up at call time so tests can stub it.
     """
-    env = os.environ if environ is None else environ
-    if any(key in env for key in (lineage.ENV_TASK_ID, "PB_TASK_ID", "HARFLOW_DEPTH", "PB_DEPTH")):
-        return (
-            "agent_caller",
-            "HARFLOW_TASK_ID, PB_TASK_ID or a worker depth is set; unset stale HARFLOW_TASK_ID, PB_TASK_ID, HARFLOW_DEPTH and PB_DEPTH in a human shell",
-        )
+    env_refusal = env_agent_refusal(environ)
+    if env_refusal is not None:
+        return env_refusal
     detection = lineage.detect_caller_detail(log_dir)
     if detection.caller is not None:
         return (
