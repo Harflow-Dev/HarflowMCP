@@ -166,12 +166,30 @@ def _read(path: Path, identity: Identity, revision: str, directory_fd=None) -> d
     return value
 
 
+def _open_in_directory(name: str, flags: int, mode: int, directory_fd: int) -> int:
+    """Create or open a directory entry, retrying Darwin openat(O_CREAT) races.
+
+    Concurrent openat(O_CREAT) calls against the same directory fd can return
+    ENOENT on macOS/APFS even while that directory inode remains live. Path-based
+    opens do not show the race. Retry only while the directory fd still names a
+    directory; a genuinely missing directory still fails closed.
+    """
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return os.open(name, flags, mode, dir_fd=directory_fd)
+        except FileNotFoundError:
+            if not stat.S_ISDIR(os.fstat(directory_fd).st_mode) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.001)
+
+
 def _write(path: Path, value: dict, directory_fd: int) -> None:
     raw = json.dumps(value, sort_keys=True, allow_nan=False).encode()
     if len(raw) > MAX_RECEIPT_BYTES:
         raise ValueError("qualification receipt exceeds budget")
     temporary = ".qualification-" + uuid.uuid4().hex
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    fd = _open_in_directory(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, directory_fd)
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(raw)
@@ -359,7 +377,7 @@ def _operate(backend, feature, *, root=None, refresh=False, failure=None, read_o
             directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             lock = None
             try:
-                lock = os.open(f"{key}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+                lock = _open_in_directory(f"{key}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, directory_fd)
                 if not stat.S_ISREG(os.fstat(lock).st_mode):
                     raise ValueError("qualification lock is not regular")
                 deadline = time.monotonic() + 305

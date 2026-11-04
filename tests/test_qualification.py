@@ -60,13 +60,44 @@ def test_success_cached_and_bundle_shared(setup):
     assert q.runtime_identity("fixture", "1.2.3") == identity
 
 
-def test_concurrent_launches_probe_once(setup):
-    make, identity, root = setup
+def test_concurrent_launches_probe_once(setup, tmp_path):
+    make, identity, _root = setup
     backend = make()
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        results = list(pool.map(lambda _: q.require(backend, "first", root=root), range(5)))
-    assert all(result.ok for result in results)
-    assert __import__("pathlib").Path(identity.executable).read_text() == "probe\n"
+    # Fresh roots repeatedly: Darwin openat(O_CREAT) can spuriously ENOENT under
+    # concurrent directory-fd creates, which only shows up across many first-lock races.
+    for index in range(20):
+        q._receipts.clear()
+        q._identities.clear()
+        round_root = tmp_path / f"concurrent-state-{index}"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: q.require(backend, "first", root=round_root), range(8)))
+        assert all(result.ok for result in results)
+    assert __import__("pathlib").Path(identity.executable).read_text() == "probe\n" * 20
+
+
+def test_open_in_directory_retries_concurrent_creat_race(tmp_path):
+    import os
+    directory = tmp_path / "qualification"
+    directory.mkdir()
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        errors = []
+
+        def worker(_):
+            try:
+                fd = q._open_in_directory("key.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, directory_fd)
+                os.close(fd)
+            except Exception as exc:  # noqa: BLE001 - collect any race survivor
+                errors.append(exc)
+
+        for _ in range(50):
+            errors.clear()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(worker, range(8)))
+            assert errors == []
+            (directory / "key.lock").unlink(missing_ok=True)
+    finally:
+        os.close(directory_fd)
 
 
 def test_failure_persisted_and_refresh_required(setup):
