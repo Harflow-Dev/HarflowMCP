@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import subprocess
+import threading
 import time
 import sys
 import gc
@@ -1281,17 +1282,24 @@ async def test_a_delivered_cancel_whose_sig_keeps_failing_is_recorded_once_the_d
 
     real_write = control.write_phase
     failures = {"left": 8}  # well past the in-line attempts
+    # Hold the eventual success until the pending observation below; under load the
+    # background retry can otherwise land `.sig` before cancel_recovered returns.
+    allow_sig = threading.Event()
 
     def flaky_sig(log_dir, task_id, family, n, phase, payload):
-        if phase == "sig" and failures["left"] > 0:
-            failures["left"] -= 1
-            raise control.PhaseWriteError("transient")
+        if phase == "sig":
+            if failures["left"] > 0:
+                failures["left"] -= 1
+                raise control.PhaseWriteError("transient")
+            if not allow_sig.wait(timeout=5):
+                raise control.PhaseWriteError("test did not release sig write")
         return real_write(log_dir, task_id, family, n, phase, payload)
 
     monkeypatch.setattr(control, "write_phase", flaky_sig)
 
     await registry.cancel_recovered(record)
     assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) == "pending"
+    allow_sig.set()
 
     async def sig_written() -> None:
         while control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) != "sig":
