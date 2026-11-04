@@ -916,7 +916,7 @@ def test_tracked_rows_are_never_evicted_by_untracked_ones(repo):
         (path / f"a{index:04d}").write_text("u")
     scope = scopes(build([entry(path, base, tip)], budget_seconds=30))["working_tree"]
     names = [capture_row_path(row) for row in scope["rows"]]
-    assert scope["row_count"] == 500 and scope["rows_truncated"] is True and "zzz-tracked-edit" in names
+    assert scope["row_count"] == 500 and scope["rows_truncated"] is True and "zzz-tracked-edit" in names, (scope["state"], scope["reason"], len(names))
 
 
 def test_allow_listed_core_booleans_are_honoured(repo):
@@ -1118,3 +1118,156 @@ async def test_a_supervised_task_stores_its_changes_after_settling(tmp_path, mon
     assert "+2" in text_of(working["f"]) and scopes(document)["working_tree"]["state"] == "available"
     launch = task_supervision.read_launch(log_dir, task_id)
     assert launch["state"] == "settled"
+
+
+# --- cut-off listings -------------------------------------------------------------------------
+
+_RAW = (b":100644 100644 " + b"1" * 40 + b" " + b"0" * 40 + b" M\0one\0:100644 100644 " + b"2" * 40 + b" " + b"0" * 40 + b" M\0two\0")
+
+
+_FIRST = len(b":100644 100644 " + b"1" * 40 + b" " + b"0" * 40 + b" M\0one\0")
+_META = len(b":100644 100644 " + b"2" * 40 + b" " + b"0" * 40 + b" M")
+
+
+@pytest.mark.parametrize("cut", [_FIRST + 1, _FIRST + 20, _FIRST + _META, _FIRST + _META + 1, _FIRST + _META + 2, len(_RAW) - 1])
+def test_a_cut_raw_listing_keeps_every_completed_record(cut):
+    """Cut inside the metadata, right after its NUL, and inside the pathname: only the unfinished record goes."""
+    entries = capture._parse_raw(_RAW[:cut], partial=True)
+    assert entries is not None and [entry.path for entry in entries] == [b"one"]
+    assert capture._parse_raw(_RAW[:cut]) is None
+
+
+def test_a_whole_listing_is_unchanged_by_partial_parsing():
+    assert [entry.path for entry in capture._parse_raw(_RAW, partial=True)] == [b"one", b"two"]
+    assert capture._parse_raw(b"", partial=True) == [] and capture._parse_raw(b"junk\0", partial=True) is None
+
+
+@pytest.mark.parametrize("keep", [30, 60, 83, 85, 95, 140])
+def test_a_listing_cut_by_the_deadline_keeps_its_rows_and_the_cause(repo, world, monkeypatch, keep):
+    path, base = repo
+    tip = commit(path, "many", **{f"file{index}": "x\n" for index in range(6)})
+    script = world.root / "cut.sh"
+    script.write_text(f'#!/bin/sh\ncase "$*" in *" --raw "*) git "$@" | head -c {keep}; sleep 5; exit 0;; esac\nexec git "$@"\n')
+    script.chmod(0o755)
+    monkeypatch.setattr(capture, "GIT", (str(script),))
+    committed = scopes(build([entry(path, base, tip)], budget_seconds=0.8))["committed_range"]
+    assert (committed["state"], committed["reason"]) == ("incomplete", "capture_timeout")
+    assert committed["rows_truncated"] is True
+    assert all(row["content"]["reason"] == "capture_timeout" for row in committed["rows"])
+
+
+@pytest.mark.parametrize("ceiling", [60, 83, 85, 95, 140, 200])
+def test_a_listing_cut_by_the_ceiling_keeps_its_rows_and_the_cause(repo, monkeypatch, ceiling):
+    path, base = repo
+    tip = commit(path, "many", **{f"file{index}": "x\n" for index in range(6)})
+    monkeypatch.setattr(capture, "COMMAND_CEILING", ceiling)
+    committed = scopes(build([entry(path, base, tip)]))["committed_range"]
+    assert (committed["state"], committed["reason"]) == ("incomplete", "output_ceiling")
+    assert committed["rows_truncated"] is True and committed["row_count"] == len(committed["rows"])
+
+
+def test_a_cut_untracked_listing_keeps_the_tracked_rows(repo, world, monkeypatch):
+    path, base = repo
+    (path / "f1").write_text("edit\n")
+    for index in range(5):
+        (path / f"untracked{index}").write_text("u")
+    script = world.root / "flood-others.sh"
+    script.write_text('#!/bin/sh\ncase "$*" in *" --others "*) git "$@"; head -c 5000 /dev/zero | tr "\\0" "a"; exit 0;; esac\nexec git "$@"\n')
+    script.chmod(0o755)
+    monkeypatch.setattr(capture, "GIT", (str(script),))
+    monkeypatch.setattr(capture, "COMMAND_CEILING", 2000)
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows_truncated"]) == ("incomplete", "output_ceiling", True)
+    names = [capture_row_path(row) for row in scope["rows"]]
+    assert names == ["f1"] + [f"untracked{index}" for index in range(5)]
+
+
+def test_numstat_and_listing_parsers_never_return_unfinished_records():
+    assert capture._parse_stat(b"1\t2\ta\0-\t-\tb") == {b"a": (1, 2, False)}
+    assert capture._parse_stat(b"1\t2\ta\0-\t-\tb\0") == {b"a": (1, 2, False), b"b": (None, None, True)}
+
+
+# --- typechange to and from a submodule -------------------------------------------------------
+
+
+def gitlink_commit(path, name, parent, target):
+    index = path / ".git" / "scratch-index"
+    environment = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    subprocess.run(["git", "read-tree", parent], cwd=path, env=environment, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"160000,{target},{name}"], cwd=path, env=environment, check=True)
+    tree = subprocess.run(["git", "write-tree"], cwd=path, env=environment, check=True, capture_output=True, text=True).stdout.strip()
+    return git(path, "commit-tree", tree, "-p", parent, "-m", "gitlink")
+
+
+def test_file_to_gitlink_and_back_keep_the_patch_aligned(repo):
+    path, base = repo
+    linked = gitlink_commit(path, "f2", base, base)
+    restored = commit_tree_from(path, linked, "f2", "x again\n")
+    for tip, direction in ((linked, "file to gitlink"), (restored, "gitlink to file")):
+        parent = base if tip == linked else linked
+        committed = scopes(build([entry(path, parent, tip)]))["committed_range"]
+        rows_by_name = {capture_row_path(row): row for row in committed["rows"]}
+        assert committed["state"] == "available", direction
+        assert rows_by_name["f2"]["content"]["reason"] == "submodule", direction
+    both = rows(build([entry(path, base, restored)]), "committed_range")
+    assert both["f2"]["status"] in {"modified", "typechange"}
+
+
+def commit_tree_from(path, parent, name, content):
+    blob = git(path, "hash-object", "-w", "--stdin", input=content.encode())
+    index = path / ".git" / "scratch-index-2"
+    environment = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    subprocess.run(["git", "read-tree", parent], cwd=path, env=environment, check=True)
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}"], cwd=path, env=environment, check=True)
+    tree = subprocess.run(["git", "write-tree"], cwd=path, env=environment, check=True, capture_output=True, text=True).stdout.strip()
+    return git(path, "commit-tree", tree, "-p", parent, "-m", "file again")
+
+
+def test_a_gitlink_typechange_still_has_text_for_its_neighbours(repo):
+    path, base = repo
+    linked = gitlink_commit(path, "f2", base, base)
+    after = commit_tree_from(path, linked, "z-new", "text\n")
+    committed = scopes(build([entry(path, base, after)]))["committed_range"]
+    by_name = {capture_row_path(row): row for row in committed["rows"]}
+    assert committed["state"] == "available" and "+text" in text_of(by_name["z-new"])
+
+
+# --- flag accounting --------------------------------------------------------------------------
+
+
+def test_absent_skip_worktree_files_do_not_count_toward_the_limit(repo, monkeypatch):
+    path, base = repo
+    names = [f"s{index}" for index in range(10)]
+    tip = commit(path, "sparse", **{name: "x\n" for name in names})
+    for name in names:
+        git(path, "update-index", "--skip-worktree", name)
+        (path / name).unlink()
+    monkeypatch.setattr(capture, "FLAG_LIMIT", 3)
+    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("available", None, [])
+    for name in names[:5]:
+        git(path, "update-index", "--assume-unchanged", name)
+    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
+    assert (scope["state"], scope["reason"]) == ("incomplete", "index_flags_present")
+
+
+def test_directory_mode_entries_are_never_rewritten(repo):
+    path, _ = repo
+    data = (path / ".git" / "index").read_bytes()
+    scan = capture._scan_index(data, 20, capture._Budget(5))
+    forged = [capture._Flagged(12, b"dir", True, True, directory=True)]
+    assert capture._clear_flags(data, 20, forged, lambda name: True) == data
+    assert scan.flagged == []
+
+
+def test_edits_in_the_same_instant_as_the_index_are_still_seen(repo):
+    path, base = repo
+    for index in range(6):
+        name = f"racy{index}"
+        (path / name).write_text("1\n")
+        git(path, "add", name)
+    tip = commit(path, "racy")
+    for index in range(6):
+        (path / f"racy{index}").write_text("2\n")  # same size, written moments after the index
+    working = rows(build([entry(path, base, tip)]), "working_tree")
+    assert {f"racy{index}" for index in range(6)} <= set(working)

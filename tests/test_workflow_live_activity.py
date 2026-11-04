@@ -152,7 +152,7 @@ def test_ordinary_agent_with_the_real_gate_stays_settled_only(tmp_path, capsys, 
     assert "fully settled" in message or "cannot be verified" in message
 
 
-def live(storage, capsys, run_id, task_log=None):
+def live(capsys, run_id):
     return inspect(capsys, run_id, "exec")
 
 
@@ -163,13 +163,13 @@ def test_log_replacements_are_never_followed_or_blocked_on(tmp_path, capsys):
     outside = tmp_path / "outside.jsonl"
     outside.write_bytes(event_line("att-1", 7))
     path.symlink_to(outside)
-    assert (live(storage, capsys, run_id)["activity_state"], ) == ("unavailable",)
+    assert (live(capsys, run_id)["activity_state"], ) == ("unavailable",)
     path.unlink()
     os.mkfifo(path)
-    result = live(storage, capsys, run_id)
+    result = live(capsys, run_id)
     assert (result["activity_state"], result["reason"], result["events"]) == ("unavailable", "log_not_regular_file", [])
     path.unlink()
-    assert live(storage, capsys, run_id)["activity_state"] == "not_started"
+    assert live(capsys, run_id)["activity_state"] == "not_started"
 
 
 def test_read_uses_the_qualified_descriptor_when_the_path_is_swapped_after_open(tmp_path, capsys, monkeypatch):
@@ -186,7 +186,7 @@ def test_read_uses_the_qualified_descriptor_when_the_path_is_swapped_after_open(
         path.symlink_to(outside)
         return original(*args, **kwargs)
     monkeypatch.setattr(events, "read_page", swapping)
-    result = live(storage, capsys, run_id)
+    result = live(capsys, run_id)
     assert result["activity_state"] == "available" and [event["seq"] for event in result["events"]] == [0, 1]
 
 
@@ -207,7 +207,7 @@ def test_read_failure_is_reported_as_unavailable(tmp_path, capsys, monkeypatch):
             return False
     storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
     monkeypatch.setattr(workflow_inspection, "_open_log", lambda path: ("available", None, Broken()))
-    result = live(storage, capsys, run_id)
+    result = live(capsys, run_id)
     assert (result["activity_state"], result["reason"], result["events"]) == ("unavailable", "log_unreadable", [])
 
 
@@ -254,3 +254,25 @@ def test_task_events_serves_a_live_headless_attempt_to_a_direct_caller(tmp_path,
     assert ctl.main(["task-events", "att-1", "--json"]) == 0
     result = json.loads(capsys.readouterr().out)["result"]
     assert [event["seq"] for event in result["events"]] == [0, 1]
+
+
+@pytest.mark.parametrize("error", [ValueError("rejected before reading"), OSError("state path refused"), KeyboardInterrupt()])
+def test_the_log_stream_is_closed_when_the_page_read_raises_before_it_starts(tmp_path, monkeypatch, error):
+    from harflow_mcp import events, workflow_inspection
+    storage, run_id = build(tmp_path, [activation("exec", "running", {"task_id": "att-1", "status": "running"})])
+    log(storage, "att-1", 2)
+    opened = []
+    real = workflow_inspection._open_log
+
+    def tracking(path):
+        found = real(path)
+        opened.append(found[2])
+        return found
+
+    def refusing(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(workflow_inspection, "_open_log", tracking)
+    monkeypatch.setattr(events, "read_page", refusing)
+    with pytest.raises(type(error)):
+        inspect_request(storage.get_run(run_id), storage.root, {"execution_id": "exec", "view": "activity"}, allow_live_activity=True)
+    assert len(opened) == 1 and opened[0].closed

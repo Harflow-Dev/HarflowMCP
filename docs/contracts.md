@@ -819,8 +819,8 @@ harflow-ctl workflow-inspect RUN_ID EXECUTION_ID [--task-id T] --view activity [
 ```
 
 Today `workflow-inspect` refuses a node execution until it is fully settled (every attempt, including
-fallbacks). With this capability a **verified direct caller** (`takeover.caller_refusal` is `None`,
-decided in the ctl handler) may read the activity view of a node execution that has not settled.
+fallbacks). With this capability a **verified direct caller** (both `managed is None` and
+`takeover.caller_refusal(...) is None`, decided in the ctl handler) may read the activity view of a node execution that has not settled.
 The permission is a transport decision, never a request field, so an orchestrator's crafted
 inspection requests cannot obtain it; managed orchestrators, ordinary agents and undecidable callers
 keep the settled-only read and its message, and the MCP `inspect_workflow_node` output is unchanged.
@@ -882,7 +882,8 @@ first: `--json` is required; `--limit` is 1..500 (default 200); `--repository-ro
 usage error with `--cursor` or with `--limit`: a text read continues with `TASK_ID --cursor C` alone. Diff text can contain secrets and the user's own
 uncommitted edits; no redaction is claimed, which is why only direct callers read it. MCP has no
 equivalent. Examples: `contracts/v1/ctl-task-changes-*.json` (the `text-chunk` fixtures are generated
-with a lowered document bound so that a small patch pages; the real bound is 262144 bytes).
+with a lowered document bound so that a small patch pages, and `page-too-large` with a bound too small for
+any page; the real bound is 262144 bytes).
 
 **Capture.** The owner that supervises the task captures once, after the task and its launch receipt
 have settled, only when the task has an observed exit and its persisted `outcome.repositories` is not

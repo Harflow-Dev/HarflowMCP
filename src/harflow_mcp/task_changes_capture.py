@@ -286,6 +286,10 @@ class _IndexUnsupported(Exception):
     pass
 
 
+class _IndexDeadline(Exception):
+    pass
+
+
 _IGNORABLE = frozenset(list(range(0x200C, 0x2010)) + list(range(0x202A, 0x202F)) + list(range(0x206A, 0x2070)) + [0xFEFF])
 _DOT_GIT = re.compile(rb"(\.git|git~1)[ .]*(:.*)?", re.DOTALL)
 
@@ -323,6 +327,7 @@ class _Flagged:
     name: bytes
     assume: bool
     skip: bool
+    directory: bool = False
 
 
 @dataclass
@@ -346,7 +351,8 @@ def _varint(data: bytes, position: int) -> tuple[int, int]:
     return value, position
 
 
-def _scan_index(data: bytes, hash_length: int, budget: _Budget, *, shared_file: bool = False) -> _IndexScan:
+def _scan_index(data: bytes, hash_length: int, budget: _Budget, *, shared_file: bool = False,
+                present: Callable[[bytes], bool] | None = None) -> _IndexScan:
     """Walk every entry of an index file: validate names and note assume-unchanged and skip-worktree entries."""
     scan = _IndexScan()
     if len(data) < 12 + hash_length or data[:4] != b"DIRC":
@@ -360,7 +366,7 @@ def _scan_index(data: bytes, hash_length: int, budget: _Budget, *, shared_file: 
     try:
         for index in range(count):
             if index % 4096 == 0 and budget.expired():
-                raise _IndexUnsupported("deadline")
+                raise _IndexDeadline()
             if position + fixed > end:
                 raise _IndexUnsupported("entries")
             start = position
@@ -394,12 +400,16 @@ def _scan_index(data: bytes, hash_length: int, budget: _Budget, *, shared_file: 
             elif unsafe_index_path(name, directory=(mode & 0o170000) == 0o040000):
                 scan.unsafe = True
                 return scan
+            directory = (mode & 0o170000) == 0o040000
             assume, skip = bool(flags & 0x8000), bool(extended & 0x4000)
-            if assume or skip:
-                if len(scan.flagged) >= FLAG_LIMIT:
-                    scan.overflow = True
-                else:
-                    scan.flagged.append(_Flagged(start, name, assume, skip))
+            # Only an entry that will be rewritten counts: skip-worktree entries without a file (a sparse
+            # checkout) and sparse-index directory entries are left exactly as they are.
+            if directory or not (assume or (skip and (present is None or not name or present(name)))):
+                continue
+            if len(scan.flagged) >= FLAG_LIMIT:
+                scan.overflow = True
+            else:
+                scan.flagged.append(_Flagged(start, name, assume, skip, directory))
     except (struct.error, IndexError):
         raise _IndexUnsupported("entries") from None
     while position + 8 <= end:
@@ -429,7 +439,7 @@ def _clear_flags(data: bytes, hash_length: int, entries: list[_Flagged], present
     fixed = 40 + hash_length + 2
     for entry in entries:
         clear_skip = entry.skip and present(entry.name)
-        if not (entry.assume or clear_skip):
+        if entry.directory or not (entry.assume or clear_skip):
             continue
         if entry.assume:
             flags = struct.unpack_from(">H", buffer, entry.start + fixed - 2)[0]
@@ -454,12 +464,13 @@ class _Entry:
     binary: bool = False
     forced: str | None = None  # reason a row never carries text: untracked, submodule, unmerged
     rowed: bool = True
+    raw_typechange: bool = False  # Git's own letter was `T`, whatever the row was relabelled to
     row: dict[str, Any] = field(default_factory=dict)
 
     @property
     def segments(self) -> int:
         """Patch segments Git prints for this entry: a type change is a deletion and an addition."""
-        return 2 if self.status == "typechange" else 1
+        return 2 if self.raw_typechange or self.status == "typechange" else 1
 
 
 def _parse_raw(data: bytes, *, partial: bool = False) -> list[_Entry] | None:
@@ -473,14 +484,20 @@ def _parse_raw(data: bytes, *, partial: bool = False) -> list[_Entry] | None:
         if len(meta) != 5:
             return None
         letter = meta[4][:1].decode("ascii", "replace")
-        entry = _Entry(path=tokens[index + 1], status=_STATUSES.get(letter, "unknown"))
+        entry = _Entry(path=tokens[index + 1], status=_STATUSES.get(letter, "unknown"), raw_typechange=letter == "T")
         if b"160000" in (meta[0], meta[1]):
             entry.status, entry.forced = "submodule", "submodule"
         elif entry.status == "unmerged":
             entry.forced = "unmerged"
         entries.append(entry)
         index += 2
-    if index < len(tokens) or (last and not partial):
+    if partial:
+        # A cut stream ends in an unfinished token and possibly one metadata token whose path never
+        # arrived; both are dropped, every completed record is kept.
+        if len(tokens) - index > 1 or (len(tokens) > index and not tokens[index].startswith(b":")):
+            return None
+        return entries
+    if index < len(tokens) or last:
         return None
     return entries
 
@@ -808,20 +825,20 @@ def _committed_scope(context: _Context, budget: _Budget, base: Any, head: Any) -
                        unmerged=None, untracked=None, working_tree=False)
 
 
-def _read_index_file(path: str) -> tuple[bytes | None, str | None]:
-    """`(bytes, None)` of a regular index file, `(None, reason)` when it is missing or unusable."""
+def _read_index_file(path: str) -> tuple[bytes | None, str | None, int]:
+    """`(bytes, None, mtime_ns)` of a regular index file, `(None, reason, 0)` when it is missing or unusable."""
     try:
         info = os.lstat(path)
     except FileNotFoundError:
-        return None, "index_missing"
+        return None, "index_missing", 0
     except OSError:
-        return None, "index_unreadable"
+        return None, "index_unreadable", 0
     if not stat.S_ISREG(info.st_mode):
-        return None, "index_unreadable"
+        return None, "index_unreadable", 0
     if info.st_size > INDEX_LIMIT:
-        return None, "index_too_large"
+        return None, "index_too_large", 0
     data = _read_regular(path, INDEX_LIMIT)
-    return (data, None) if data is not None else (None, "index_unreadable")
+    return (data, None, info.st_mtime_ns) if data is not None else (None, "index_unreadable", 0)
 
 
 def _prepare_index(context: _Context, git_dir: str, common: str, hash_length: int, budget: _Budget) -> tuple[str, str] | None:
@@ -831,28 +848,30 @@ def _prepare_index(context: _Context, git_dir: str, common: str, hash_length: in
     of both files is checked before any command touches the work tree; assume-unchanged and
     skip-worktree entries, which an agent can set to hide edits, are cleared on the private copy.
     """
-    data, reason = _read_index_file(os.path.join(git_dir, "index"))
+    data, reason, index_mtime = _read_index_file(os.path.join(git_dir, "index"))
     if data is None:
         return "not_captured", reason or "index_unreadable"
+    work_tree = os.fsencode(context.work_tree or "")
+    present = lambda name: os.path.lexists(os.path.join(work_tree, name))
     try:
-        scan = _scan_index(data, hash_length, budget)
+        scan = _scan_index(data, hash_length, budget, present=present)
         shared_data = shared_scan = None
         if scan.shared is not None:
             for directory in (git_dir, common):
-                shared_data, reason = _read_index_file(os.path.join(directory, scan.shared))
+                shared_data, reason, shared_mtime = _read_index_file(os.path.join(directory, scan.shared))
                 if shared_data is not None or reason != "index_missing":
                     break
             if shared_data is None:
                 return "not_captured", "index_unsupported" if reason in (None, "index_missing", "index_unreadable") else reason
-            shared_scan = _scan_index(shared_data, hash_length, budget, shared_file=True)
+            shared_scan = _scan_index(shared_data, hash_length, budget, shared_file=True, present=present)
+    except _IndexDeadline:
+        return "incomplete", "capture_timeout"
     except _IndexUnsupported:
         return "not_captured", "index_unsupported"
     if scan.unsafe or (shared_scan is not None and shared_scan.unsafe):
         return "not_captured", "index_unsafe_path"
     if scan.overflow or (shared_scan is not None and shared_scan.overflow):
         return "incomplete", "index_flags_present"
-    work_tree = os.fsencode(context.work_tree or "")
-    present = lambda name: os.path.lexists(os.path.join(work_tree, name))
     name = scan.shared
     if shared_scan is not None and shared_scan.flagged:
         shared_data = _clear_flags(shared_data, hash_length, shared_scan.flagged, present)
@@ -861,9 +880,13 @@ def _prepare_index(context: _Context, git_dir: str, common: str, hash_length: in
         data = data[:scan.link_offset] + digest + data[scan.link_offset + hash_length:]
     if scan.flagged or name != scan.shared:
         data = _clear_flags(data, hash_length, scan.flagged, present)
+    # Git trusts a stat match only for entries older than the index file, so the copies keep the
+    # originals' times: an edit made in the same instant the index was written is still re-hashed.
     if name is not None:
         _private_write(context.git_dir / name, shared_data)
+        os.utime(context.git_dir / name, ns=(shared_mtime, shared_mtime))
     _private_write(context.git_dir / "index", data)
+    os.utime(context.git_dir / "index", ns=(index_mtime, index_mtime))
     context.environment["GIT_INDEX_FILE"] = str(context.git_dir / "index")
     return None
 
@@ -962,19 +985,25 @@ def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: 
     others_data, others_result = context.collect(context.command(
         "ls-files", "-z", "--others", "--exclude-standard", "--directory", "--no-empty-directory", work_tree=True))
     for result in (unmerged_result, others_result):
-        if result.cause:
+        if result.cause and result is unmerged_result:
             return _scope("incomplete", result.cause, working_tree=True)
-        if result.returncode != 0:
+        if not result.cause and result.returncode != 0:
             return _scope("unavailable", "git_failed", working_tree=True)
     unmerged = sorted({record.partition(b"\t")[2] for record in unmerged_data.split(b"\0") if record})
     if any(unsafe_index_path(path) for path in unmerged):
         return _scope("not_captured", "index_unsafe_path", working_tree=True)
-    untracked = [path for path in others_data.split(b"\0") if path]
+    names = others_data.split(b"\0")
+    names.pop()  # the unfinished (or empty) token after the last NUL
+    untracked = [path for path in names if path]
     options = ["--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--ignore-submodules=dirty"]
-    return _diff_scope(context, budget, context.command("diff-index", "-z", "--raw", *options, head, "--", work_tree=True),
-                       context.command("diff-index", "-z", "--numstat", *options, head, "--", work_tree=True),
-                       context.command("diff-index", "-p", *options, head, "--", work_tree=True),
-                       unmerged=unmerged, untracked=untracked, working_tree=True)
+    scope = _diff_scope(context, budget, context.command("diff-index", "-z", "--raw", *options, head, "--", work_tree=True),
+                        context.command("diff-index", "-z", "--numstat", *options, head, "--", work_tree=True),
+                        context.command("diff-index", "-p", *options, head, "--", work_tree=True),
+                        unmerged=unmerged, untracked=untracked, working_tree=True)
+    if others_result.cause and scope["state"] == "available":
+        # The untracked listing was cut off: keep what was read and say why it is incomplete.
+        scope.update(state="incomplete", reason=others_result.cause, rows_truncated=True)
+    return scope
 
 
 # --- repositories -----------------------------------------------------------------------------

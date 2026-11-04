@@ -365,6 +365,9 @@ def build_changes(world: World) -> None:
         chunk = world.call("text-chunk", "task-changes", "task-changes-available", *paged, capability=cap)
         assert chunk["has_more"], chunk
         world.call("text-chunk-next", "task-changes", "task-changes-available", "--cursor", chunk["next_cursor"], capability=cap)
+    # The refusal is unreachable for documents Harflow writes at the real bound; the fixture lowers the bound to show its shape.
+    with mock.patch.object(task_changes_read, "DOCUMENT_MAX_BYTES", 400):
+        world.call("page-too-large", "task-changes", "task-changes-available", capability=cap)
     expired = first["next_cursor"]
     store_document("task-changes-available", [repository(WORKSPACE, [row("README.md", b"diff\n")], [])])
     world.call("cursor-expired", "task-changes", "task-changes-available", "--cursor", expired, capability=cap)

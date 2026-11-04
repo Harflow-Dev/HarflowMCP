@@ -565,7 +565,11 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any], *, 
         state, reason, handle = ("not_started", None, None) if task.get("status") == "reserved" else _open_log(path)
         if state == "available":
             # Read through the descriptor that was qualified, never by reopening the path.
-            page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=layout, handle=handle, failed=failed)
+            try:
+                page = read_page(path, limit=limit, before_seq=before, after_seq=after, layout=layout, handle=handle, failed=failed)
+            except BaseException:
+                handle.close()  # a validation error is raised before the reader owns the stream
+                raise
             if failed:
                 state, reason, page = "unavailable", "log_unreadable", PageResult(events=[], has_more=False)
         else:

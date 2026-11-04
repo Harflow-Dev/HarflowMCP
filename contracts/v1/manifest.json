@@ -1507,6 +1507,15 @@
         "task-changes.v1"
       ],
       "valid": true
+    },
+    "ctl-task-changes-page-too-large.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.7",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-changes.v1"
+      ],
+      "valid": true
     }
   },
   "files": {
@@ -1693,6 +1702,7 @@
     "ctl-task-changes-text-chunk.json": "8a78cab685e8ea6dfec02f1cf49e582bf5c3b31eb3c30f2710f09f8eb9dd18fb",
     "ctl-task-changes-text-complete.json": "392b54b23d5f02aa8cddd45361dd594d2426af66e9ded1bc9ddd6a625f4ee4de",
     "ctl-task-changes-unavailable.json": "ae4b4d460468b3f9896028b00d650b60471d01504d66a64d1051caf64b4dadff",
-    "ctl-task-changes-unknown-task.json": "1bedd095c5dcc288f59716da52393c9d8718f2e6f91e10e91bec950fe6182e36"
+    "ctl-task-changes-unknown-task.json": "1bedd095c5dcc288f59716da52393c9d8718f2e6f91e10e91bec950fe6182e36",
+    "ctl-task-changes-page-too-large.json": "aa06e98db2632195c54fb151fcc7e700a2ad3fd9d9caeecc059b016ee7ccd7ec"
   }
 }

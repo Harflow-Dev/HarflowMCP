@@ -137,3 +137,11 @@ def test_capture_states_without_a_document(state, capsys):
     assert run(capsys)["capture"] == {"state": "available", "reason": "no_repository"}
     seed(state, finished_at="2027-01-01T00:00:10+00:00")
     assert shape.SUFFIX and run(capsys)["capture"]["reason"] == "capture_missing"
+
+
+def test_page_too_large_is_a_stable_refusal(state, capsys, monkeypatch):
+    from harflow_mcp import task_changes_read
+    seed(state)
+    document(state)
+    monkeypatch.setattr(task_changes_read, "DOCUMENT_MAX_BYTES", 300)
+    assert run(capsys, expect=1)["code"] == "changes_page_too_large"
