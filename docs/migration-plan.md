@@ -64,9 +64,12 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
       cost/observed model. This check records delivered work; receipt acceptance,
       design states, release and consumer adoption remain pending.
 - [ ] C0-MC-02 Specify version handshake and validate compatibility and unknown
-      optional fields without breaking existing v1 consumers.
+      optional fields without breaking existing v1 consumers. S05 supplies
+      [delivered evidence](migration-receipts/S05.md); owner acceptance pending.
 - [ ] C0-MC-03 Fixture ctl unknown/exit behavior and run/resume payloads; capture
       the included MCP tools schema and document deferred unsupported tools.
+      [S05](migration-receipts/S05.md) captures all 55 Python schemas and the
+      S03 Proposed subset without accepting it; receipt acceptance pending.
 - [ ] C0-MC-04 Build independent black-box conformance scenarios from the
       reviewed contract with disposable roots and external oracles; run Python
       first and record manifest hash and baseline defects.

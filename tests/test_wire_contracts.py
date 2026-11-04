@@ -98,9 +98,9 @@ def test_manifest_cases_reach_the_wire_validator():
                 validate_envelope(document, case["format"], live=True)
                 with pytest.raises(ValueError, match="product/format"):
                     validate_envelope(document["result"]["events"][0], EVENT_FORMAT, live=False)
-            elif name == "invalid-missing-capabilities.json":
+            elif name == "invalid-missing-capabilities.json" or name.startswith("invalid-s05-missing-"):
                 validate_envelope(document, case["format"], live=True)
-                required = {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
+                required = set(case["required_capabilities"]) or {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
                 assert not required.issubset(set(document.get("capabilities", [])))
             else:
                 with pytest.raises((ValueError, workflow_definition_documents.WorkflowDefinitionDocumentError, workflow_run_documents.WorkflowRunDocumentError)) as caught:

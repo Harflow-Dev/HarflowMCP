@@ -1890,3 +1890,86 @@ files; normal CLI state-root qualification still applies.
 Canonical `*-shared-*-synthetic.json` and `ctl-interaction-events-synthetic.json`
 fixtures demonstrate the additive fields and refusal envelope. They are synthetic
 contract specimens, not live execution or notification-delivery evidence.
+
+## Migration consumer boundary (S05)
+
+Read-only polling follows the same per-operation handshake as mutations. Each
+`task-events` newer-page request, including an empty poll, requires its own fresh
+`version-info` probe; there is no polling TTL, session cache or shared probe for a
+burst. Stop the requested operation on a failed or incompatible probe. Switching
+runtime, root, HOME, environment or working-directory policy requires fresh
+selection and probing. Validate the response envelope independently even after a
+successful probe. The probe is compatibility evidence, not runtime authenticity.
+
+Thus N separately issued read operations cost 2N process spawns (probe + command).
+A public batch command costs one pair, but does not authorize sharing a probe
+across separate commands. Consumers may reduce redundant observations, dispose
+subscriptions and back off scheduling; they must preserve unknown/unavailable
+states and compatibility checks. This decision retains the existing rule rather
+than adding an unqualified runtime-identity cache. Python timings are informational.
+The accepted Rust cold-probe/status and list/event-page budgets measure each
+named operation separately; the additional probe cost must also be reported in
+end-to-end polling measurements. The budgets and their Rust-only scope are not
+changed by this policy. Electron first-paint/frame budgets still gate the client.
+
+### Launch and failure interpretation
+
+For `run` and `resume`, exit 0 with `result.task_id` acknowledges launch acceptance,
+not completion, output delivery or permission to retry. Resume creates a new task
+on the existing session. The parent serializer returns exit 1 with an error for a
+reported launch refusal; `invalid_params` can contain more specific diagnostic
+information. Usage errors exit 2. Exit 3 with top-level `unknown.message` means the
+owner did not report reliably and a task may exist. Reconcile with public task
+reads before any user-authorized retry; never automatically replay a launch.
+An ID spelling resolution can add `resolved_from`; consumers tolerate it.
+
+An unknown operation returns the ctl `usage` envelope and exit 2. Only a known
+additive operation on an older engine may be classified as unsupported on that
+basis; usage on a supported operation may instead mean invalid arguments.
+Unknown error codes mean an unavailable/refused operation, not success. A missing,
+malformed, wrong-line or wrong-format envelope, process-launch failure, timeout or
+unexpected EOF is a transport/protocol failure. Do not convert these into an empty
+successful page. Unknown optional payload fields, capability names and event kinds
+remain additive; none grants authority. Known envelope identity stays mandatory.
+
+The `ctl-launch-*` canonical fixtures exercise the real parent serializer with
+injected detached outcomes (no fork or agent execution) and the real unknown-command
+parser. Each manifest case records its process `exit_code`. Existing control tests
+exercise actual fake-backend run/resume and timeout ownership separately.
+
+### Included MCP schemas and unsupported mock capabilities
+
+`contracts/mcp-v1/tools.json` captures the complete Python source `list_tools()`
+result without lifespan startup or tool execution. `included` names the 47 S03
+proposed Rust v1 candidates; `deferred` names eight proposed exclusions: `subscribe`, `unsubscribe`,
+`subscribe_workflow`, `unsubscribe_workflow`, `get_task_notifications`,
+`get_workflow_notifications`, `recent_limit_hits`, `workflow_limit_hits`. Deferred
+Rust tools, if that partition is accepted, may be absent or return explicit
+unsupported refusal; Python retains all 55. This exact partition remains Proposed,
+pending owner acceptance; S05 does not accept it or certify Rust support. Preserve
+input and output schemas for accepted included tools, including optional arguments and capability-based refusals;
+backend limitations are not permission to silently drop inputs. MCP schemas use
+MCP's protocol, not the ctl envelope, and therefore live outside `contracts/v1`.
+The schema file is self-contained; no sibling checkout is required to validate it.
+
+Desktop uses ctl/setup; MCP remains agent-facing and shared client ports remain
+transport-neutral. Mock `engine.sock`, Start engine and ECONNREFUSED content does
+not define a socket protocol, daemon or lifecycle command. Engine readiness,
+executable compatibility and store readiness are separate observations. Existing
+public setup/runtime selection does not authorize installs or registration changes.
+Unavailable/recovery UI designs remain an S15 dependency.
+
+The harness menu lists engine-reported backends, gated by installed, qualification,
+capability and enforcement cells for the exact requested feature. Claude, Codex
+and Vibe are the E0 qualification targets; Python presence of other backends is
+not E0 or Rust v1 qualification. Unknown versions/features remain unsupported or
+unknown as reported. Neither a capability string nor a mock menu qualifies a CLI.
+
+Global MCP settings use the existing human-only `mcp-allowlist` ctl operation;
+there is no new MCP permission API or task-wide approval. Read `supported` and
+backend-specific restrictions, including individual tools for Vibe and existing
+server/schema requirements. Writes affect future sessions, preserve deny/project
+overrides and do not register, authenticate or enable network access. Caller
+approval responses still authorize an exact action, not future-session policy.
+See [harness permissions](harness-permissions.md#mcp-approvals-are-separate-from-command-permissions).
+The builder shortcut's Proposed removal is not accepted by this specification.

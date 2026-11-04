@@ -229,3 +229,13 @@
 - Disclose independent owner/process verdicts, capture continuity and raw-log cutoff.
 - Add bounded exact-session Claude transcript activity with independent display cursors.
 - Persist configurable background idle bounds across dispatch and continuation, with precise idle-bound diagnostics.
+
+### Migration contract evidence (S05, unreleased)
+
+- Clarify per-operation handshake cadence for read-only polling, launch uncertainty,
+  unsupported operations and v2 mock capability boundaries without runtime changes.
+- Add seven `ctl-launch-*` fixtures for run/resume acceptance, refusal, uncertainty
+  and unknown-command usage, with exit codes in manifest cases. Re-vendor the
+  complete `contracts/v1` bundle in S06; do not replace only the new files.
+- Capture all 55 source MCP schemas and the S03 Proposed 47 included/eight
+  deferred Rust v1 candidate partition separately under `contracts/mcp-v1` (no Rust qualification claim).

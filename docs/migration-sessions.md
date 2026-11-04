@@ -1,6 +1,6 @@
 # HarflowMCP migration sessions
 
-Status: receipt evidence reconciled 2026-11-04; later sessions remain planned. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
+Status: S01–S05 evidence delivered 2026-11-04; S05 receipt acceptance pending; later sessions remain planned. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
 
 ## Dispatch protocol
 
@@ -62,7 +62,7 @@ The [v2 coverage ledger](../../HarflowDesign/v2/docs/migration-coverage.md) is a
 
 ### S05 — Handshake and contract fixtures
 
-- Status: planned. Lead: HarflowMCP. Co-owned: None.
+- Status: Evidence delivered; receipt acceptance pending. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S04.
 - Checklist coverage: C0-MC-02 (final contribution), C0-MC-03 (final contribution).
 - Scope and acceptance: Reconcile v2 mock capabilities with actual public compatibility, errors and schemas; fixture handshake, unknown fields, run/resume and included MCP schemas, documenting unsupported capabilities without inventing semantics.
