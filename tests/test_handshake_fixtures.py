@@ -30,7 +30,7 @@ def test_included_mcp_schema_scope_preserves_python_surface():
     assert set(fixture['included']) | set(fixture['deferred']) == set(names)
     # S01/S02 schema identity must survive ctl-only additions.
     canonical = json.dumps(fixture['tools'], sort_keys=True, separators=(',', ':')).encode()
-    assert hashlib.sha256(canonical).hexdigest() == '26ad72c6c054b8ce24e51deb61dc12f1bcc2ee095501904f6782adaeb57acdc3'
+    assert hashlib.sha256(canonical).hexdigest() == '3c0a3e2dfeca9000c0c855e6ee595356f1e664d24f7141b91f07b2c1e8eab12b'
 
 
 def test_s04_capabilities_remain_advertised_with_canonical_examples():

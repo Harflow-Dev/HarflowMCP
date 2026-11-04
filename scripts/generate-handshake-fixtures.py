@@ -54,8 +54,15 @@ def documents():
 
 
 async def schemas():
+    import inspect
     from harflow_mcp.server import mcp
-    tools = [tool.model_dump(mode='json', by_alias=True, exclude_none=True) for tool in await mcp.list_tools()]
+    # Cleandoc descriptions so Python 3.11/3.13 docstring indentation cannot diverge.
+    tools = []
+    for tool in await mcp.list_tools():
+        row = tool.model_dump(mode='json', by_alias=True, exclude_none=True)
+        if isinstance(row.get('description'), str):
+            row['description'] = inspect.cleandoc(row['description'])
+        tools.append(row)
     names = {tool['name'] for tool in tools}
     assert set(DEFERRED) <= names
     return {'tools': tools, 'included': sorted(names - set(DEFERRED)), 'deferred': DEFERRED,

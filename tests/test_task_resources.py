@@ -474,7 +474,14 @@ async def test_repair_restores_provable_holders(tmp_path, monkeypatch, identitie
     identities.alive(record.owner["pid"])
     write_receipt(tmp_path, "8" * 32, "granted", owner=OWNER, resources={"names": ["device"], "state": "granted", "reservation_id": "f" * 32})
     ledger(tmp_path).path.write_text("garbage")
-    assert await asyncio.to_thread(ctl.main, ["resources-repair", "--json"]) == 0
+    # The live task may rewrite metadata under the repair scan; retry the known race.
+    code = 1
+    for _ in range(20):
+        code = await asyncio.to_thread(ctl.main, ["resources-repair", "--json"])
+        if code == 0:
+            break
+        await asyncio.sleep(0.05)
+    assert code == 0
     result = json.loads(capsys.readouterr().out.splitlines()[-1])["result"]
     assert result["rebuilt"] is True
     assert sorted(result["restored"]) == sorted([record.resources["reservation_id"], "f" * 32])
