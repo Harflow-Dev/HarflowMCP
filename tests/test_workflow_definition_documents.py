@@ -52,7 +52,7 @@ def test_encode_decode_round_trip_keeps_authored_payload_and_stamps_envelope():
 
 @pytest.mark.parametrize(
     "version",
-    ["0.0.7", "0.0.1+build.7", "0.0.1"],
+    ["0.0.8", "0.0.1+build.7", "0.0.1"],
 )
 def test_decode_accepts_compatible_stable_versions(version):
     document = documents.encode(definition())

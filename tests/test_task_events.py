@@ -501,7 +501,7 @@ async def test_mcp_event_tools_output_is_byte_identical_to_the_pre_ctl_reader(st
     registry = server._reg()
     monkeypatch.setattr(registry, "_log_dir", state.tasks_directory)
     registry.state_layout = state
-    payload = b"".join(line(i, "assistant_delta" if i % 7 == 0 else "assistant_text", product_version="0.0.7") for i in range(130))
+    payload = b"".join(line(i, "assistant_delta" if i % 7 == 0 else "assistant_text", product_version=PRODUCT_VERSION) for i in range(130))
     (state.tasks_directory / f"{TASK}.events.jsonl").write_bytes(payload + b'{"partial')
     page = await server.get_task_event_page(TASK, limit=20)
     page.pop("next_cursor")

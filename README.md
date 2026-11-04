@@ -55,7 +55,7 @@ or `gh repo view --json` for supported reads. These are Harflow-supplied command
 not an OS Git sandbox; inherited settings and hooks can still allow or deny commands.
 Permission previews expose the actual mechanism and caveats. See [publication permissions](docs/contracts.md#publication-permission-policy).
 
-Version 0.0.7 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
+Version 0.0.8 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Task phase slots can serialize heavy commands while code-writing tasks overlap. Explicit human enable, durable FIFO leases and optional conservative host cleanup are documented in [phase slots](docs/resources-and-worktrees.md#task-phase-slots); Monitor queue UI remains outstanding. Phase operations distinguish a disabled layout with the stable error code `phase_slots_not_enabled`; see the [phase slot contract](docs/contracts.md#task-phase-slots).
 
