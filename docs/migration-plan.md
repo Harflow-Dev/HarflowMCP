@@ -72,7 +72,9 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
       S03 Proposed subset without accepting it; receipt acceptance pending.
 - [ ] C0-MC-04 Build independent black-box conformance scenarios from the
       reviewed contract with disposable roots and external oracles; run Python
-      first and record manifest hash and baseline defects.
+      first and record manifest hash and baseline defects. S07 supplies
+      [partial infrastructure evidence](migration-receipts/S07.md); S08/S09
+      scenario and baseline acceptance contributions remain outstanding.
 - [ ] C0-MC-05 Coordinate byte-identical fixture re-vendoring and compatibility
       checks with Mac before announcing a contract change complete.
       [S06 evidence](../../HarflowMac/docs/migration-receipts/S06.md) vendors

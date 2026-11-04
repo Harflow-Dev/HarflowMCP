@@ -1,6 +1,6 @@
 # HarflowMCP migration sessions
 
-Status: S01–S06 evidence delivered 2026-11-04; S05/S06 receipt acceptance pending; S07 onward remains unstarted. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
+Status: S01–S07 evidence delivered 2026-11-04; receipt acceptance pending; S08 onward remains unstarted. The [workspace session index](../../HARFLOW_MIGRATION_SESSIONS.md) defines dispatch order; the [repository checklist](migration-plan.md) retains full item criteria. These session specifications include work led or co-owned by this repository.
 
 ## Dispatch protocol
 
@@ -78,7 +78,7 @@ The [v2 coverage ledger](../../HarflowDesign/v2/docs/migration-coverage.md) is a
 
 ### S07 — Conformance infrastructure
 
-- Status: planned. Lead: HarflowMCP. Co-owned: None.
+- Status: Partial infrastructure evidence delivered; receipt acceptance pending. Lead: HarflowMCP. Co-owned: None.
 - Prerequisite receipts: S06.
 - Checklist coverage: C0-MC-04 (partial).
 - Scope and acceptance: Deliver isolated black-box runner, fake harness, external spawn ledger and independent oracles with manifest identity.

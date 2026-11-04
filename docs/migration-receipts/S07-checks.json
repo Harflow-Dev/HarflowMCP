@@ -1,0 +1,306 @@
+{
+  "context_sha256": "8c586d2f994a7dfe74f0afdf3e8f0ddc7a3b9fc5b05cdefe294cc5f324582548",
+  "contract_checks": {
+    "passed": 15,
+    "seconds": 2.02
+  },
+  "date": "2026-11-04",
+  "engine_cases_passed": true,
+  "fixtures": 199,
+  "framework_implementation_commit": "a70547a10ecffe2b324abc4235fbb4922ffe0b4c",
+  "framework_sha256": {
+    "__init__.py": "9017cc826cc2b575a6dac77b73108ce54b8f50eb2ab352da545b739f5f0ce0b4",
+    "__main__.py": "74fff10eb2bd330c92909b27a5a9ae84f41b3f268a5c04f51f849276919f19c6",
+    "fake_harness.py": "080122322a483e4b4fe9f51a8b4fb318c0a2c6fd2e1de254044721b9893183bc",
+    "oracles.py": "bc784e3bb4b114ef5176403aa3bc397bb3c4ed2b3edcdb946b6c3c0bc1ae397e",
+    "process.py": "bcdde542a9b3869f0ff1ec122334318a792de9ede8ccda811f5c22fd2e55d442",
+    "runner.py": "523570e54464d38ee6fa909a72fe3eee82bc466bdf0e4a95fcda12c91b60e0e4"
+  },
+  "invocation_id": "5e3fda65cc404532811a14ac83155211",
+  "manifest_sha256": "383ecf7a9b234a1ece18eb15585398f08a77205c02a43cb2a928a2819f76fee0",
+  "observations": [
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "engine",
+      "ledger_sha256": "2d32c236ca2ff753a8718c0dd9fce9e11c3973fa23dfcf3d4220fbc06f11b46b",
+      "nonce": "fa02bb4dd097441d91c24edbeb745dcd",
+      "ok": true,
+      "operation": [
+        "version-info",
+        "--json"
+      ],
+      "pid": 26283,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "a968043b8ab3e6ce7c993049f27a6d6e8f81c3944d97772234b1e09c2cc108ba",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 888,
+          "captured_bytes": 888,
+          "sha256": "ba8149b8957b6e88bc5e798245c10c0ee4649d656aecbe624283d23dd2aaba08"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "engine",
+      "ledger_sha256": "dbcbc7be476741dd65b5f7faad643feafd9ca4c18c1bdf531f0849e018fee3b9",
+      "nonce": "a1070e2c6e144de08c1979f35ba81c01",
+      "ok": true,
+      "operation": "fresh-handshake",
+      "pid": 26286,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "723b210ab2060dfe6fbe63d2cc5d4826a4efdb9b92de0f2a4ca995b6b4f016bd",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 888,
+          "captured_bytes": 888,
+          "sha256": "ba8149b8957b6e88bc5e798245c10c0ee4649d656aecbe624283d23dd2aaba08"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "engine",
+      "ledger_sha256": "1447981c4ed1da0b9f196a0160a902acd371c0a6f5d59a8d4911982051dd9e95",
+      "nonce": "04977f5f1b9a4e8395f3cd97903e93be",
+      "ok": true,
+      "operation": [
+        "state-inspect",
+        "--json"
+      ],
+      "pid": 26289,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "7f7a9db3817795c4f41091f290626b24c8cc5b8d6d361ab616255aa6be5eb1d2",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 372,
+          "captured_bytes": 372,
+          "sha256": "549f2e14418d38e5dd8d657c3d077fc2ef33f73a8f406f25e961fb967b8dc24a"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "standalone_fake",
+      "ledger_sha256": "68a2899a03d2974538d36b3e1152312d5b12887adabb702d3b8b4cbd2730a332",
+      "nonce": "1ee9edf71e2145e2a6445a1640e594ec",
+      "ok": true,
+      "operation": "version",
+      "pid": 26128,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "5dadc31ec2a623a7e44006753cbcb4ab83bffb0a9357e64b0f1bdbf77928bd70",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 27,
+          "captured_bytes": 27,
+          "sha256": "4d5bc9e7c0c56e32e7253d1c89444e33d7beaaf2f22e7fcd0cd894a6291443c3"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "standalone_fake",
+      "ledger_sha256": "439ac103f9309ef1db6c73459c63854619c5e31caed437b4ce9a15f871852db1",
+      "nonce": "41a9ec349c1a46c48614ef55510ac862",
+      "ok": true,
+      "operation": "success",
+      "pid": 26140,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "2788549f52805510f8a027a6d594c67c7e899ddcf4d5ce19aa807610941becf8",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 89,
+          "captured_bytes": 89,
+          "sha256": "5487137432407565e579bcdd60fb984f04514359181f75305e023479f947873e"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_quiescent_os_observed",
+      "kind": "standalone_fake",
+      "ledger_sha256": "b32c5da8dbf582604e78fe581d553380df84a5207cc373cc73201fb1e7c5c1be",
+      "nonce": "ccc50c7a89b744a0aba69aa9b4e20cc5",
+      "ok": false,
+      "operation": "nonzero",
+      "pid": 26156,
+      "pipes_drained": true,
+      "returncode": 7,
+      "spawn_sha256": "f8dc3a83207c98deda0b6b365a9c925794d2d4415afabba3c6d4c6be3bdd9a8e",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 93,
+          "captured_bytes": 93,
+          "sha256": "f889417f6d566b44cf1acc8ffce6d3642d2caaf1ffe140428afcc71a98cdb09b"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_signalled",
+      "kind": "standalone_fake",
+      "ledger_sha256": "7634e70a103d5453bc454e29c0b82adad96fb018cea67b2c5023f009cd1c4465",
+      "nonce": "b4dcd44031024b81b49fd800f319e6a3",
+      "ok": false,
+      "operation": "hang",
+      "pid": 26160,
+      "pipes_drained": true,
+      "returncode": -9,
+      "spawn_sha256": "824a0ff9067f0a869c28e6d3e8525783d247132facf2ee58d33d340685859557",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "timed_out": true
+    },
+    {
+      "capture_exceeded": true,
+      "cleanup": "group_signalled",
+      "kind": "standalone_fake",
+      "ledger_sha256": "6e23ad535650178351f716448d7ba6bdf64eae2639734c9fd15a9406d59f07fc",
+      "nonce": "65c419136fd54adc9507db5599806a72",
+      "ok": false,
+      "operation": "flood",
+      "pid": 26259,
+      "pipes_drained": true,
+      "returncode": -9,
+      "spawn_sha256": "54d28db24ac67a642e8ffe71f616117347df4d33f495b36a60b808acf3e17f5d",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 151552,
+          "captured_bytes": 65536,
+          "sha256": "0cf123b0126165f0de1c42fa66f11e82ff6f6d37d6bcfcbeb0f9cf7c7ad8733c"
+        },
+        "stdout": {
+          "bytes_seen": 151552,
+          "captured_bytes": 65536,
+          "sha256": "1f8745f0d2d1387ec1af2211a3cf417b2e9e885e853472649c1d979d0e9370e3"
+        }
+      },
+      "timed_out": false
+    },
+    {
+      "capture_exceeded": false,
+      "cleanup": "group_signalled",
+      "kind": "standalone_fake",
+      "ledger_sha256": "b8b626d30dc155c1bd3ba1515816f011390d74ded25ce064b5e5094ace66154a",
+      "nonce": "af81fa3df4c5486bb14d284b5002f8b7",
+      "ok": true,
+      "operation": "pipe-holder",
+      "pid": 26271,
+      "pipes_drained": true,
+      "returncode": 0,
+      "spawn_sha256": "1f57025bdb86b5b6853a3806ea11322645d9e9e687f5729be4f5e19c0c699d04",
+      "streams": {
+        "stderr": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes_seen": 0,
+          "captured_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "timed_out": false
+    }
+  ],
+  "report_sha256": "d33fad1fcdca695fe09f72b39e2a1749f85f744d51e8a2a21b720e192235461c",
+  "runtime": {
+    "architecture": "arm64",
+    "binary_sha256": "68100c5188b837802c7ae52398389d121b1c063ed244dec11649775b539c3a30",
+    "platform": "darwin",
+    "site_packages_sha256": "7bb6c5afa663c9fdaea064afb94a37ef04b51e3c0efb856acb63be09efcd4517",
+    "soabi": "cpython-311-darwin",
+    "version": "3.11.15 (main, May 10 2026, 19:23:07) [Clang 22.1.3 ]"
+  },
+  "runtime_identity_limits": [
+    "stdlib and OS/system library contents are not pinned",
+    "site-packages content digest does not attest external editable dependency targets",
+    "no installed or managed runtime qualification"
+  ],
+  "scope": "S07 infrastructure and read-only boundary only; no S08/S09 acceptance",
+  "selfchecks": {
+    "command": ".venv/bin/python -m pytest conformance/tests -q",
+    "independent_author_passed": 88,
+    "independent_author_seconds": 47.91,
+    "log_sha256": "3680c8fb88c8b3c996d703bf851441d08fee6d6ec949d4bc5e68188f5c11a09b",
+    "primary_passed": 88,
+    "primary_seconds": 50.12,
+    "process_access": "macOS OS process observation enabled"
+  },
+  "source_commit": "0f10ad30e28e7da1873685cebe70aef687881723",
+  "source_git_tree": "dddc6a0acf732fde474df397e66291f0f01699b4",
+  "source_snapshot": {
+    "archive_sha256": "63f08cd10686650796e634ea1e4e955a5e301d9547f3d1d625186bf6702d6be3",
+    "commit": "0f10ad30e28e7da1873685cebe70aef687881723",
+    "tree_sha256": "04df22989f148f6175070edd67600c2fa51a6edc9b94024323c9e5595d56b75a"
+  },
+  "unqualified": [
+    "engine-to-fake backend integration",
+    "detached owners and escaped descendants",
+    "task and authority scenarios",
+    "workflow/resource/statistics scenarios",
+    "real harnesses",
+    "Rust",
+    "Linux/Windows",
+    "full behavioral conformance",
+    "full engine unit suite",
+    "CI/publication/install"
+  ]
+}
