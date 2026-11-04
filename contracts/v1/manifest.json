@@ -466,21 +466,21 @@
     },
     "ctl-limit-hits-ready.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-limit-hits-empty.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-limit-hits-preparing.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.9",
+      "expected_product_version": "0.0.10",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
@@ -1767,9 +1767,9 @@
     "ctl-messaging-queued.json": "6950e16c2872fa6cf1165ee7ee90804a3d4ba2cadbfbb0cc221319f4a54ccc23",
     "ctl-workflow-messages.json": "c59fe9c78bdff72687feea8820667c356d6452bd086c25b8c9a5d9b7320e8543",
     "ctl-workflow-monitor-controls.json": "c3f3ad60ad44ebafa6271dd8e870979f398181820773084a09262866205d37b8",
-    "ctl-limit-hits-ready.json": "fdb81c87cc66bd21299b6470d5657ef726cb663eaf68f2690d1ef3c7f4b17321",
-    "ctl-limit-hits-empty.json": "0cb411ac058e0abb0f385ee66f123a5857907bf25f022345cbaac03290947ad0",
-    "ctl-limit-hits-preparing.json": "cf6342f87085122cfc4cb41392f4fc6a95978b6ed6b5a8602273dc94c08544fc",
+    "ctl-limit-hits-ready.json": "68b664607ee868f1f934b34df858c53130dd12ec8414b70f6cfc468c943be919",
+    "ctl-limit-hits-empty.json": "b840858677977f4e2da31bce3c54941b8b97312c9de25f46b269507c4bf8bf81",
+    "ctl-limit-hits-preparing.json": "54b41785c74df221b750ba45c7a5084b885c6dcbb957c678c6b86aca663c7512",
     "ctl-workflow-limit-hits-ready.json": "ae62b32db4e5ad3a7564e07620a72d44f7a74d124b65de911547d322cf699788",
     "ctl-workflow-limit-hits-empty.json": "6acac4646871343f0393211f9b2ef411c4e3098f4b7e920080d3296dd3646fc8",
     "ctl-workflow-limit-hits-preparing.json": "b4ecd28132ff0b9e2ed9323a07dd85fb0dba319dd81b94c99f6d9d09070b3967",
