@@ -1,4 +1,4 @@
-# Conformance infrastructure (S07/S08)
+# Conformance infrastructure (S07/S08/S09)
 
 This standard-library runner provides isolated black-box observations. It does
 not import engine implementation helpers as outcome oracles. The S07 entrypoint
@@ -145,3 +145,61 @@ Inspect the complete case set, captured operations, observer records and each
 `cleanup.json`, not just the aggregate boolean. Temporary artifacts are not a
 durable evidence store. Receipt acceptance and full C0 qualification remain
 separate from a passing controlled-profile run.
+
+## S09 workflow, resource and statistics profile
+
+S09 extends the same controlled source approach. Verify the complete self-check
+result before supplying its log and digest; the preflight argument binds external
+bytes and does not itself attest that tests passed:
+
+```sh
+.venv/bin/python -m pytest conformance/tests conformance/tests_s08 conformance/tests_s09 -q \
+  > /private/tmp/s09-preflight.log
+# Inspect the exit status and complete log before continuing.
+S09_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
+S09_GATE="$(shasum -a 256 /private/tmp/s09-preflight.log | cut -d ' ' -f 1)"
+.venv/bin/python -m conformance.s09.scenarios \
+  --invocation-id "$S09_ID" --repo "$PWD" \
+  --commit b0185be855fd13acc94cb2d2008400d285d15df2 \
+  --python "$PWD/.venv/bin/python" \
+  --observer-preflight /private/tmp/s09-preflight.log \
+  --observer-preflight-sha256 "$S09_GATE"
+```
+
+Output lives under a fresh `/private/tmp/h9-<ID-prefix>` with one isolated profile
+per case. Existing prefixes refuse. The runner emits case progress and the final
+report path, retains context/captures on failure, and stops at the first failed
+case. Progress report writes are not atomic publication. `--case NAME` selects a
+subset explicitly; a subset passing does not establish the complete matrix.
+
+The observer additionally qualifies workflow owners and their supervised task
+children. A bounded private CLI/owner rendezvous keeps the real CLI parent alive
+until owner registration has armed its kernel identity/exit watch. An audit hook
+observes exact run/root spawn intents; it does not replace engine spawning.
+Parent acknowledgments bind kernel peer PID, parent, nonce and operation identity
+and remain in per-command ledgers. Nested workflow runs share the registered root
+owner; their separate identities come from qualified public run/attempt links.
+Autonomous owner replacement during teardown remains unsupported and fail-closed.
+
+Cases cover core definition operations, sequential/parallel/nested execution,
+exact input decisions, explicit scheduler recovery and cancellation, whole-task
+FIFO/owner uncertainty, scratch cleanup guards, disabled phase diagnostics, and
+retained-history statistics. Orchestrator input proof uses issued checkpoint and
+delivery receipts: public task prompts can be display labels, and a session can
+span several control turns. Workers and managed child CLI requests retain their
+own public/OS/capture evidence. Synthetic reported cost/model fields test
+provenance and null semantics; they are not real provider charges.
+
+Branch/fetch/worktree mutation options and alternate `run --workflow` routing are
+excluded. The worktree case permits only the public read-only refusal probe;
+`slot` permits only `status`, never enable/service operations. All cleanup is
+limited to fresh owned test state and known registered participants. No owner
+state, real provider, installation or registration is used.
+
+The profile selects product 0.0.7 through an explicit source archive and existing
+Python 3.11.15, with the S07/S08 runtime-closure limits. Stock backend loading,
+lazy entrypoint purity, OS confinement, generic binary-target workflow execution,
+Rust/platform/client qualification and full conformance remain unproven. See the
+[S09 coverage ledger](../docs/migration-receipts/S09-coverage.md) for required
+missing families and acceptance boundaries. S09 contributes evidence; it does not
+approve C0 or authorize the next migration session.

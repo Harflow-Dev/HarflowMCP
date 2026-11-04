@@ -23,6 +23,18 @@ def framework_hash():
 
 
 class SourceProfile:
+    allowed_commands = ALLOWED
+
+    def overlay_sources(self):
+        return {name: Path(__file__).parent / name for name in
+                ("bootstrap.py", "backend.py", "fake_agent.py", "client.py")}
+
+    def make_observer(self):
+        return Observer(self.output / "observer")
+
+    def framework_hash(self):
+        return framework_hash()
+
     def __init__(self, repo, commit, output, python=None, *, tasks_enabled=False):
         self.repo, self.commit = Path(repo), commit
         self.output = Path(output).absolute()
@@ -49,13 +61,13 @@ class SourceProfile:
         verify_manifest(self.source / 'contracts/v1/manifest.json')
         self.runtime_identity = _runtime(self.python, self.output, self.env)
         overlay = self.output / 'overlay'
-        for name in ('bootstrap.py', 'backend.py', 'fake_agent.py', 'client.py'):
-            shutil.copyfile(Path(__file__).parent / name, overlay / name)
+        for name, source in self.overlay_sources().items():
+            shutil.copyfile(source, overlay / name)
         self.shim = overlay / 'python-shim'
         self.shim.write_text('#!/bin/sh\nexec ' + shlex.quote(str(self.python)) +
             ' -I -B ' + shlex.quote(str(overlay / 'bootstrap.py')) + ' "$@"\n')
         self.shim.chmod(0o700)
-        self.observer = Observer(self.output / 'observer').start()
+        self.observer = self.make_observer().start()
         try:
             self.env.update(S08_OBSERVER_SOCKET=self.observer.socket_path,
                 S08_OBSERVER_NONCE=self.observer.nonce, S08_ARCHIVE_SRC=str(self.source / 'src'),
@@ -65,7 +77,7 @@ class SourceProfile:
                 'stock_backend_qualification': False, 'source': self.source_identity,
                 'runtime': self.runtime_identity, 'pristine_source_sha256': tree_hash(self.source),
                 'active_profile_sha256': tree_hash(overlay),
-                'framework_sha256': framework_hash(),
+                'framework_sha256': self.framework_hash(),
                 'environment_sha256': digest(json.dumps(self.env, sort_keys=True).encode()),
                 'shim': str(self.shim)}
             self.initial_fingerprint = self.fingerprint()
@@ -87,7 +99,7 @@ class SourceProfile:
             'selectors': digest(json.dumps({'python': str(self.python), 'shim': str(self.shim),
                 'workspace': str(self.workspace), 'source': str(self.source),
                 'state_root': str(self.state_root)}, sort_keys=True).encode()),
-            'framework': framework_hash()}
+            'framework': self.framework_hash()}
 
     def _invoke(self, argv):
         before = self.fingerprint()
@@ -110,7 +122,7 @@ class SourceProfile:
 
     def command(self, argv, requiredcap=(), *, required_capabilities=None):
         argv = list(argv)
-        if not argv or argv[0] not in ALLOWED or '--json' not in argv:
+        if not argv or argv[0] not in self.allowed_commands or '--json' not in argv:
             raise ConformanceError('S08 command is not allowed or lacks JSON')
         if argv[0] not in ('version-info', 'state-inspect') and not self.tasks_enabled:
             raise ConformanceError('task execution requires verified observer gate')

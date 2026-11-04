@@ -63,7 +63,7 @@ def ancestry(pid):
 
 
 class Observer:
-    def __init__(self, artifact_dir, *, controller_pid=None, source_profile='s08'):
+    def __init__(self, artifact_dir, *, controller_pid=None, source_profile='s08', allow_workflows=False):
         if sys.platform != 'darwin' or not hasattr(select, 'kqueue'):
             raise RuntimeError('S08 observer unsupported: Darwin kqueue required')
         self.directory = Path(artifact_dir)
@@ -76,6 +76,7 @@ class Observer:
         if self.controller_pid != os.getpid():
             raise ValueError('controller must be this observer process')
         self.source_profile = source_profile
+        self.allow_workflows = allow_workflows
         self._condition = threading.Condition(threading.RLock())
         self._records, self._connections = {}, {}
         self._failed = False
@@ -140,18 +141,26 @@ class Observer:
         if type(request['pid']) is not int or request['pid'] != pid or type(request['control']) is not bool:
             raise ValueError('claimed PID or control')
         role = request['role']
-        if role not in ('cli', 'ctl-fork', 'supervisor', 'fake', 'descendant'):
+        roles = ('cli', 'ctl-fork', 'supervisor', 'fake', 'descendant')
+        if self.allow_workflows:
+            roles += ('workflow-owner',)
+        if role not in roles:
             raise ValueError('role')
         if (role == 'cli') == request['control']:
             raise ValueError('CLI must be thread-free; other roles require control')
         identity = ancestry(pid)
-        parents = {'ctl-fork': 'cli', 'supervisor': 'ctl-fork', 'fake': 'supervisor', 'descendant': 'fake'}
+        parents = {'ctl-fork': ('cli',), 'supervisor': ('ctl-fork',),
+                   'fake': ('supervisor',), 'descendant': ('fake',)}
+        if self.allow_workflows:
+            parents['workflow-owner'] = ('cli',)
+            parents['supervisor'] += ('workflow-owner',)
+            parents['fake'] += ('workflow-owner',)
         with self._condition:
             if len(self._records) >= MAX_PARTICIPANTS or any(r['pid'] == pid and not r['exited'] for r in self._records.values()):
                 raise ValueError('participant bound or duplicate')
             parent = next((r for r in self._records.values() if r['pid'] == identity['ppid'] and not r['exited']), None)
             valid = (role == 'cli' and (identity['ppid'] == self.controller_pid or (parent and parent['role'] == 'fake')))
-            if not valid and not (role in parents and parent and parent['role'] == parents[role]):
+            if not valid and not (role in parents and parent and parent['role'] in parents[role]):
                 raise ValueError('unknown or wrong parent')
             token = secrets.token_hex(16)
             # This succeeds while the client is blocked waiting for our ACK.
