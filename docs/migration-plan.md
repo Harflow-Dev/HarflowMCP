@@ -2,7 +2,8 @@
 
 Dispatchable work packages: [migration sessions](migration-sessions.md).
 
-Status: planned, 2026-11-02. All work items remain unverified.
+Status: reconciled 2026-11-04. Delivered evidence and outstanding acceptance are
+distinguished below; aggregate migration gates remain pending.
 
 Own the authoritative Python engine and public contracts until explicit
 transfer. Inputs are reproducible current behavior and reviewed v1 requirements;
@@ -29,8 +30,8 @@ uses B0 (baseline), C0 (contracts and design), E0 (client and Electron on
 Python), R0 (Rust parity), I0 (integrated stack), and O0 (owner cutover and
 publication). It is not a build dependency. Freeze and qualify the reproducible existing baseline without waiting for open
 feature tickets. Use the v2 intent ledger to decide retained and simplified scope;
-legacy UI parity and open tickets do not independently mandate inclusion. All boxes below are deliberately unchecked;
-scaffolds alone do not establish completion. Early-use gates and defaults remain
+legacy UI parity and open tickets do not independently mandate inclusion. Unchecked items retain outstanding acceptance or contributions; checked items
+record the bounded evidence stated below, not blanket gate acceptance. Early-use gates and defaults remain
 subject to evidence and explicit authorization for root registration. Use fresh
 Rust state; archive historical task, run and event records rather than importing
 them. Import only definitions, configuration and preferences, with an explicit
@@ -42,6 +43,8 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
 
 - [ ] B0-MC-01 Record current commits, runtime selection, fixture digest, ctl
       inventory, MCP schema and supported backend qualification evidence.
+      [S01](migration-receipts/S01.md) inventory is delivered; receipt acceptance
+      remains outstanding and qualification limits are retained.
 - [ ] B0-MC-02 Review a v1 parity ledger against specification and observed
       behavior; record discrepancies as defects rather than adopting them blindly.
       The [S03 receipt](migration-receipts/S03.md) supplies the final contribution,
@@ -56,7 +59,10 @@ Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
 - [x] C0-MC-01 Specify and fixture necessary additive event paging, status and
       read gaps, including bounded pages, cursor expiry, retention gaps, drain
       and change semantics. The [S04 receipt](migration-receipts/S04.md) supplies
-      the final evidence; G-DIFF implementation and recorded read gaps remain.
+      the initial evidence; the [S04 follow-up](migration-receipts/S04-gaps.md)
+      implements G-DIFF, successor discovery, live workflow activity and statistics
+      cost/observed model. This check records delivered work; receipt acceptance,
+      design states, release and consumer adoption remain pending.
 - [ ] C0-MC-02 Specify version handshake and validate compatibility and unknown
       optional fields without breaking existing v1 consumers.
 - [ ] C0-MC-03 Fixture ctl unknown/exit behavior and run/resume payloads; capture
