@@ -897,51 +897,60 @@ tasks recovered after their owner died, are not captured. A continuation is its 
 the commits are pinned, the working-tree scope reflects capture time and carries its own `observed_at`.
 
 **Isolation.** Git never runs inside the agent-writable tree to find its Git directory, and never
-with a repository's own configuration. The per-worktree Git directory is proven from files (a linked
-worktree's `.git` file, the admin directory's `commondir` and `gitdir`; a main checkout's real `.git`
-directory), else the working-tree scope is `not_captured` / `git_dir_unverified` and the committed
-scope still runs. Every command uses a disposable Git directory (objects and refs linked, `HEAD`
-checked as a regular file, minimal config; an unusable `HEAD` falls back to the common directory's, as
-no capture command reads it), replace objects off, no system or global config, `HOME` and
-`XDG_CONFIG_HOME` pointing into the disposable directory, no hooks, fsmonitor, external diff,
-textconv or filter drivers, literal pathspecs and no network. Only data is carried over from the
-repository: a fixed set of non-executing `core` booleans (`filemode`, `ignorecase`,
-`precomposeunicode`, `symlinks`, `autocrlf`) parsed from its config, its `info/exclude`, and the
-user's global ignore file (the `core.excludesFile` of their global config, else Git's default
-location; includes are not followed). Submodules are never executed or entered as repositories: Git
-compares the commit a submodule's own `HEAD` names with the recorded one but runs no process and
-reads no configuration there (`--ignore-submodules=dirty`), so only a changed submodule commit is
-reported.
+with a repository's own configuration or index. The per-worktree Git directory is proven from files (a
+linked worktree's `.git` file, the admin directory's `commondir` and `gitdir`; a main checkout's real
+`.git` directory); it is used only to read the agent's index as data (below), so an unverified one costs
+that disclosure and nothing else. Every command uses a disposable Git directory (objects and refs linked,
+`HEAD` checked as a regular file, minimal config; an unusable `HEAD` falls back to the common directory's,
+as no capture command reads it), replace objects off, no system or global config, `HOME` and
+`XDG_CONFIG_HOME` pointing into the disposable directory, `index.threads=false`, no hooks, fsmonitor,
+external diff, textconv or filter drivers, literal pathspecs and no network. Only data is carried over
+from the repository: a fixed set of non-executing `core` booleans (`filemode`, `ignorecase`,
+`precomposeunicode`, `symlinks`, `autocrlf`) parsed from its config, its `info/exclude`, and the user's
+global ignore file (the `core.excludesFile` of their global config, else Git's default location; includes
+are not followed). Submodules are never executed or entered as repositories: Git compares the commit a
+submodule's own `HEAD` names with the recorded one but runs no process and reads no configuration there
+(`--ignore-submodules=dirty`), so only a changed submodule commit is reported.
 
-The working tree is read through a private copy of the index (a split index's shared part is copied
-too); the original index is never touched. Before any command touches the work tree every entry name
-of the index (and of a split index's shared part) is checked as Git's `verify_path` would: absolute
-names, empty, `.` or `..` components, backslashes and any spelling of `.git` (case, trailing dots and
-spaces, `git~1`, NTFS streams, HFS+ ignorable characters) make the scope `not_captured` /
-`index_unsafe_path`. A missing index is `not_captured` / `index_missing`, so a deleted index cannot
-turn every tracked file into a deletion. Entries marked assume-unchanged, and skip-worktree entries
-whose file exists, are cleared on the copy and forced to be read from disk, so an agent cannot hide
-an edit with those flags; more than 50,000 such entries make the scope `incomplete` /
-`index_flags_present`. The copy is refreshed so stat-only differences are not reported; if that
-fails the scope is `incomplete` / `index_refresh_failed` with no rows.
+**Working-tree method.** The agent's own index is never handed to Git: an agent controls its bytes, its
+stat data and its flags (assume-unchanged, skip-worktree, sparse directories), and parsers can disagree
+about them. Instead a private index is built with `git read-tree <pinned head>` in the disposable
+directory (no checkout; Git rejects every unsafe name in the tree there, such as `..`, `.git` in any
+spelling, absolute or empty components, which makes the scope `not_captured` / `index_unsafe_path`; a tree
+that cannot be read is `tree_unreadable`; an absent head commit is `head_missing`). `update-index
+--refresh` then hashes every tracked file against it, `diff-index` produces the listing, counts and
+patch, and `ls-files --others` the untracked names. **Cost:** because no stat data is trusted, every
+tracked file is read within the shared 2-second budget, so a large checkout can end the scope
+`incomplete` / `capture_timeout` with no rows; a partial result is never reported as available. A
+refresh that exits abnormally is `incomplete` / `index_refresh_failed`. **Consequences:** a file that is
+staged but not committed appears as an untracked name (`status: untracked`, no text); a file marked
+skip-worktree or sparse that is absent from the work tree is a deletion relative to the head.
 
-**Trust anchor.** The recorded `git_common_dir` and `worktree` come from the terminal observation,
-which an agent can influence. Where the task record holds dispatch-time values they must still match:
-a repository root recorded in the dispatch baseline is anchored, and for a task worktree its source
-repository's `.git` directory must still be the common directory, else `working_tree` is
-`not_captured` / `repository_identity_changed` (the committed range, which reads content-addressed
-objects with replace objects off, still runs). A repository first seen mid-run has no anchor; if its
-object store has `objects/info/alternates` both scopes are `not_captured` / `alternates_present`.
-Anchoring cannot prove a linked worktree that was not provisioned by Harflow came from the checkout
-it was started in.
+**Conflicts.** Only the names of conflicted entries are taken from the agent's index, parsed as data
+under strict bounded rules (versions 2 to 4, checksum, declared name length against the NUL, zero
+padding, names of at most 4096 bytes, no split index, safe names, a bounded scan) and never given to
+Git. Matching rows get `status: unmerged`. On any inconsistency, a missing index, or an unverified Git
+directory nothing is marked and the working-tree scope carries `unmerged_unknown: true`; this is
+best-effort disclosure and the scope may stay `available`.
+
+**Trust anchor and object store.** The recorded `git_common_dir` and `worktree` come from the terminal
+observation, which an agent can influence. Where the task record holds dispatch-time values they must
+still match: a repository root recorded in the dispatch baseline is anchored, and for a task worktree
+its source repository's `.git` directory must still be the common directory, else the repository is
+`not_captured` / `repository_identity_changed` and nothing about it is read (both scopes). An anchored
+repository that still matches is trusted as dispatched, alternates included. A repository first seen
+mid-run has no anchor, so its `objects` must be a real directory directly inside the common directory,
+`objects/info` and `objects/pack` must not be links (otherwise both scopes are `not_captured` /
+`object_store_untrusted`) and it must have no `objects/info/alternates` (`alternates_present`).
+Anchoring cannot prove that a linked worktree not provisioned by Harflow came from the checkout it was
+started in.
 
 **Scopes.** Per repository, `committed_range` is the two-dot tree diff from `base_commit` to
 `head_commit`; `working_tree` is the working tree against the pinned `head_commit`, plus untracked
 files. `committed_range` is `not_captured` with `head_missing`, `base_missing` (no recorded base, or
-the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`,
-`git_dir_unverified`, `repository_identity_changed`, `index_missing`, `index_too_large` (over 32 MiB),
-`index_unsupported` (an unsupported or unreadable shared index), `index_unreadable` or
-`index_unsafe_path`; both scopes with `alternates_present`. Working-tree counts and patches are separate observations
+the object is gone) or `base_not_ancestor`. `working_tree` is `not_captured` with `head_missing`, `index_unsafe_path` or `tree_unreadable` (see the working-tree
+method); a repository can be `not_captured` as a whole with `repository_identity_changed`,
+`object_store_untrusted` or `alternates_present`. Working-tree counts and patches are separate observations
 and may disagree (`counts_and_patch_separate: true`).
 
 **Rows** (at most 500 per scope, tracked rows allocated before untracked ones, then `rows_truncated`;
@@ -949,7 +958,8 @@ sorted by path bytes; the raw listing and the counts are separate bounded stream
 ceiling or deadline keeps the complete records already read):
 `path` (UTF-8) or `path_bytes_b64`, `path_truncated`, `old_path` (always `null`: renames are off,
 so a rename is a deletion and an addition), `status` (`added`, `modified`, `deleted`, `typechange`,
-`unmerged`, `submodule`, `untracked`, `unknown`; an untracked directory is one row ending in `/`), `additions` and `deletions` (`null` for binary),
+`unmerged`, `submodule`, `untracked`, `unknown`; an untracked directory is one row ending in `/`, and a staged but
+uncommitted new file is an untracked name), `additions` and `deletions` (`null` for binary),
 `binary` and `content {state, reason, bytes}`. Paths over 4096 bytes keep a truncated form with
 `content` `not_captured` / `path_too_long`. Symlinks are never followed: their text is the link-target
 diff. Content `state` and `reason`: `available`; `truncated` (`file_limit` over 64 KiB, `task_limit`

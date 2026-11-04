@@ -136,7 +136,7 @@ def _row(row: Any) -> None:
 def _scope(name: str, scope: Any) -> None:
     expected = {"state", "reason", "row_count", "rows_truncated", "observed_at", "rows"}
     if name == "working_tree":
-        expected = expected | {"counts_and_patch_separate"}
+        expected = expected | {"counts_and_patch_separate", "unmerged_unknown"}
     _dict(scope, expected, "scope")
     _member(scope["state"], SCOPE_STATES, "scope state")
     _string(scope["reason"], "scope reason", nullable=True, escaped=True)
@@ -144,6 +144,7 @@ def _scope(name: str, scope: Any) -> None:
     _string(scope["observed_at"], "scope observed_at", nullable=True, escaped=True)
     if name == "working_tree":
         _require(scope["counts_and_patch_separate"] is True, "counts_and_patch_separate")
+        _require(type(scope["unmerged_unknown"]) is bool, "unmerged_unknown")
     rows = scope["rows"]
     _require(isinstance(rows, list) and len(rows) <= MAX_ROWS, "scope rows")
     _require(type(scope["row_count"]) is int and scope["row_count"] == len(rows), "scope row_count")

@@ -81,6 +81,7 @@ def blank_scope(name: str, rows: list[dict[str, Any]], *, state: str = "availabl
              "observed_at": DATE, "rows": rows}
     if name == "working_tree":
         scope["counts_and_patch_separate"] = True
+        scope["unmerged_unknown"] = False
     return scope
 
 

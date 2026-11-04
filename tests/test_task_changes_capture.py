@@ -230,33 +230,6 @@ def test_submodule_rows_have_no_text_and_submodule_config_never_runs(world):
     assert list(marks.iterdir()) == [] and sub_head
 
 
-def test_repointed_git_file_is_unverified_but_committed_scope_still_captures(world, repo):
-    path, base = repo
-    git(path, "branch", "other")
-    linked = world.root / "linked"
-    git(path, "worktree", "add", "-q", str(linked), "-b", "linked")
-    tip = commit(linked, "in linked", g="1\n")
-    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    good = build([entry(path, base, tip, worktree=linked, common=common)])
-    assert scopes(good)["working_tree"]["state"] == "available"
-    other = world.root / "other-linked"
-    git(path, "worktree", "add", "-q", str(other), "other")
-    for target in (str(world.root / "nowhere"), os.path.join(common, "worktrees", "other-linked")):
-        (linked / ".git").write_text(f"gitdir: {target}\n")
-        document = build([entry(path, base, tip, worktree=linked, common=common)])
-        assert scopes(document)["working_tree"]["reason"] == "git_dir_unverified"
-        assert scopes(document)["committed_range"]["state"] == "available" and "g" in rows(document, "committed_range")
-
-
-def test_symlinked_git_directory_is_unverified(world, repo):
-    path, base = repo
-    real = world.root / "elsewhere"
-    os.rename(path / ".git", real)
-    os.symlink(real, path / ".git")
-    document = build([simple_entry(path, base, common=str(path / ".git"))])
-    assert scopes(document)["working_tree"]["reason"] == "git_dir_unverified"
-
-
 def test_verified_git_dir_forms(world, repo):
     path, _ = repo
     common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -280,37 +253,6 @@ def test_original_index_is_never_modified(repo):
     document = build([simple_entry(path, base)])
     assert (index.read_bytes(), index.stat().st_mtime_ns) == before
     assert set(rows(document, "working_tree")) == {"f1"}
-
-
-def test_split_index_is_copied_with_its_shared_part(repo):
-    path, base = repo
-    git(path, "update-index", "--split-index")
-    (path / "f1").write_text("a\nb\nsplit\n")
-    git(path, "add", "f1")
-    shared = sorted(p.name for p in (path / ".git").glob("sharedindex.*"))
-    assert shared
-    index = (path / ".git" / "index").read_bytes()
-    assert capture._scan_index(index, 20, capture._Budget(5)).shared in shared
-    document = build([simple_entry(path, base)])
-    assert "split" in text_of(rows(document, "working_tree")["f1"])
-    for name in shared:
-        (path / ".git" / name).unlink()
-    assert scopes(build([simple_entry(path, base)]))["working_tree"]["reason"] == "index_unsupported"
-
-
-def test_shared_index_name_is_none_for_a_plain_index(repo):
-    path, _ = repo
-    scan = capture._scan_index((path / ".git" / "index").read_bytes(), 20, capture._Budget(5))
-    assert scan.shared is None and not scan.unsafe and scan.flagged == []
-    with pytest.raises(capture._IndexUnsupported):
-        capture._scan_index(b"nonsense" * 10, 20, capture._Budget(5))
-
-
-def test_index_too_large(repo, monkeypatch):
-    path, base = repo
-    monkeypatch.setattr(capture, "INDEX_LIMIT", 10)
-    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
-    assert (scope["state"], scope["reason"]) == ("not_captured", "index_too_large")
 
 
 def wrapper(world, body):
@@ -701,15 +643,16 @@ def test_continuations_are_launched_as_their_own_supervised_processes(world, mon
 # --- hostile indexes --------------------------------------------------------------------------
 
 
-def forge_index(entries, *, flags_for=None):
-    """A version 2 index with exactly these `(name, oid)` entries, bypassing Git's own path checks."""
+def forge_index(entries):
+    """A version 2 index with exactly these `(name, oid[, mode[, stage]])` entries, bypassing Git's own checks."""
+    import hashlib
     import struct
     body = b"DIRC" + struct.pack(">II", 2, len(entries))
-    for name, oid in sorted(entries):
-        fixed = struct.pack(">10I", 0, 0, 0, 0, 0, 0, 0o100644, 0, 0, 3) + bytes.fromhex(oid) + struct.pack(">H", min(len(name), 0xFFF))
+    for item in sorted(entries):
+        name, oid, mode, stage = (tuple(item) + (None, None))[:2] + ((item[2] if len(item) > 2 else 0o100644), (item[3] if len(item) > 3 else 0))
+        fixed = struct.pack(">10I", 0, 0, 0, 0, 0, 0, mode, 0, 0, 3) + bytes.fromhex(oid) + struct.pack(">H", (stage << 12) | min(len(name), 0xFFF))
         entry = fixed + name + b"\0"
         body += entry + b"\0" * (-len(entry) % 8)
-    import hashlib
     return body + hashlib.sha1(body).digest()
 
 
@@ -724,38 +667,6 @@ def test_ordinary_index_names_are_accepted(name):
     assert not capture.unsafe_index_path(name)
 
 
-@pytest.mark.parametrize("name", [b"../secret.txt", b".git/config", b"sub/../../secret.txt"])
-def test_index_entry_outside_the_work_tree_is_never_read(repo, world, name):
-    path, base = repo
-    (world.root / "secret.txt").write_text("OUTSIDE-SENTINEL\n")
-    blob = git(path, "hash-object", "-w", str(world.root / "secret.txt"))
-    index = path / ".git" / "index"
-    index.write_bytes(forge_index([(b"f1", git(path, "rev-parse", "HEAD:f1")), (name, blob)]))
-    document = build([simple_entry(path, base)])
-    scope = scopes(document)["working_tree"]
-    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "index_unsafe_path", [])
-    assert "OUTSIDE-SENTINEL" not in json.dumps(document) and scopes(document)["committed_range"]["state"] == "available"
-
-
-def test_unsafe_name_in_a_shared_index_is_refused(repo):
-    import hashlib
-    path, base = repo
-    git(path, "update-index", "--split-index")
-    git(path, "add", "-A")
-    git_dir = path / ".git"
-    shared = next(git_dir.glob("sharedindex.*"))
-    forged = forge_index([(b"../x", git(path, "rev-parse", "HEAD:f1"))])
-    digest = forged[-20:]
-    index = bytearray((git_dir / "index").read_bytes())
-    position = bytes(index).index(bytes.fromhex(shared.name.split(".")[1]))
-    index[position:position + 20] = digest
-    index[-20:] = hashlib.sha1(bytes(index[:-20])).digest()
-    (git_dir / ("sharedindex." + digest.hex())).write_bytes(forged)
-    (git_dir / "index").write_bytes(bytes(index))
-    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
-    assert (scope["state"], scope["reason"]) == ("not_captured", "index_unsafe_path")
-
-
 def test_leading_directory_symlink_leaks_nothing(world):
     path = init_repo(world.root / "link-repo")
     base = commit(path, "base", **{"d/secret.txt": "committed\n", "f": "1\n"})
@@ -768,13 +679,6 @@ def test_leading_directory_symlink_leaks_nothing(world):
     document = build([simple_entry(path, base)])
     assert "LEAK-SENTINEL" not in json.dumps(document)
     assert rows(document, "working_tree")["d/secret.txt"]["status"] == "deleted"
-
-
-def test_missing_index_is_not_captured(repo):
-    path, base = repo
-    (path / ".git" / "index").unlink()
-    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
-    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "index_missing", [])
 
 
 def test_assume_unchanged_and_skip_worktree_cannot_hide_edits(repo):
@@ -792,13 +696,6 @@ def test_assume_unchanged_and_skip_worktree_cannot_hide_edits(repo):
     assert (path / ".git" / "index").read_bytes() == before
 
 
-def test_skip_worktree_entries_without_files_stay_quiet(repo):
-    path, base = repo
-    git(path, "update-index", "--skip-worktree", "f2")
-    (path / "f2").unlink()
-    assert rows(build([simple_entry(path, base)]), "working_tree") == {}
-
-
 def test_flags_in_a_split_index_are_cleared_too(repo):
     path, base = repo
     git(path, "update-index", "--split-index")
@@ -814,20 +711,6 @@ def test_flags_in_a_split_index_are_cleared_too(repo):
 
 def seeded(world, repositories, **extra):
     return seed_task(world.tasks, repositories, **extra)
-
-
-def test_dispatch_anchor_rejects_a_different_repository_identity(world, repo):
-    path, base = repo
-    other = init_repo(world.root / "other")
-    commit(other, "x", f="1\n")
-    tip = commit(path, "next", g="1\n")
-    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    seeded(world, [entry(path, base, tip)], worktree={"path": str(path), "source_repo_path": str(other)},
-           git_baseline={"repository_root": str(path)})
-    assert capture.capture_task_changes(world.tasks, TASK) == "published"
-    document = json.loads((world.tasks / f"{TASK}{shape.SUFFIX}").read_bytes())
-    assert scopes(document)["working_tree"]["reason"] == "repository_identity_changed"
-    assert scopes(document)["committed_range"]["state"] == "available" and common
 
 
 def test_dispatch_anchor_accepts_the_recorded_source_repository(world, repo):
@@ -1004,17 +887,6 @@ def test_listing_ceiling_keeps_the_complete_records_it_read(repo, monkeypatch):
 
 
 # --- degraded repositories --------------------------------------------------------------------
-
-
-def test_dangling_shared_index_link_is_unsupported_not_a_crash(repo):
-    path, base = repo
-    git(path, "update-index", "--split-index")
-    git(path, "add", "-A")
-    for shared in (path / ".git").glob("sharedindex.*"):
-        shared.unlink()
-        os.symlink(path / "nowhere", shared)
-    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
-    assert scope["state"] == "not_captured" and scope["reason"] in {"index_unsupported", "index_unreadable"}
 
 
 def test_unusable_head_in_a_worktree_admin_directory_does_not_stop_capture(world, repo):
@@ -1235,31 +1107,6 @@ def test_a_gitlink_typechange_still_has_text_for_its_neighbours(repo):
 # --- flag accounting --------------------------------------------------------------------------
 
 
-def test_absent_skip_worktree_files_do_not_count_toward_the_limit(repo, monkeypatch):
-    path, base = repo
-    names = [f"s{index}" for index in range(10)]
-    tip = commit(path, "sparse", **{name: "x\n" for name in names})
-    for name in names:
-        git(path, "update-index", "--skip-worktree", name)
-        (path / name).unlink()
-    monkeypatch.setattr(capture, "FLAG_LIMIT", 3)
-    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
-    assert (scope["state"], scope["reason"], scope["rows"]) == ("available", None, [])
-    for name in names[:5]:
-        git(path, "update-index", "--assume-unchanged", name)
-    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
-    assert (scope["state"], scope["reason"]) == ("incomplete", "index_flags_present")
-
-
-def test_directory_mode_entries_are_never_rewritten(repo):
-    path, _ = repo
-    data = (path / ".git" / "index").read_bytes()
-    scan = capture._scan_index(data, 20, capture._Budget(5))
-    forged = [capture._Flagged(12, b"dir", True, True, directory=True)]
-    assert capture._clear_flags(data, 20, forged, lambda name: True) == data
-    assert scan.flagged == []
-
-
 def test_edits_in_the_same_instant_as_the_index_are_still_seen(repo):
     path, base = repo
     for index in range(6):
@@ -1271,3 +1118,259 @@ def test_edits_in_the_same_instant_as_the_index_are_still_seen(repo):
         (path / f"racy{index}").write_text("2\n")  # same size, written moments after the index
     working = rows(build([entry(path, base, tip)]), "working_tree")
     assert {f"racy{index}" for index in range(6)} <= set(working)
+
+
+# --- the agent's index is irrelevant ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [b"../secret.txt", b".git/config", b"sub/../../secret.txt"])
+def test_forged_index_entries_neither_read_outside_nor_hide_anything(repo, world, name):
+    path, base = repo
+    (world.root / "secret.txt").write_text("OUTSIDE-SENTINEL\n")
+    blob = git(path, "hash-object", "-w", str(world.root / "secret.txt"))
+    (path / "f1").write_text("edited\n")
+    (path / ".git" / "index").write_bytes(forge_index([(b"f1", git(path, "rev-parse", "HEAD:f1")), (name, blob)]))
+    document = build([simple_entry(path, base)])
+    scope = scopes(document)["working_tree"]
+    assert scope["state"] == "available" and set(rows(document, "working_tree")) == {"f1"}
+    assert "OUTSIDE-SENTINEL" not in json.dumps(document) and "+edited" in text_of(rows(document, "working_tree")["f1"])
+
+
+def test_a_forged_conflict_with_an_unsafe_name_is_disclosed_not_trusted(repo):
+    path, base = repo
+    blob = git(path, "rev-parse", "HEAD:f1")
+    (path / ".git" / "index").write_bytes(forge_index([(b"f1", blob), (b"../x", blob, 0o100644, 2)]))
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["unmerged_unknown"] is True and scope["rows"] == [] and scope["state"] == "available"
+
+
+def test_a_sparse_directory_entry_forged_stat_and_flags_hide_nothing(repo):
+    path, base = repo
+    git(path, "update-index", "--assume-unchanged", "f1")
+    stamp = (path / "f1").stat()
+    (path / "f1").write_text("A\nB\n")
+    os.utime(path / "f1", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    tree = git(path, "rev-parse", "HEAD^{tree}")
+    (path / ".git" / "index").write_bytes(forge_index([(b"sparse/", tree, 0o040000), (b"f2", git(path, "rev-parse", "HEAD:f2"))]))
+    working = rows(build([simple_entry(path, base)]), "working_tree")
+    assert "+A" in text_of(working["f1"])
+
+
+def test_a_missing_index_changes_nothing_but_the_conflict_disclosure(repo):
+    path, base = repo
+    (path / "f1").write_text("edit\n")
+    (path / ".git" / "index").unlink()
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["state"] == "available" and scope["unmerged_unknown"] is True
+    assert [capture_row_path(row) for row in scope["rows"]] == ["f1"]
+
+
+def test_a_split_index_or_dangling_shared_index_is_irrelevant(repo):
+    path, base = repo
+    git(path, "update-index", "--split-index")
+    (path / "f1").write_text("split\n")
+    git(path, "add", "f1")
+    for shared in (path / ".git").glob("sharedindex.*"):
+        shared.unlink()
+        os.symlink(path / "nowhere", shared)
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["state"] == "available" and "+split" in text_of(scope["rows"][0]) and scope["unmerged_unknown"] is True
+
+
+def test_absent_files_are_deletions_even_when_marked_skip_worktree(repo):
+    path, base = repo
+    git(path, "update-index", "--skip-worktree", "f2")
+    (path / "f2").unlink()
+    assert rows(build([simple_entry(path, base)]), "working_tree")["f2"]["status"] == "deleted"
+
+
+def test_staged_new_files_are_untracked_names(repo):
+    path, base = repo
+    (path / "staged").write_text("new\n")
+    git(path, "add", "staged")
+    row = rows(build([simple_entry(path, base)]), "working_tree")["staged"]
+    assert row["status"] == "untracked" and row["content"]["reason"] == "untracked"
+
+
+def test_working_tree_changes_are_seen_through_a_private_index(repo):
+    path, base = repo
+    (path / "f1").write_text("changed\n")
+    before = (path / ".git" / "index").read_bytes()
+    assert "+changed" in text_of(rows(build([simple_entry(path, base)]), "working_tree")["f1"])
+    assert (path / ".git" / "index").read_bytes() == before
+
+
+def tree_commit(path, parent, *names):
+    """A commit whose tree holds a one-line blob under each raw name, made with `hash-object --literally`."""
+    blob = git(path, "hash-object", "-w", "--stdin", input=b"x\n")
+    raw = b"".join(b"100644 " + name + b"\0" + bytes.fromhex(blob) for name in names)
+    tree = git(path, "hash-object", "-t", "tree", "-w", "--literally", "--stdin", input=raw)
+    return git(path, "commit-tree", tree, "-p", parent, "-m", "crafted")
+
+
+@pytest.mark.parametrize("name", [b"..", b".", b".git", b".GIT", b".git ", b"git~1", b"a/../b", b"/abs", b"a//b", b".git/config"])
+def test_git_rejects_unsafe_tree_entry_names_and_capture_fails_closed(repo, name):
+    """What Git's `read-tree` does with each crafted name: it refuses the whole tree ("invalid path")."""
+    path, base = repo
+    tip = tree_commit(path, base, name)
+    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("not_captured", "index_unsafe_path", [])
+
+
+@pytest.mark.parametrize("name", [b"a/b", b"back\\slash", b"ok"])
+def test_read_tree_accepts_slash_and_backslash_names(repo, name):
+    path, base = repo
+    tip = tree_commit(path, base, name)
+    assert scopes(build([entry(path, base, tip)]))["working_tree"]["state"] == "available"
+
+
+def test_a_missing_head_tree_is_head_missing_or_unreadable(repo):
+    path, base = repo
+    scope = scopes(build([entry(path, base, "3" * 40)]))["working_tree"]
+    assert (scope["state"], scope["reason"]) == ("not_captured", "head_missing")
+
+
+def test_a_refresh_that_overruns_the_budget_reports_no_rows(repo, world, monkeypatch):
+    path, base = repo
+    (path / "f1").write_text("changed\n")
+    monkeypatch.setattr(capture, "GIT", wrapper(world, 'case "$*" in *update-index*) sleep 5;; esac'))
+    scope = scopes(build([simple_entry(path, base)], budget_seconds=1.0))["working_tree"]
+    assert (scope["state"], scope["reason"], scope["rows"]) == ("incomplete", "capture_timeout", [])
+
+
+def test_every_capture_command_disables_index_threads(repo, world, monkeypatch):
+    path, base = repo
+    log_file = world.root / "argv.txt"
+    monkeypatch.setattr(capture, "GIT", wrapper(world, f'echo "$*" >> {log_file}'))
+    build([simple_entry(path, base)])
+    lines = log_file.read_text().splitlines()
+    assert lines and all("index.threads=false" in line for line in lines)
+
+
+# --- conflicts read as data -------------------------------------------------------------------
+
+
+def conflicted(world, *, version=None):
+    path = init_repo(world.root / "conflict-data")
+    base = commit(path, "base", f="base\n", other="o\n")
+    git(path, "checkout", "-q", "-b", "side")
+    commit(path, "side", f="one\n")
+    git(path, "checkout", "-q", "main")
+    tip = commit(path, "main", f="two\n")
+    git(path, "merge", "side", check=False)
+    if version:
+        git(path, "update-index", f"--index-version={version}")
+    return path, base, tip
+
+
+@pytest.mark.parametrize("version", [None, "3", "4"])
+def test_conflicted_names_are_read_from_the_agent_index_as_data(world, version):
+    path, base, tip = conflicted(world, version=version)
+    scope = scopes(build([entry(path, base, tip)]))["working_tree"]
+    assert scope["unmerged_unknown"] is False
+    assert {capture_row_path(row): row["status"] for row in scope["rows"]}["f"] == "unmerged"
+    assert capture.unmerged_names(str(path / ".git"), 20, capture._Budget(5)) == {b"f"}
+
+
+def test_a_plain_index_has_no_conflicts_and_nonsense_is_a_problem(repo):
+    path, _ = repo
+    data = (path / ".git" / "index").read_bytes()
+    assert capture._parse_unmerged(data, 20, capture._Budget(5)) == set()
+    for bad in (b"nonsense" * 10, data[:-1], data[:-20] + b"\0" * 20, b""):
+        with pytest.raises(capture._IndexProblem):
+            capture._parse_unmerged(bad, 20, capture._Budget(5))
+
+
+def test_strict_index_rules_reject_inconsistencies(world):
+    import hashlib
+    path, base, tip = conflicted(world)
+    good = (path / ".git" / "index").read_bytes()
+
+    def resign(data):
+        return data[:-20] + hashlib.sha1(data[:-20]).digest()
+    position = good.index(b"f\0")
+    flipped = bytearray(good)
+    flipped[position + 1] = ord("x")  # padding that is not NUL
+    shortened = bytearray(good)
+    shortened[position - 1] = 2  # declared name length no longer matches the NUL
+    for corrupt in (flipped, shortened):
+        with pytest.raises(capture._IndexProblem):
+            capture._parse_unmerged(resign(bytes(corrupt)), 20, capture._Budget(5))
+    with pytest.raises(capture._IndexProblem):
+        capture._parse_unmerged(good, 20, capture._Budget(0))
+    huge = forge_index([(b"x" * 5000, "1" * 40, 0o100644, 2)])
+    with pytest.raises(capture._IndexProblem):
+        capture._parse_unmerged(huge, 20, capture._Budget(5))
+
+
+def test_a_split_index_makes_conflicts_unknown(repo):
+    path, base = repo
+    git(path, "update-index", "--split-index")
+    git(path, "add", "-A")
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["unmerged_unknown"] is True
+
+
+# --- object store and identity ----------------------------------------------------------------
+
+
+def test_dispatch_anchor_with_a_different_identity_reads_nothing(world, repo):
+    path, base = repo
+    other = init_repo(world.root / "other")
+    commit(other, "x", f="1\n")
+    tip = commit(path, "next", g="1\n")
+    seeded(world, [entry(path, base, tip)], worktree={"path": str(path), "source_repo_path": str(other)},
+           git_baseline={"repository_root": str(path)})
+    assert capture.capture_task_changes(world.tasks, TASK) == "published"
+    repository = json.loads((world.tasks / f"{TASK}{shape.SUFFIX}").read_bytes())["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "repository_identity_changed")
+    assert all(scope["state"] == "not_captured" and scope["rows"] == [] for scope in repository["scopes"].values())
+
+
+def test_anchored_repositories_may_use_alternates_but_unanchored_ones_may_not(repo, world):
+    path, base = repo
+    (path / ".git" / "objects" / "info").mkdir(exist_ok=True)
+    (path / ".git" / "objects" / "info" / "alternates").write_text(str(path / ".git" / "objects") + "\n")
+    assert build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]["state"] == "available"
+    assert build([simple_entry(path, base)])["repositories"][0]["reason"] == "alternates_present"
+
+
+@pytest.mark.parametrize("link", ["objects", "objects/info", "objects/pack"])
+def test_a_linked_object_store_is_untrusted_unless_anchored(repo, world, link):
+    path, base = repo
+    git_dir = path / ".git"
+    target = world.root / "foreign-store"
+    shutil_target = target / "dir"
+    shutil_target.mkdir(parents=True)
+    victim = git_dir / link
+    if victim.exists():
+        if victim.is_dir():
+            import shutil
+            shutil.copytree(victim, target / "copy", symlinks=True)
+            shutil.rmtree(victim)
+        else:
+            victim.unlink()
+    os.symlink(target / "copy" if (target / "copy").exists() else shutil_target, victim)
+    document = build([simple_entry(path, base)])
+    repository = document["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "object_store_untrusted")
+    assert all(scope["rows"] == [] for scope in repository["scopes"].values())
+
+
+def test_a_repointed_git_file_or_symlinked_git_directory_costs_only_the_conflict_disclosure(world, repo):
+    path, base = repo
+    git(path, "branch", "other")
+    linked = world.root / "linked"
+    git(path, "worktree", "add", "-q", str(linked), "-b", "linked")
+    tip = commit(linked, "in linked", g="1\n")
+    common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    (linked / ".git").write_text(f"gitdir: {world.root / 'nowhere'}\n")
+    (linked / "g").write_text("1\n2\n")
+    document = build([entry(path, tip if False else base, tip, worktree=linked, common=common)])
+    scope = scopes(document)["working_tree"]
+    assert scope["state"] == "available" and scope["unmerged_unknown"] is True and "+2" in text_of(rows(document, "working_tree")["g"])
+    assert "g" in rows(document, "committed_range")
+    real = world.root / "elsewhere"
+    os.rename(path / ".git", real)
+    os.symlink(real, path / ".git")
+    assert scopes(build([simple_entry(path, base, common=str(path / ".git"))]))["working_tree"]["unmerged_unknown"] is True

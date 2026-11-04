@@ -333,6 +333,7 @@ def build_changes(world: World) -> None:
                  "rows": rows, **extra}
         if name == "working_tree":
             value["counts_and_patch_separate"] = True
+            value["unmerged_unknown"] = False
         return value
 
     def repository(root, committed, working, **extra):
