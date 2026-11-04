@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.0.10
+
+- Pair task-list publication fences with exact epoch, process and operation tokens. Task reads and snapshot catalog projections no longer close another publication; failed invalidation, aborted writes and failed derivative projections close only their own token. Retention uses the same pairing.
+- Validate revision JSON shape before field access, enforce strict scalar/resource bounds, refuse unavailable sources conservatively and reset future revision cursors. Bound watcher catalog lock acquisition by the operation deadline while retaining ownership and symlink qualification.
+- Qualify `task-list-watch.v1` continuity for corrected producer writers only. Concurrent older writers are unqualified and are not reliably detected; the earlier mixed-writer reset/unavailable guarantee is withdrawn. No store migration or writer admission gate is introduced. Public deadline reconciliation remains mandatory, and pending-launch/continuation reservations and liveness overlays remain outside scope.
+
 ## 0.0.9
 
 - Add `harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json` (capability `task-list-watch.v1`, direct callers only): one bounded task-list invalidation wait over the existing `harflow.ctl` v1 envelope. States are `baseline`, `changed`, `timeout`, `reset` and `unavailable`; wait 0..30 seconds (default 30); opaque cursor at most 2048 bytes; document at most 16 KiB. Continuity is a producer-owned fence+revision file under the task catalog lock. The command never initializes a missing state root. Refusal `task_list_watch_cursor_invalid` covers malformed or wrong-scope cursors. No MCP tool, daemon or event stream. Canonical fixtures `ctl-task-list-watch-*.json` and `invalid-s05-missing-task-list-watch.json`; HarflowMac must re-vendor those plus the updated `version-info.json` and full `manifest.json`/`manifest.sha256` when adopting.

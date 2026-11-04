@@ -78,19 +78,25 @@ def test_write_between_baseline_and_wait_is_changed(state, capsys):
     assert changed["cursor"] != baseline["cursor"]
 
 
-def test_wait_sees_publication_during_wait(state, capsys):
+def test_wait_sees_publication_during_wait(state, capsys, monkeypatch):
     baseline = run([], capsys)
     barrier = threading.Event()
+    published = threading.Event()
 
     def publish():
-        barrier.wait(timeout=2)
-        time.sleep(0.05)
+        assert barrier.wait(timeout=2)
         with state_ownership.state_session(state):
             store.write(state.tasks_directory, record(task_id="watch-task-2", title="two"))
+        published.set()
 
+    def poll_gate(_seconds):
+        barrier.set()
+        assert published.wait(timeout=2)
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(task_list_watch, "time", SimpleNamespace(monotonic=time.monotonic, sleep=poll_gate))
     thread = threading.Thread(target=publish)
     thread.start()
-    barrier.set()
     changed = run(["--cursor", baseline["cursor"], "--wait-seconds", "2"], capsys)
     thread.join(timeout=3)
     assert changed["state"] == "changed"
@@ -163,9 +169,9 @@ def test_dead_fence_pid_reclaims_as_reset(state, capsys):
 def test_abort_after_invalidate_closes_fence_so_later_waits_can_timeout(state, capsys):
     baseline = run([], capsys)
     with state_ownership.state_session(state):
-        task_list_watch.begin_publication(state.tasks_directory, layout=state)
+        publication = task_list_watch.begin_publication(state.tasks_directory, layout=state)
         # Simulate store's finally after a failed replace: close the fence without a record.
-        task_list_watch.end_publication(state.tasks_directory, layout=state)
+        task_list_watch.end_publication(state.tasks_directory, publication, layout=state)
     changed = run(["--cursor", baseline["cursor"], "--wait-seconds", "0"], capsys)
     assert changed["state"] == "changed"
     timed = run(["--cursor", changed["cursor"], "--wait-seconds", "0"], capsys)
@@ -184,7 +190,7 @@ def test_env_agent_refusal_does_not_create_root(tmp_path, monkeypatch, capsys):
 def test_capability_advertised():
     from harflow_mcp.wire_contracts import CAPABILITIES, version_info
     assert "task-list-watch.v1" in CAPABILITIES
-    assert PRODUCT_VERSION == "0.0.9"
+    assert PRODUCT_VERSION == "0.0.10"
     info = version_info({"HOME": "/tmp", "HARFLOW_STATE_ROOT": "/tmp/harflow-fixture-home/.harflow"})
     assert "task-list-watch.v1" in info["capabilities"]
 

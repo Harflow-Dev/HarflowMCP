@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .state_layout import StateLayout
 from .state_access import OwnedConnection, bind_connection, require_state_path, layout_operation, open_descriptor
-from .state_ownership import state_session, assert_owned, current_owned, StateIncompatible
+from .state_ownership import state_session, assert_owned, current_owned, StateIncompatible, StateOwnershipError
 
 import base64
 import hashlib
@@ -18,6 +18,7 @@ import stat
 import logging
 import os
 import math
+import time
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
@@ -165,29 +166,45 @@ os.register_at_fork(after_in_child=_catalog_after_child)
 
 
 @contextmanager
-def catalog_lock(directory: Path, *, layout: StateLayout | None = None):
+def catalog_lock(directory: Path, *, layout: StateLayout | None = None, deadline: float | None = None):
     """Stable process/thread lock; nested projections retain the writer's outer lock."""
     selected = layout if layout is not None else current_owned().layout
     # Resource ownership outlives acquisition without retaining a ContextVar
     # token across API returns (Catalog.connect returns this lock to close).
-    with state_session(selected) as operation:
+    with state_session(selected, **({"timeout": max(0.0, deadline - time.monotonic())} if deadline is not None else {})) as operation:
         require_state_path(selected, directory)
         directory.mkdir(parents=True, exist_ok=True)
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise StateOwnershipError("catalog directory must not be a symlink", reason="observation_unavailable")
         key = str(directory.resolve())
         with _locks_guard:
             mutex, local = _locks.setdefault(key, (threading.RLock(), threading.local()))
         retained = operation.retain()
     try:
-        with mutex:
+        acquired = mutex.acquire() if deadline is None else mutex.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise StateOwnershipError("task catalog lock deadline exhausted", reason="observation_unavailable")
+        try:
             retained.validate()
             depth = getattr(local, 'depth', 0)
             if not depth:
                 # The independent root ref is already live; make it current only
                 # for descriptor creation, never across the resource yield.
-                with state_session(selected):
-                    local.handle = open_descriptor(directory / '.listing.lock', os.O_RDWR | os.O_CREAT, 0o600, layout=selected)
+                with state_session(selected, **({"timeout": max(0.0, deadline - time.monotonic())} if deadline is not None else {})):
+                    local.handle = open_descriptor(directory / '.listing.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, layout=selected)
                 try:
-                    fcntl.flock(local.handle, fcntl.LOCK_EX)
+                    if deadline is None:
+                        fcntl.flock(local.handle, fcntl.LOCK_EX)
+                    else:
+                        while True:
+                            try:
+                                fcntl.flock(local.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except BlockingIOError:
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    raise StateOwnershipError("task catalog lock deadline exhausted", reason="observation_unavailable")
+                                time.sleep(min(0.01, remaining))
                 except BaseException:
                     local.handle.close()
                     raise
@@ -198,6 +215,8 @@ def catalog_lock(directory: Path, *, layout: StateLayout | None = None):
                 local.depth -= 1
                 if not local.depth:
                     local.handle.close(unlock=True)
+        finally:
+            mutex.release()
     finally:
         retained.close()
 
@@ -345,26 +364,32 @@ class Catalog:
         return self.state()['status'] == 'ready'
 
     @layout_operation
-    def invalidate(self, identifier: str) -> None:
+    def invalidate(self, identifier: str):
         """Repair derivative failures and commit invalidation before replacing metadata."""
         with catalog_lock(self.directory, layout=self.state_layout):
+            publication = None
             if self.suffix == '.meta.json':
                 from . import task_list_watch
                 try:
-                    task_list_watch.begin_locked(self.directory)
+                    publication = task_list_watch.begin_locked(self.directory)
                 except (OSError, StateIncompatible):
                     logging.getLogger(__name__).warning('Task-list watch fence unavailable before invalidate', exc_info=True)
                     raise
             try:
-                self._invalidate_locked(identifier)
-            except sqlite3.Error:
-                logging.getLogger(__name__).warning('Rebuilding catalog after invalidation transaction failure', exc_info=True)
                 try:
+                    self._invalidate_locked(identifier)
+                except sqlite3.Error:
+                    logging.getLogger(__name__).warning('Rebuilding catalog after invalidation transaction failure', exc_info=True)
                     self._discard_derivative_locked()
                     self._invalidate_locked(identifier)
-                except (OSError, sqlite3.Error):
-                    logging.getLogger(__name__).error('Catalog invalidation recovery failed; metadata replacement refused', exc_info=True)
-                    raise
+                return publication
+            except BaseException:
+                if publication is not None:
+                    try:
+                        task_list_watch.end_locked(self.directory, publication)
+                    except Exception:
+                        logging.getLogger(__name__).warning('Task-list fence abort unavailable', exc_info=True)
+                raise
 
     def _invalidate_locked(self, identifier: str) -> None:
         assert_owned(self.state_layout)
@@ -728,25 +753,27 @@ class Catalog:
             db.execute("DELETE FROM state WHERE key='complete'")
 
     @layout_operation
-    def record(self, header: dict[str, Any], stamp: float, active: bool, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
+    def record(self, header: dict[str, Any], stamp: float, active: bool, identifier: str, *, previous_directory_mtime: int | None = None, publication=None) -> None:
         try:
             with self.connect() as db:
                 self._put(db, header, stamp, active, identifier)
                 self._acknowledge_directory(db, previous_directory_mtime)
-                if self.suffix == '.meta.json':
-                    from . import task_list_watch
-                    task_list_watch.end_locked(self.directory)
+            if self.suffix == '.meta.json' and publication is not None:
+                from . import task_list_watch
+                with catalog_lock(self.directory, layout=self.state_layout):
+                    task_list_watch.end_locked(self.directory, publication)
         except (OSError, sqlite3.Error, DeferredRead):
             logging.getLogger(__name__).warning('Listing catalog update unavailable', exc_info=True)
 
     @layout_operation
-    def remove(self, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
+    def remove(self, identifier: str, *, previous_directory_mtime: int | None = None, publication=None) -> None:
         with self.connect() as db:
             self._remove(db, identifier)
             self._acknowledge_directory(db, previous_directory_mtime)
-            if self.suffix == '.meta.json':
-                from . import task_list_watch
-                task_list_watch.end_locked(self.directory)
+        if self.suffix == '.meta.json' and publication is not None:
+            from . import task_list_watch
+            with catalog_lock(self.directory, layout=self.state_layout):
+                task_list_watch.end_locked(self.directory, publication)
 
     @layout_operation
     def headers(self, identifiers: list[str], loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> list[dict[str, Any]]:

@@ -1075,12 +1075,30 @@ a fresh boundary is returned. Malformed or wrong-scope cursors refuse with
 `task_list_watch_cursor_invalid`.
 
 Continuity is a producer-owned fence+revision file `<tasks>/.task-list-revision.v1.json` under the
-existing catalog lock. Admitted writers (`Catalog.invalidate` / `record` / `remove` for `.meta.json`)
-pre-bump then post-bump around durable publication. List-page liveness overlays do not bump.
-Pending-launch and continuation reservations are outside this invalidation scope. Mixed older writers
-that mutate catalog state without revision movement force `reset`/`unavailable`, never a trustworthy
-`timeout`. Supported correctness claim: macOS and Linux with flock + regular-file fsync on the
-selected state filesystem; the wait polls the revision file and does not require a kernel journal.
+existing catalog lock. Corrected admitted writers (`store` metadata publication and retention
+removal, through `Catalog.invalidate` / `record` / `remove` for `.meta.json`) pre-bump then post-bump
+around durable publication. Each fence binds an epoch, process and unique operation token; only its
+matching publisher closes it, after the catalog transaction commits. Failure cleanup closes only
+that operation. Observation-only catalog projections, including read blockers and snapshot liveness
+reconciliation, never complete a publication. Dead openers are reclaimed conservatively without
+consuming live writers' tokens. Unresolved live PID-only fences from 0.0.9 return unavailable;
+existing empty revision files remain usable without a store migration. At most 64 publications may
+be open; resource exhaustion refuses further publication rather than discarding live fences.
+
+Continuity is qualified only when admitted publications use the corrected producer protocol in
+0.0.10. Concurrent older writers are unqualified: they can publish without revision movement, are
+not reliably detected, and can cause a timeout despite a metadata change. The 0.0.9 mixed-writer
+reset/unavailable guarantee is withdrawn; no exclusive-writer enforcement or store admission gate
+is supplied. This qualification does not authorize runtime changes or store migration. List-page
+liveness overlays, pending-launch and continuation reservations remain outside invalidation scope.
+Supported filesystem/platform claim for corrected writers: macOS and Linux with flock + regular-file
+fsync on the selected state filesystem; the wait polls the revision file and requires no kernel journal.
+
+The revision source is a qualified regular file bounded to 16 KiB, with strict integer version,
+revision, open count and process identifiers and bounded producer identifiers. Malformed shapes,
+malformed known fields or unavailable observation return typed `unavailable` rather than escaping the
+ctl envelope. A cursor ahead of the producer revision resets with `discontinuity`. Watcher ownership
+and catalog lock waits share the bounded operation deadline; cancellation unwinds acquired resources.
 
 Consumer protocol: obtain baseline **before** the first public snapshot; wait from that cursor;
 on changed/reset retain the new cursor before refresh; keep one watch in flight and pending/coalesce

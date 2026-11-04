@@ -42,6 +42,7 @@ import re
 import shlex
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1840,8 +1841,6 @@ def _main(argv: list[str] | None = None) -> int:
             parser.error("task-list-watch requires --json")
         if not 0 <= args.wait_seconds <= task_list_watch.MAX_WAIT_SECONDS:
             parser.error(f"--wait-seconds must be 0..{task_list_watch.MAX_WAIT_SECONDS}")
-        if args.cursor is not None and len(args.cursor.encode()) > task_list_watch.MAX_CURSOR_BYTES:
-            parser.error(f"--cursor must be at most {task_list_watch.MAX_CURSOR_BYTES} UTF-8 bytes")
     if args.command == "task-list-page" and args.predecessor_task_id is not None and args.task_ids is not None:
         parser.error("--predecessor-task-id cannot be combined with --task-ids")
     if args.command == "slot" and args.slot_action == "enable":
@@ -1887,13 +1886,14 @@ def _main(argv: list[str] | None = None) -> int:
         refusal = task_list_watch.env_agent_refusal()
         if refusal:
             return _fail(args, refusal[0], "Task-list watch requires a verified direct caller: " + refusal[1])
+        operation_deadline = time.monotonic() + (args.wait_seconds if args.cursor is not None else 0) + task_list_watch.SETUP_OVERHEAD_SECONDS
         try:
-            with state_session(layout, initialize=False):
+            with state_session(layout, initialize=False, timeout=min(task_list_watch.SETUP_OVERHEAD_SECONDS, max(0.0, operation_deadline - time.monotonic()))):
                 refusal = caller_refusal(layout.tasks_directory)
                 if refusal:
                     return _fail(args, refusal[0], "Task-list watch requires a verified direct caller: " + refusal[1])
                 try:
-                    result = task_list_watch.watch(layout, cursor=args.cursor, wait_seconds=args.wait_seconds)
+                    result = task_list_watch.watch(layout, cursor=args.cursor, wait_seconds=args.wait_seconds, deadline=operation_deadline)
                 except task_list_watch.TaskListWatchCursorInvalid as exc:
                     return _fail(args, exc.code, str(exc))
                 except StateOwnershipError as exc:

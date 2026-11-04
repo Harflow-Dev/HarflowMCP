@@ -301,14 +301,13 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         )
         return False
 
-    fenced = False
+    publication = None
     try:
         from .catalog import Catalog
         from . import task_list_watch
         payload = encode_task(asdict(record))
         decode_task(payload, record.task_id, TaskRecord)
-        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(record.task_id)
-        fenced = True
+        publication = Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(record.task_id)
         log_dir.mkdir(parents=True, exist_ok=True)
         if len(record.prompt) > PROMPT_PREVIEW_CHARS:
             digest = hashlib.sha256(record.prompt.encode("utf-8")).hexdigest()
@@ -352,8 +351,7 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         header, stamp, active = listing_header(record)
         from .catalog import source_identity
         header['_source_identity'] = source_identity(written_source)
-        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
-        fenced = False
+        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime, publication=publication)
         return True
     except TaskDocumentError as exc:
         _write_error.set(exc)
@@ -364,10 +362,10 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         log.warning("could not persist record for task %s", record.task_id, exc_info=True)
         return False
     finally:
-        if fenced:
+        if publication is not None:
             try:
                 from . import task_list_watch
-                task_list_watch.end_publication(log_dir, layout=task_layout(log_dir))
+                task_list_watch.end_publication(log_dir, publication, layout=task_layout(log_dir))
             except Exception:
                 log.warning("task-list watch fence close unavailable for %s", record.task_id, exc_info=True)
 

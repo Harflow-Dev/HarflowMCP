@@ -695,44 +695,30 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
         scratch.remove(log_dir, task_id)
     except OSError:
         return False  # Retain the record so cleanup can be retried safely.
-    fenced = False
-    if record_path is not None:
-        try:
-            from .catalog import Catalog
-            Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(task_id)
-            fenced = True
-            record_path.unlink()
-        except FileNotFoundError:
-            pass
-        except (OSError, sqlite3.Error):
-            if fenced:
-                try:
-                    from . import task_list_watch
-                    task_list_watch.end_publication(log_dir, layout=task_layout(log_dir))
-                except Exception:
-                    log.warning('task-list watch fence close unavailable during retention of %s', task_id, exc_info=True)
-            return False
+    publication = None
     try:
         from .catalog import Catalog
-        Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).remove(task_id)
-        fenced = False
+        if record_path is not None:
+            publication = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(task_id)
+            try:
+                record_path.unlink()
+            except FileNotFoundError:
+                pass
+        Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).remove(task_id, publication=publication)
         Catalog(log_dir.parent / 'workflow-runs', '.json', layout=task_layout(log_dir)).remove(task_id)
     except StateOwnershipError:
-        if fenced:
-            try:
-                from . import task_list_watch
-                task_list_watch.end_publication(log_dir, layout=task_layout(log_dir))
-            except Exception:
-                log.warning('task-list watch fence close unavailable during retention of %s', task_id, exc_info=True)
         raise
     except Exception:
-        if fenced:
+        log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
+        return False
+    finally:
+        if publication is not None:
             try:
                 from . import task_list_watch
-                task_list_watch.end_publication(log_dir, layout=task_layout(log_dir))
+                task_list_watch.end_publication(log_dir, publication, layout=task_layout(log_dir))
             except Exception:
                 log.warning('task-list watch fence close unavailable during retention of %s', task_id, exc_info=True)
-        log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
+
     return True
 
 

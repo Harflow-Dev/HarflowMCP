@@ -6,6 +6,7 @@ successful execution. MCP schemas come from list_tools without lifespan startup.
 """
 import argparse
 import asyncio
+import base64
 import contextlib
 import hashlib
 import io
@@ -15,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harflow_mcp import ctl, detached
-from harflow_mcp.wire_contracts import CTL_FORMAT, PRODUCT_VERSION, VERSION_INFO_FORMAT
+from harflow_mcp.wire_contracts import CTL_FORMAT, PRODUCT_VERSION, VERSION_INFO_FORMAT, envelope
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFERRED = sorted(('subscribe', 'unsubscribe', 'subscribe_workflow',
@@ -29,6 +30,26 @@ def canonical(value):
 
 def documents():
     result = {}
+    # Synthetic bounded watcher specimens, not live execution evidence. Cursor
+    # roots/epochs are fixed opaque examples; producer interleavings have tests.
+    def watch_cursor(epoch, revision):
+        return base64.urlsafe_b64encode(json.dumps(dict(v=1, scope='task-list-watch.v1',
+            root='b' * 32, epoch=epoch * 32, revision=revision),
+            sort_keys=True, separators=(',', ':')).encode()).decode()
+    for state, epoch, revision, reason in (
+        ('baseline', 'a', 0, None), ('changed', 'a', 2, None),
+        ('timeout', 'a', 0, None), ('reset', 'c', 0, 'epoch_changed'),
+        ('unavailable', 'a', 0, 'state_missing'),
+    ):
+        observation = dict(state=state, cursor=None if state == 'unavailable' else watch_cursor(epoch, revision))
+        if reason:
+            observation['reason'] = reason
+        result[f'ctl-task-list-watch-{state}.json'] = (envelope(CTL_FORMAT, {'result': observation}), 0)
+    for label, code, message in (
+        ('cursor-invalid', 'task_list_watch_cursor_invalid', 'Cursor is not valid base64 JSON'),
+        ('direct-caller-refused', 'agent_caller', 'Task-list watch requires a verified direct caller: managed'),
+    ):
+        result[f'ctl-task-list-watch-{label}.json'] = (envelope(CTL_FORMAT, {'error': dict(code=code, message=message)}), 1)
     # This is the shared run/resume parent serializer, not the detached launch.
     for operation in ('run', 'resume'):
         for label, kind, payload, expected in (
@@ -76,8 +97,9 @@ def generate():
     for name, (doc, code) in documents().items():
         output[bundle / name] = canonical(doc)
         manifest['files'][name] = hashlib.sha256(output[bundle / name]).hexdigest()
+        required = ['task-list-watch.v1'] if name.startswith('ctl-task-list-watch-') and code == 0 else []
         manifest['cases'][name] = dict(encoding='json', expected_product_version=PRODUCT_VERSION,
-                                     format=CTL_FORMAT, required_capabilities=[], valid=True, exit_code=code)
+                                     format=CTL_FORMAT, required_capabilities=required, valid=True, exit_code=code)
     # Synthetic additive/missing-capability handshake variants, based on the
     # canonical platform/root specimen; no host state or platform values leak in.
     version = json.loads((bundle / 'version-info.json').read_text())

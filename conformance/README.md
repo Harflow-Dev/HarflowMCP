@@ -20,10 +20,10 @@ S07_REPO="$PWD"
 S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
 .venv/bin/python -m conformance \
   --source-repo "$S07_REPO" \
-  --commit 0f10ad30e28e7da1873685cebe70aef687881723 \
+  --commit "$(git rev-parse v0.0.10^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 383ecf7a9b234a1ece18eb15585398f08a77205c02a43cb2a928a2819f76fee0 \
+  --manifest-sha256 8baaed41ac3f22a84cfe69ac95e12ff3b32b7992fbf5d8e5d5a7a9c4705a620b \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```
@@ -38,9 +38,9 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The initial
-S07 target is source version 0.0.7 on Python 3.11.15, not S02's managed Python
-3.13.16 and not the intended Electron 0.0.8 development runtime.
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 207-fixture 0.0.10 bundle. Earlier S07/S08/S09
+receipts retain their original source and manifest identities; this repin does not requalify
+their scenarios, a managed runtime, or any consumer.
 
 ## Explicit binary target
 
