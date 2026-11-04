@@ -1,16 +1,15 @@
-# Conformance infrastructure (S07)
+# Conformance infrastructure (S07/S08)
 
 This standard-library runner provides isolated black-box observations. It does
-not import engine implementation helpers as outcome oracles. It currently checks
-only fresh version-info handshakes and read-only `state-inspect` against a missing
-root. All engine operations outside that allowlist are refused.
+not import engine implementation helpers as outcome oracles. The S07 entrypoint
+checks only fresh version-info handshakes and read-only `state-inspect` against a
+missing root. All engine operations outside that allowlist are refused there.
 
 S07 is a partial C0-MC-04 foundation. Task lifecycle, authority, messaging and
 approvals belong to S08; workflows, resources and statistics acceptance belong to
-S09. Standalone fake execution is **not engine-to-fake integration**, real harness
-qualification, or proof of task execution. The fake's minimal text/result protocol
-still needs the explicitly selected backend protocol adapter in S08 before task
-launches can be tested.
+S09. S07 standalone fake execution is **not engine-to-fake integration**, real
+harness qualification, or proof of task execution. The separate S08 controlled
+profile below adds an explicit synthetic backend and task scenarios.
 
 ## Run a pinned source boundary check
 
@@ -94,3 +93,55 @@ identity corruption, malformed data, capture bounds and cleanup faults. macOS
 process-group/OS inspection may require access beyond a filesystem sandbox; a
 blocked observation is failed or unknown, never silently passed. No provider or
 installed agent is needed. See the S07 receipt for actual results and limits.
+
+## S08 controlled task and authority profile
+
+S08 is Darwin-only and requires independent observer/client preflight before any
+engine tasks. Inspect the test result before passing its captured log and SHA-256
+to the scenario runner; the runner binds those bytes, but does not interpret them
+as proof that tests passed. Keep the caller-selected invocation ID outside the
+report. Example, after observing a passing preflight:
+
+```sh
+.venv/bin/python -m pytest conformance/tests_s08 -q > /private/tmp/s08-preflight.log
+# Inspect the exit status and complete log before continuing.
+S08_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
+S08_GATE="$(shasum -a 256 /private/tmp/s08-preflight.log | cut -d ' ' -f 1)"
+.venv/bin/python -m conformance.s08.scenarios \
+  --invocation-id "$S08_ID" --repo "$PWD" \
+  --commit 95b696ef491a49007434d36bf4ba9eed8c1b5b8a \
+  --python "$PWD/.venv/bin/python" \
+  --observer-preflight /private/tmp/s08-preflight.log \
+  --observer-preflight-sha256 "$S08_GATE"
+```
+
+Each case archives that exact source commit, verifies the canonical manifest,
+and creates disposable HOME/XDG/tmp/state and Git workspace paths. An isolated
+shim replaces only the backend registry/default and propagates the same loader
+through fresh supervisors. The actual engine forks and supervises its synthetic
+child. This injection is recorded; it does not qualify stock backend loading,
+lazy entrypoint purity, a real agent/provider, OS confinement or engine 0.0.8.
+
+The external observer records kernel peer PID, ancestry and kqueue exit watches
+before acknowledging participants. Known participants terminate themselves over
+their existing control sockets; no saved non-child PID is signalled. This covers
+registered ancestry, not escaped or unknown descendants. Synthetic I/O is marked
+untrusted and corroborated with public task/prompt/event state, observed process
+exit and fixed sentinel effects. Shared controller and overlay hashes are checked
+before and after operations. Runtime closure limits from S07 remain.
+
+The nine cases cover launch refusals, completed/nonzero outcomes, detached owners
+and overlapping resume exclusion, cancellation, exact-action approvals, managed
+actor refusal, queued messaging/cancellation/explicit consumption, and owner loss
+without fabricated exit/drain evidence. Overlapping resume is not a simultaneous
+race test. PID reuse, reboot, disk-full, full MCP restart and uncertain-control
+fault families remain unsupported; workflows/resources/statistics belong to S09.
+
+Artifacts are retained under a new `/private/tmp/h8-<ID-prefix>` directory; an
+existing prefix refuses without replacement. Context is written before tasks;
+the S08 report is updated after each case and stops at the first failure. Unlike
+the S07 report publication API, these progress writes are not atomic publication.
+Inspect the complete case set, captured operations, observer records and each
+`cleanup.json`, not just the aggregate boolean. Temporary artifacts are not a
+durable evidence store. Receipt acceptance and full C0 qualification remain
+separate from a passing controlled-profile run.
