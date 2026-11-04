@@ -725,7 +725,7 @@ def test_dispatch_anchor_accepts_the_recorded_source_repository(world, repo):
     assert scopes(document)["working_tree"]["state"] == "available"
 
 
-def test_alternates_are_refused_unless_dispatch_vouched_for_the_exact_repository(repo, world):
+def test_alternates_are_refused_for_every_repository(repo, world):
     path, base = repo
     (path / ".git" / "objects" / "info").mkdir(exist_ok=True)
     (path / ".git" / "objects" / "info" / "alternates").write_text(str(world.root / "elsewhere") + "\n")
@@ -735,7 +735,7 @@ def test_alternates_are_refused_unless_dispatch_vouched_for_the_exact_repository
     no_common = build([simple_entry(path, base)], anchors={os.path.realpath(path): None})["repositories"][0]
     assert no_common["reason"] == "alternates_present"
     proven = build([simple_entry(path, base)], anchors={os.path.realpath(path): str(path / ".git")})["repositories"][0]
-    assert proven["state"] == "available"
+    assert proven["reason"] == "alternates_present"  # no repository using alternates is captured, anchored or not
 
 
 # --- document bounds --------------------------------------------------------------------------
@@ -1489,3 +1489,95 @@ def test_untracked_truncation_is_flagged_even_when_another_problem_wins(repo, wo
     monkeypatch.setattr(capture, "COMMAND_CEILING", 2000)
     scope = scopes(build([simple_entry(path, base)]))["working_tree"]
     assert scope["state"] == "incomplete" and scope["reason"] == "git_failed" and scope["rows_truncated"] is True
+
+
+# --- final pass -------------------------------------------------------------------------------
+
+
+def test_the_conflict_report_is_bounded_by_escaped_bytes():
+    names = [(b"c%03d" % index) + b"x" * 3990 for index in range(100)]
+    report = capture._report_conflicts(set(names))
+    assert report["truncated"] is True and 1 <= len(report["names"]) < 100
+    assert sum(len(json.dumps(item)) + 2 for item in report["names"]) <= shape.MAX_CONFLICTS_ESCAPED
+    assert capture._report_conflicts({b"a", b"b"}) == {"names": [{"path": "a", "path_bytes_b64": None}, {"path": "b", "path_bytes_b64": None}], "truncated": False}
+    assert capture._report_conflicts(set()) == {"names": [], "truncated": False}
+    assert capture._report_conflicts({"\x01".encode() * 3000})["names"] == []
+
+
+def test_many_long_forged_conflicts_still_leave_a_readable_capture(world):
+    path = init_repo(world.root / "long-conflicts")
+    base = commit(path, "base", f="1\n")
+    blob = git(path, "rev-parse", "HEAD:f")
+    (path / ".git" / "index").write_bytes(forge_index([((b"c%03d" % index) + b"x" * 3990, blob, 0o100644, 2) for index in range(100)]))
+    scope = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert scope["reported_conflicts"]["truncated"] is True and scope["unmerged_unknown"] is False
+
+
+class _CountingBudget:
+    """Expires after a number of checks, to cut a walk in the middle of an enumeration."""
+
+    def __init__(self, allowed):
+        self.allowed = allowed
+
+    def expired(self):
+        self.allowed -= 1
+        return self.allowed < 0
+
+
+def test_the_object_store_walk_is_lazy_and_bounded(repo, monkeypatch):
+    path, _ = repo
+    objects = path / ".git" / "objects"
+    for index in range(600):
+        (objects / "pack" / f"tmp_pack_{index}").write_text("x")
+    common = str(path / ".git")
+    assert capture._object_store_untrusted(common, _CountingBudget(1000)) is None
+    assert capture._object_store_untrusted(common, _CountingBudget(1)) == ("incomplete", "capture_timeout")
+    monkeypatch.setattr(capture, "MAX_STORE_ENTRIES", 100)
+    assert capture._object_store_untrusted(common, capture._Budget(30)) == ("not_captured", "object_store_untrusted")
+
+
+def test_unexpected_object_store_entries_are_refused_and_git_leftovers_are_not(repo):
+    path, _ = repo
+    objects = path / ".git" / "objects"
+    common = str(path / ".git")
+    (objects / "incoming-abc123").mkdir()
+    (objects / "tmp_obj_xyz").write_text("x")
+    assert capture._object_store_untrusted(common, capture._Budget(30)) is None
+    (objects / "README").write_text("x")
+    assert capture._object_store_untrusted(common, capture._Budget(30)) == ("not_captured", "object_store_untrusted")
+    (objects / "README").unlink()
+    (objects / "AB").mkdir()  # fan-out names are lowercase hex only
+    assert capture._object_store_untrusted(common, capture._Budget(30)) == ("not_captured", "object_store_untrusted")
+    (objects / "AB").rmdir()
+    (objects / "pack" / "sub").mkdir()
+    assert capture._object_store_untrusted(common, capture._Budget(30)) == ("not_captured", "object_store_untrusted")
+
+
+def test_alternates_are_found_by_a_case_insensitive_name_too(repo, world):
+    path, _ = repo
+    (path / ".git" / "objects" / "info" / "ALTERNATES").write_text(str(world.root / "elsewhere") + "\n")
+    result = capture._object_store_untrusted(str(path / ".git"), capture._Budget(30))
+    assert result == ("not_captured", "alternates_present")
+
+
+def test_the_symlink_walk_applies_to_anchored_repositories_too(repo, world):
+    path, base = repo
+    target = world.root / "foreign-info"
+    os.rename(path / ".git" / "objects" / "info", target)
+    os.symlink(target, path / ".git" / "objects" / "info")
+    anchors = {os.path.realpath(path): str(path / ".git")}
+    repository = build([simple_entry(path, base)], anchors=anchors)["repositories"][0]
+    assert (repository["state"], repository["reason"]) == ("not_captured", "object_store_untrusted")
+
+
+def test_scopes_that_never_examined_conflicts_say_so(repo, world, monkeypatch):
+    path, base = repo
+    ok = scopes(build([simple_entry(path, base)]))["working_tree"]
+    assert ok["unmerged_unknown"] is False
+    monkeypatch.setattr(capture, "GIT", wrapper(world, 'case "$*" in *update-index*) exit 1;; esac'))
+    assert scopes(build([simple_entry(path, base)]))["working_tree"]["unmerged_unknown"] is True
+    monkeypatch.undo()
+    assert scopes(build([simple_entry(path, base)], budget_seconds=0))["working_tree"]["unmerged_unknown"] is True
+    unverified = build([{**simple_entry(path, base), "worktree": str(world.root)}])
+    assert scopes(unverified)["working_tree"]["unmerged_unknown"] is True
+    assert capture._scope("not_captured", "head_missing", working_tree=True)["unmerged_unknown"] is True

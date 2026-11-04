@@ -408,6 +408,8 @@ def worst_case_document():
                           base_commit="a" * 64, head_commit="b" * 64, reason="r" * 64)
         for scope in repository["scopes"].values():
             scope.update(reason="x" * 64)
+        repository["scopes"]["working_tree"]["reported_conflicts"] = {
+            "names": [{"path": "c" * 1000, "path_bytes_b64": None} for _ in range(7)], "truncated": True}
         repositories.append(repository)
     long_path = "\x01" * (shape.MAX_PATH_BYTES)
     repositories[-1]["scopes"]["committed_range"]["rows"] = [make_row(long_path, b"x" * 100)]
@@ -462,4 +464,25 @@ def test_deeply_nested_cursor_is_invalid_not_a_traceback(world, monkeypatch):
 def test_malformed_reported_conflicts_are_rejected(world, names):
     document = make_document([make_repository("/r", [make_row("a")])])
     document["repositories"][0]["scopes"]["working_tree"]["reported_conflicts"]["names"] = names
+    assert served_or_invalid(world, document) is False
+
+
+def test_a_page_still_returns_rows_with_eight_full_conflict_lists(world):
+    from harflow_mcp import task_changes_capture
+    names = [(b"n%03d" % index) + b"y" * 3990 for index in range(100)]
+    report = task_changes_capture._report_conflicts(set(names))
+    repositories = []
+    for index in range(shape.MAX_REPOSITORIES):
+        repository = make_repository(f"/r{index}", [make_row("a", b"diff")])
+        repository["scopes"]["working_tree"]["reported_conflicts"] = report
+        repositories.append(repository)
+    task = stored(world, repositories)
+    page = result(world, task, limit=500)
+    assert len(paths(page)) >= 1 and wire_size(page) + read.FIT_RESERVE_BYTES <= read.DOCUMENT_MAX_BYTES
+
+
+def test_oversized_conflict_lists_are_invalid(world):
+    document = make_document([make_repository("/r", [make_row("a")])])
+    document["repositories"][0]["scopes"]["working_tree"]["reported_conflicts"]["names"] = [
+        {"path": "z" * 4000, "path_bytes_b64": None}, {"path": "z" * 4000, "path_bytes_b64": None}, {"path": "z" * 4000, "path_bytes_b64": None}]
     assert served_or_invalid(world, document) is False

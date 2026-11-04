@@ -51,6 +51,7 @@ LOCK_RETRY_SECONDS = 0.2
 EXIT_GRACE_SECONDS = 0.05
 REAP_SECONDS = 1.0
 CONFIG_LIMIT = 1024 * 1024
+MAX_STORE_ENTRIES = 100_000
 GIT: tuple[str, ...] = ("git",)
 
 _COMMIT = frozenset("0123456789abcdef")
@@ -305,14 +306,12 @@ def _dot_git_like(component: bytes) -> bool:
     return any(_DOT_GIT.fullmatch(candidate) for candidate in candidates)
 
 
-def unsafe_index_path(path: bytes, *, directory: bool = False) -> bool:
+def unsafe_index_path(path: bytes) -> bool:
     """Whether an index entry name could address anything but a path inside the work tree.
 
     Mirrors Git's `verify_path`: no absolute names, empty, `.` or `..` components, no `.git` in any
     spelling Git protects against, and no backslash (`core.protectNTFS`).
     """
-    if directory and path.endswith(b"/"):
-        path = path[:-1]
     if not path or path.startswith(b"/") or b"\\" in path:
         return True
     return any(component in (b"", b".", b"..") or _dot_git_like(component) for component in path.split(b"/"))
@@ -638,7 +637,7 @@ def _scope(state: str, reason: str | None, rows: list[dict[str, Any]] | None = N
              "observed_at": _stamp(), "rows": rows or []}
     if working_tree:
         scope["counts_and_patch_separate"] = True
-        scope["unmerged_unknown"] = False
+        scope["unmerged_unknown"] = True  # until the conflicts were actually examined
         scope["reported_conflicts"] = {"names": [], "truncated": False}
     return scope
 
@@ -870,6 +869,20 @@ def _prepare_configuration(context: _Context, common: str) -> None:
             handle.write("[core]\n" + "\n".join(lines) + "\n")
 
 
+def _report_conflicts(names: Any) -> dict[str, Any]:
+    """The advisory conflict list: at most 100 names and 8 KiB of JSON-escaped text, then `truncated`."""
+    shown, used = [], 0
+    ordered = sorted(names)
+    for name in ordered:
+        row = _row(_Entry(path=name, status="unmerged"))
+        item = {"path": row["path"], "path_bytes_b64": row["path_bytes_b64"]}
+        used += len(json.dumps(item)) + 2
+        if len(shown) >= document_shape.MAX_REPORTED_CONFLICTS or used > document_shape.MAX_CONFLICTS_ESCAPED:
+            break
+        shown.append(item)
+    return {"names": shown, "truncated": len(shown) < len(ordered)}
+
+
 def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: str | None, common: str) -> dict[str, Any]:
     """The work tree against the pinned head, through an index Git builds from the head itself.
 
@@ -917,10 +930,7 @@ def _working_tree_scope(context: _Context, budget: _Budget, head: Any, git_dir: 
                         untracked=untracked, working_tree=True)
     scope["unmerged_unknown"] = conflicted is None
     # Advisory only: names from the agent's index never alter, add or suppress a row of the real diff.
-    shown = sorted(conflicted or ())[:document_shape.MAX_REPORTED_CONFLICTS]
-    scope["reported_conflicts"] = {"names": [{"path": row["path"], "path_bytes_b64": row["path_bytes_b64"]}
-                                             for row in (_row(_Entry(path=name, status="unmerged")) for name in shown)],
-                                   "truncated": len(conflicted or ()) > len(shown)}
+    scope["reported_conflicts"] = _report_conflicts(conflicted or ())
     if others_result.cause:
         # The untracked listing was cut off: keep what was read and say so, whatever else happened.
         scope["rows_truncated"] = True
@@ -998,41 +1008,71 @@ def _real(path: Any) -> str | None:
     return os.path.realpath(path) if isinstance(path, str) else None
 
 
+_FANOUT = re.compile("[0-9a-f]{2}")
+
+
 def _object_store_untrusted(common: str, budget: _Budget) -> tuple[str, str] | None:
     """`(state, reason)` when an object store cannot be trusted as plain content, else None.
 
-    Walks `objects/` within the deadline: no entry at any level (the fan-out directories, loose
-    objects, `pack/*`, `info/*`) may be a symbolic link, `objects/info` and `objects/pack` must be real
-    directories, and there must be no `objects/info/alternates`. Hard links are not detected.
+    Applies to every repository. The store is walked lazily within the deadline and an entry bound:
+    `objects` must be a real directory, every entry must be a real file or directory (never a symbolic
+    link) and be one Git reads or its temporary leftovers (`info`, `pack`, lowercase two-hex fan-out
+    directories, `incoming-*` quarantine directories, `tmp_obj_*` files); anything else, including a
+    differently cased name, is refused. `info` is walked fully, and no alternates are accepted whatever
+    the case. Hard links are not detected.
     """
     objects = os.path.join(common, "objects")
     untrusted = ("not_captured", "object_store_untrusted")
+    timeout = ("incomplete", "capture_timeout")
+    examined = 0
+
+    def walk(directory: str, depth: int, kind: str) -> tuple[str, str] | None:
+        nonlocal examined
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                examined += 1
+                if examined > MAX_STORE_ENTRIES:
+                    return untrusted
+                if examined % 256 == 0 and budget.expired():
+                    return timeout
+                name = entry.name
+                if entry.is_symlink():
+                    return untrusted
+                if kind == "info" and name.casefold() == "alternates":
+                    return "not_captured", "alternates_present"
+                if kind == "top":
+                    if name in ("info", "pack") or _FANOUT.fullmatch(name):
+                        if not entry.is_dir(follow_symlinks=False):
+                            return untrusted
+                        found = walk(entry.path, depth + 1, name if name in ("info", "pack") else "fanout")
+                        if found is not None:
+                            return found
+                    elif name.startswith("incoming-") and entry.is_dir(follow_symlinks=False):
+                        continue
+                    elif name.startswith("tmp_obj_") and entry.is_file(follow_symlinks=False):
+                        continue
+                    else:
+                        return untrusted
+                elif kind == "info" and entry.is_dir(follow_symlinks=False):
+                    if depth >= 3:
+                        return untrusted
+                    found = walk(entry.path, depth + 1, "info")
+                    if found is not None:
+                        return found
+                elif not entry.is_file(follow_symlinks=False):
+                    return untrusted
+        return None
+
     try:
         if not stat.S_ISDIR(os.lstat(objects).st_mode) or os.path.realpath(objects) != os.path.join(os.path.realpath(common), "objects"):
             return untrusted
-        counter = 0
-        with os.scandir(objects) as top:
-            children = list(top)
-        for child in children:
-            if child.is_symlink():
-                return untrusted
-            if child.is_dir(follow_symlinks=False) and (child.name in ("info", "pack") or re.fullmatch("[0-9a-f]{2}", child.name)):
-                with os.scandir(child.path) as directory:
-                    for item in directory:
-                        counter += 1
-                        if counter % 512 == 0 and budget.expired():
-                            return "incomplete", "capture_timeout"
-                        if item.is_symlink():
-                            return untrusted
-                        if child.name == "info" and item.name == "alternates":
-                            return "not_captured", "alternates_present"
-            elif child.name in ("info", "pack"):
-                return untrusted
-            if budget.expired():
-                return "incomplete", "capture_timeout"
+        if os.path.lexists(os.path.join(objects, "info", "alternates")):
+            return "not_captured", "alternates_present"
+        if budget.expired():
+            return timeout
+        return walk(objects, 0, "top")
     except OSError:
         return untrusted
-    return None
 
 
 def _capture_repository(entry: dict[str, Any], budget: _Budget, anchors: dict[str, str | None] | None) -> dict[str, Any]:
@@ -1050,14 +1090,12 @@ def _capture_repository(entry: dict[str, Any], budget: _Budget, anchors: dict[st
         # The repository is no longer the one dispatch recorded: nothing about it is read.
         return _skipped(entry, "not_captured", "repository_identity_changed")
     git_dir = verified_git_dir(worktree, common)
-    if expected is None:
-        # Dispatch did not record a common directory (or the repository was first seen mid-run), so nothing but
-        # these checks vouches for it: its Git directory must be proven and its object store must be plain.
-        if anchored and git_dir is None:
-            return _skipped(entry, "not_captured", "git_dir_unverified")
-        untrusted = _object_store_untrusted(common, budget)
-        if untrusted is not None:
-            return _skipped(entry, untrusted[0] if untrusted[0] == "incomplete" else "not_captured", untrusted[1])
+    if expected is None and anchored and git_dir is None:
+        # Dispatch recorded no common directory, so only the Git directory proof can vouch for this one.
+        return _skipped(entry, "not_captured", "git_dir_unverified")
+    untrusted = _object_store_untrusted(common, budget)
+    if untrusted is not None:
+        return _skipped(entry, untrusted[0], untrusted[1])
     with tempfile.TemporaryDirectory(prefix="harflow_mcp-changes-") as directory:
         context = _Context(Path(directory), worktree, budget)
         context.git_dir.mkdir()

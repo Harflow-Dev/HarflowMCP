@@ -931,25 +931,31 @@ skip-worktree or sparse that is absent from the work tree is a deletion relative
 under strict bounded rules (versions 2 to 4, checksum hashed in pieces, a varint of at most five bytes,
 declared name length against the NUL, zero padding, names of at most 4096 bytes, no split index, safe
 names, a scan bounded by the deadline) and never given to Git. They are advisory: they are listed in the
-scope's `reported_conflicts` (`names`, each `path` or `path_bytes_b64`, at most 100, and `truncated`) and
+scope's `reported_conflicts` (`names`, each `path` or `path_bytes_b64`, at most 100 and at most 8 KiB of JSON-escaped
+text per scope, then `truncated`) and
 never change, add or suppress a row of the real diff, whose conflicted files appear as ordinary
 modified rows with their text. On any inconsistency or a missing index the list is empty and the scope
-carries `unmerged_unknown: true`; the scope may stay `available`.
+carries `unmerged_unknown: true`; the scope may stay `available`. A scope that never examined the conflicts
+(skipped, failed, refused or cut short before that step) also carries `unmerged_unknown: true`; `false` means
+the agent's index was read and had none to report beyond `reported_conflicts`.
 
 **Trust anchor and object store.** The recorded `git_common_dir` and `worktree` come from the terminal
 observation, which an agent can influence. Where the task record holds dispatch-time values they must
 still match: a repository root recorded in the dispatch baseline is anchored, and for a task worktree its
 source repository's `.git` directory must still be the common directory, else the repository is
-`not_captured` / `repository_identity_changed` and nothing about it is read (both scopes). Only a
-repository that is anchored with a recorded common directory and still matches is trusted as dispatched,
-alternates included. Every other repository (first seen mid-run, or anchored without a recorded common
-directory, which must also pass the Git directory proof or is `not_captured` / `git_dir_unverified`) has
-its object store walked within the deadline: `objects`, every fan-out directory, loose object,
-`pack/*` and `info/*` entry must not be a symbolic link and `info` and `pack` must be real directories,
-otherwise both scopes are `not_captured` / `object_store_untrusted`; `objects/info/alternates` gives
-`alternates_present`; a walk cut by the deadline is `incomplete` / `capture_timeout`. Hard links are not
-detected. Anchoring cannot prove that a linked worktree not provisioned by Harflow came from the
-checkout it was started in.
+`not_captured` / `repository_identity_changed` and nothing about it is read (both scopes). An anchored
+repository whose dispatch record names no common directory, like one first seen mid-run, additionally
+needs the Git directory proof or is `not_captured` / `git_dir_unverified` (mid-run repositories keep a
+committed range without it). The object store of **every** repository is then walked lazily within the
+deadline and an entry bound (100,000): `objects` must be a real directory; every entry must be a real
+file or directory, never a symbolic link; the names must be `info`, `pack`, lowercase two-hex fan-out
+directories, `incoming-*` quarantine directories or `tmp_obj_*` files (anything else, including a
+differently cased name, is refused); `pack/*` and fan-out directories hold plain files only; `info` is
+walked fully. Any of these gives both scopes `not_captured` / `object_store_untrusted`; a walk cut by the
+deadline is `incomplete` / `capture_timeout`. Alternates are never accepted, in any case, for any
+repository: a repository using `objects/info/alternates` (for example from `git clone --reference`) is
+`not_captured` / `alternates_present` and gets no capture. Hard links are not detected. Anchoring cannot
+prove that a linked worktree not provisioned by Harflow came from the checkout it was started in.
 
 **Scopes.** Per repository, `committed_range` is the two-dot tree diff from `base_commit` to
 `head_commit`; `working_tree` is the working tree against the pinned `head_commit`, plus untracked

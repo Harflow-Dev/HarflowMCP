@@ -22,6 +22,7 @@ MAX_ROWS = 500
 MAX_PATH_BYTES = 4096
 MAX_TEXT_BYTES = 64 * 1024
 MAX_REPORTED_CONFLICTS = 100
+MAX_CONFLICTS_ESCAPED = 8192  # JSON-escaped bytes of one scope's conflict list; bounds the worst-case listing page
 MAX_FIELD_CHARS = 8192
 MAX_REPOSITORY_FIELD = 4096  # JSON-escaped (ASCII) bytes; bounds the worst-case listing page
 
@@ -139,6 +140,7 @@ def _conflicts(value: Any) -> None:
     _require(type(value["truncated"]) is bool, "reported_conflicts truncated")
     names = value["names"]
     _require(isinstance(names, list) and len(names) <= MAX_REPORTED_CONFLICTS, "reported_conflicts names")
+    _require(sum(len(json.dumps(name)) + 2 for name in names) <= MAX_CONFLICTS_ESCAPED, "reported_conflicts size")
     for name in names:
         _dict(name, {"path", "path_bytes_b64"}, "reported conflict")
         _string(name["path"], "reported conflict path", nullable=True)
