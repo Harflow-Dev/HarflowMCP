@@ -221,7 +221,7 @@
   "private_reference_guard": "passed",
   "legacy_name_guard": "passed",
   "whitespace_guard": "passed",
-  "new_local_document_links": "4 checked, no new broken links",
+  "new_local_document_links": "5 checked, no new broken links",
   "protected_original_files": {
     "docs/migration-plan.md": "c4ee4406138c5fc86c995ef1af9bdbe671307e52990fd253fe7d800e11a3dcae",
     "docs/migration-sessions.md": "0a469086ab55d92ce2af7f6c48d970bf12964bde83caeeb0dede7687d3ed234d",
@@ -231,7 +231,9 @@
   },
   "protected_original_hashes_unchanged": true,
   "ui": "Not applicable to this producer-only stage; no consumer UI qualification.",
-  "implementation_commit": null,
+  "implementation_commit": "aae15779fff358079b3e9891782dab3b7af52ac1",
   "source_tree": "88da8f4787e6e17f66bf013de16a4f4e6ab9633f",
-  "implementation_tree": null
+  "implementation_tree": "1786c2ef03e727b2ca07a35d9d658383a3c25af0",
+  "implementation_parent": "4f5b86d27d249094d7378c84029a94e2aaec966d",
+  "staged_qualified_inputs_match_frozen_hashes": true
 }
