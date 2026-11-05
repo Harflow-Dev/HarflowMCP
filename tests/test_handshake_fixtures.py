@@ -24,12 +24,16 @@ def test_launch_and_schema_fixtures_match_current_public_serializers():
 def test_included_mcp_schema_scope_preserves_python_surface():
     fixture = json.loads((ROOT / 'contracts/mcp-v1/tools.json').read_text())
     names = [tool['name'] for tool in fixture['tools']]
-    assert len(names) == len(set(names)) == 55
-    assert len(fixture['included']) == 47
+    assert len(names) == len(set(names)) == 58
+    assert len(fixture['included']) == 50
     assert set(fixture['included']).isdisjoint(fixture['deferred'])
     assert set(fixture['included']) | set(fixture['deferred']) == set(names)
-    # S01/S02 schema identity must survive ctl-only additions.
-    canonical = json.dumps(fixture['tools'], sort_keys=True, separators=(',', ':')).encode()
+    # Preserve the original 55 Python schemas exactly; ST02 adds only these tools.
+    additions = {'get_workflow_steering', 'get_workflow_steering_history', 'steer_workflow'}
+    assert additions <= set(fixture['included'])
+    legacy = [tool for tool in fixture['tools'] if tool['name'] not in additions]
+    assert len(legacy) == 55
+    canonical = json.dumps(legacy, sort_keys=True, separators=(',', ':')).encode()
     assert hashlib.sha256(canonical).hexdigest() == '3c0a3e2dfeca9000c0c855e6ee595356f1e664d24f7141b91f07b2c1e8eab12b'
 
 

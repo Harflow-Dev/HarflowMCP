@@ -669,7 +669,11 @@ MCP_RESOLVED = {
     ("cancel_workflow_message", "run_id"), ("get_workflow_artifacts", "workflow_run_id"),
     ("get_workflow_artifacts", "task_id"), ("workflow_limit_hits", "root_workflow_run_id"),
 }
-MCP_EXEMPT: dict[tuple[str, str], str] = {}
+MCP_EXEMPT: dict[tuple[str, str], str] = {
+    ("get_workflow_steering", "workflow_run_id"): "steering v1 binds exact root/target identity; prefixes are unsupported",
+    ("get_workflow_steering_history", "workflow_run_id"): "steering v1 history is bound to the exact root identity",
+    ("steer_workflow", "workflow_run_id"): "steering v1 request identity binds the full root id; prefixes are unsupported",
+}
 
 CTL_RESOLVED = {
     ("approval-get", "task_id"), ("approval-list", "--task-id"), ("approval-list", "--workflow-run-id"),
@@ -691,6 +695,9 @@ CTL_RESOLVED = {
     ("workflow-status", "workflow_run_id"), ("workflow-wait", "workflow_run_id"),
 }
 CTL_EXEMPT = {
+    ("workflow-steering-status", "workflow_run_id"): "steering v1 binds exact root/target identity; prefixes are unsupported",
+    ("workflow-steering-history", "workflow_run_id"): "steering v1 history is bound to the exact root identity",
+    ("workflow-steer", "workflow_run_id"): "steering v1 request identity binds the full root id; prefixes are unsupported",
     ("worktree-remove", "--task-id"): "destructive and accepts a task or run id in one namespace; the full id is required",
 }
 
@@ -702,6 +709,7 @@ async def test_every_mcp_id_parameter_is_wired() -> None:
     found = {(tool.name, name) for tool in tools for name in tool.input_schema.get("properties", {}) if ID_PARAMETER.search(name)}
     unwired = found - MCP_RESOLVED - set(MCP_EXEMPT)
     assert not unwired, f"id parameters without prefix resolution: {sorted(unwired)}"
+    assert not set(MCP_EXEMPT) - found, "documented exact-id exemptions must name current parameters"
     assert not (MCP_RESOLVED - found), f"wiring table names parameters that no longer exist: {sorted(MCP_RESOLVED - found)}"
 
 
