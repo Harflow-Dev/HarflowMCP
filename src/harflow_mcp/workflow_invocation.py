@@ -423,6 +423,8 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         child["child_session_selection"] = copy.deepcopy(selection)
         if mode == "child" and selection.get("selected_mode") == "resume":
             child["inherited_orchestrator_binding"] = copy.deepcopy(selection)
+    from .workflow_steering import initialize as initialize_steering
+    initialize_steering(child)
     return child
 
 

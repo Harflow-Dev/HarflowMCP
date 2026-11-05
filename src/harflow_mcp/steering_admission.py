@@ -48,21 +48,46 @@ def admit(storage, run, principal, monitor, request, digest, binding):
             if item["hold"]:
                 item["steering_revision"] += 1
     else:
-        if request["target"] != target(run):
-            raise SteeringError("steering_target_stale", "Builder draft/source/authority snapshot changed")
+        if action != "dismiss" and request["target"] != target(run, storage, request["target"]):
+            raise SteeringError("steering_target_stale", "Draft/source/authority snapshot changed")
         if action != "open":
             ep = next((item for item in s["episodes"] if item["episode_id"] == request["episode_id"]), None)
             if ep is None or ep["steering_revision"] != request["expected_steering_revision"]:
                 raise SteeringError("steering_revision_stale", "Episode revision changed")
+            if run.get("kind") != "builder" and action == "reply" and request["target"] != ep["target"]:
+                raise SteeringError("steering_target_stale", "Reply cannot change this episode target; explicitly retarget after a fresh observation")
+            if action == "dismiss" and request["target"] != ep["target"]:
+                try:
+                    current = target(run, storage, request["target"])
+                except SteeringError:
+                    current = None
+                if current != request["target"]:
+                    raise SteeringError("steering_target_stale", "Dismiss must identify this episode or its current exact target")
         if action == "dismiss":
             ep["steering_revision"] += 1
             ep["dismiss_requested"] = ep["state"] in UNSETTLED
             ep["state"] = "dismiss_pending_settlement" if ep["dismiss_requested"] else "dismissed"
             ep["hold"] = ep["state"] != "dismissed"
+            if not ep["hold"]:
+                if run.get("kind") != "builder":
+                    from .orchestrator_steering import records
+                    unsettled = any(t["status"] in {"reserved", "running", "uncertain"} for child, _ in records(storage, run).values() for a in child["activations"] for t in a["tasks"])
+                    if unsettled:
+                        ep.update(state="dismiss_pending_settlement", hold=True, dismiss_requested=True)
+                    else:
+                        from .orchestrator_steering import _park
+                        _park(run, storage)
         else:
             if any(item["state"] in UNSETTLED for item in s["episodes"]) or any(t["state"] == "captured" for t in s["turns"]):
                 raise SteeringError("steering_busy", "Observe the existing issuance; no replacement is supported")
-            active_tasks = [t for a in run["activations"] for t in a["tasks"] if t["status"] in {"reserved", "running", "uncertain"}]
+            orchestration = run.get("kind") != "builder"
+            boundary_tasks, owner_id = [], run["workflow_run_id"]
+            if orchestration:
+                from .orchestrator_steering import admission
+                candidate, previous_session, boundary_tasks, owner_id = admission(storage, run, request)
+                active_tasks = [{"task_id": b["task_id"], "status": "running"} for b in boundary_tasks]
+            else:
+                active_tasks = [t for a in run["activations"] for t in a["tasks"] if t["status"] in {"reserved", "running", "uncertain"}]
             if any(t["status"] == "uncertain" for t in active_tasks):
                 raise SteeringError("steering_delivery_unknown", "Existing builder attempt requires observation before admission")
             queued = bool(active_tasks)
@@ -95,27 +120,31 @@ def admit(storage, run, principal, monitor, request, digest, binding):
                 ep["steering_revision"] += 1
             if sum(t["episode_id"] == ep["episode_id"] for t in s["turns"]) >= EPISODE_TURNS:
                 raise SteeringError("steering_budget_exhausted", "Episode conversation issuance limit reached")
-            candidate = copy.deepcopy(run["definition"]["orchestrator"])
+            if not orchestration:
+                candidate = copy.deepcopy(run["definition"]["orchestrator"])
             from .tasks import get_backend
             if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
                 raise SteeringError("steering_budget_unsupported", "Selected builder adapter cannot enforce a finite harness-turn cap")
-            previous_session = run.get("sessions", {}).get("builder")
+            if not orchestration:
+                previous_session = run.get("sessions", {}).get("builder")
             from .workflows import _candidate_key
-            if previous_session and previous_session.get("candidate") != "builder:" + _candidate_key(candidate) and not request.get("allow_fresh_context", False):
+            if previous_session and previous_session.get("candidate") != ("orchestrator:" if orchestration else "builder:") + _candidate_key(candidate) and not request.get("allow_fresh_context", False):
                 raise SteeringError("steering_source_unavailable", "Retained builder candidate changed; explicitly permit Fresh context")
             if not previous_session and not queued and not request.get("allow_fresh_context", False):
                 raise SteeringError("steering_source_unavailable", "No retained builder session; explicitly permit Fresh context")
             s["control_revision"] += 1
-            witness = target(run)
+            witness = target(run, storage, request["target"])
             turn = {"turn_id": uuid.uuid4().hex, "task_id": uuid.uuid4().hex, "episode_id": ep["episode_id"],
                     "request_id": request["request_id"], "state": "queued" if queued else "reserved", "target": copy.deepcopy(witness),
                     "commit_target": copy.deepcopy(witness), "commit_target_ref": "commit-target:" + uuid.uuid4().hex,
                     "candidate": candidate, "text": request["text"], "created_at": time.time(),
                     "allow_fresh_context": request.get("allow_fresh_context", False), "usage": {"provenance": "unavailable", "reserved_harness_turns": min(candidate.get("max_turns") or 8, 8)},
                     "boundary_task_id": active_tasks[-1]["task_id"] if queued else None, "harness_turn_cap": min(candidate.get("max_turns") or 8, 8), "previous_session": copy.deepcopy(previous_session), "steering_revision": ep["steering_revision"], "preview_receipts": []}
+            if orchestration:
+                turn.update(boundary_tasks=boundary_tasks, session_owner_run_id=owner_id, handoff={"intent_id": turn["turn_id"], "state": "intent", "workflow_run_id": witness["workflow_run_id"]})
             s["turns"].append(turn)
             ep.update(state="queued_boundary" if queued else "turn_reserved", target=witness, hold=True)
-            if not queued:
+            if not queued and not orchestration:
                 run["status"] = "starting"
             run["attention_reason"] = "Conversation is waiting for caller; use steering capability"
             scheduled = True

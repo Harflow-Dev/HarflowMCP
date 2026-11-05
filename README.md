@@ -32,6 +32,9 @@ A prose reply waits for another caller request; a valid framed proposal remains 
 revision checks and explicit Apply/Save. This requires the qualified original external caller or
 a verified native human and a supported finite harness cap. Ordinary builder messages keep their
 existing behavior. See [builder steering](docs/workflows.md#explicit-builder-conversation-steering).
+Orchestrators also support safe-boundary conversation with exact decision revisions: prose waits,
+and only a framed, validated configured action can resume execution. Already issued work and
+active sibling results remain real. See [orchestrator steering](docs/workflows.md#explicit-orchestrator-conversation-steering).
 
 Workflow callers can see every pending child question in status and wait replies and answer them independently by decision ID through the root run. Questions and structured clarification items remain complete, and forwarded answers return a durable child acceptance receipt. Resolved attention reasons disappear when execution resumes; unreadable workflow approval metadata is reported separately from requests needing a decision. See [workflow input and recovery](docs/workflows.md).
 

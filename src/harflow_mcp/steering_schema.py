@@ -37,6 +37,22 @@ def _timestamp(value, field):
 
 def _target(value, root_id):
     _require(type(value) is dict and set(value) == TARGET_KEYS, "target fields")
+    if value["role"] == "orchestrator":
+        _require(value["root_workflow_run_id"] == root_id and type(value["path"]) is list and 1 <= len(value["path"]) <= 64 and value["path"][0] == root_id and value["path"][-1] == value["workflow_run_id"] and len(set(value["path"])) == len(value["path"]), "orchestrator target path")
+        for item in value["path"]:
+            _id(item, "path run")
+        for key in ("node_id", "token_id", "decision_id"):
+            _id(value[key], "orchestrator " + key)
+        for key in ("activation_id", "task_id"):
+            if value[key] is not None:
+                _id(value[key], key)
+        for key in ("checkpoint_revision", "goal_revision", "interaction_epoch", "control_revision"):
+            _counter(value[key], key)
+        _require(type(value["definition_digest"]) is str and re.fullmatch(r"[a-f0-9]{64}", value["definition_digest"]), "definition digest")
+        _digest(value["assignment_digest"], "orchestrator tree digest")
+        for key in ("assignment_revision", "draft_revision", "source_revision", "source_workflow_id", "source_definition_digest", "preview_hash"):
+            _require(value[key] is None, "orchestrator inapplicable " + key)
+        return
     _require(value["root_workflow_run_id"] == root_id == value["workflow_run_id"] and value["path"] == [root_id] and value["role"] == "builder" and value["node_id"] == "builder", "target root/role")
     for key in ("token_id", "decision_id", "assignment_revision", "assignment_digest"):
         _require(value[key] is None, "unsupported target " + key)
@@ -137,7 +153,7 @@ def validate_ledger(value, run):
     per_episode = {}
     for turn in value["turns"]:
         required_turn = set("turn_id task_id episode_id request_id state target commit_target commit_target_ref candidate text created_at allow_fresh_context usage previous_session steering_revision preview_receipts harness_turn_cap boundary_task_id".split())
-        optional = {"witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started"}
+        optional = {"witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id"}
         _require(required_turn <= set(turn) and not set(turn) - required_turn - optional, "turn fields")
         _id(turn["turn_id"], "turn_id"); _id(turn["task_id"], "task_id")
         _require(turn["turn_id"] not in turns and turn["task_id"] not in tasks, "duplicate turn/task")
@@ -147,6 +163,48 @@ def validate_ledger(value, run):
         _require(per_episode[turn["episode_id"]] <= 8, "episode turn budget")
         _require(turn["state"] in {"queued", "reserved", "spawn_intent", "running", "unknown", "captured", "settled"}, "turn state")
         _target(turn["target"], root_id); _target(turn["commit_target"], root_id)
+        orchestration = turn["target"]["role"] == "orchestrator"
+        extension = {"boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery"}
+        if orchestration:
+            _require({"boundary_tasks", "session_owner_run_id", "handoff"} <= set(turn), "orchestrator issuance fields")
+            _id(turn["session_owner_run_id"], "session owner")
+            _require(type(turn["boundary_tasks"]) is list and len(turn["boundary_tasks"]) <= 64, "boundary tasks")
+            boundary_ids = set()
+            for boundary in turn["boundary_tasks"]:
+                _require(type(boundary) is dict and set(boundary) == {"workflow_run_id", "activation_id", "task_id"}, "boundary fields")
+                for key in boundary:
+                    _id(boundary[key], "boundary " + key)
+                _require(boundary["task_id"] not in boundary_ids, "duplicate boundary generation")
+                boundary_ids.add(boundary["task_id"])
+            _require(turn["boundary_task_id"] == (turn["boundary_tasks"][-1]["task_id"] if turn["boundary_tasks"] else None), "boundary primary task")
+            handoff = turn["handoff"]
+            _require(type(handoff) is dict and set(handoff) == {"intent_id", "state", "workflow_run_id"} and handoff["intent_id"] == turn["turn_id"] and handoff["workflow_run_id"] == turn["target"]["workflow_run_id"] and handoff["state"] in {"intent", "acknowledged"}, "hold handoff")
+            if "context_delivery" in turn:
+                from .workflow_context import CONTEXT_DELIVERY_VERSION
+                receipt = turn["context_delivery"]
+                allowed = {"version", "scope", "session_owner", "revision", "digest", "base_revision", "bootstrap_digest", "delivery_mode", "section_state", "owner_prefix"}
+                _require(type(receipt) is dict and set(receipt) == allowed and type(receipt["version"]) is int and receipt["version"] == CONTEXT_DELIVERY_VERSION and receipt["scope"] == turn["target"]["workflow_run_id"] and receipt["delivery_mode"] == "bootstrap" and receipt["base_revision"] is None and type(receipt["section_state"]) is dict and type(receipt["owner_prefix"]) is str and type(receipt["session_owner"]) is str, "issued context receipt")
+                _counter(receipt["revision"], "context revision", True)
+                for key in ("digest", "bootstrap_digest"):
+                    _require(type(receipt[key]) is str and re.fullmatch(r"[a-f0-9]{64}", receipt[key]), "context " + key)
+            if "action_commit" in turn:
+                intent = turn["action_commit"]
+                _require(type(intent) is dict and set(intent) == {"state", "command", "call_id", "execution_id"} and intent["state"] in {"intent", "acknowledged", "refused"}, "action intent fields")
+                _id(intent["call_id"], "action call"); _id(intent["execution_id"], "action execution")
+                _require(type(intent["command"]) is dict and intent["command"].get("decision_id") == turn["target"]["decision_id"] and intent["command"].get("action") in {"continue", "complete", "failed", "needs_input", "inspect", "call_on_demand"}, "action intent command")
+                _require(captured_failure(turn.get("observation"), turn["task_id"]) is None and type(turn.get("final")) is str, "action positive capture")
+                from .steering_output import classify_final
+                classified = classify_final(turn["final"])
+                _require(classified["kind"] == "command" and classified["command"].get("command") == intent["command"] and classified["command"].get("turn_id") == turn["turn_id"] and classified["command"].get("commit_target_ref") == turn["commit_target_ref"], "action captured command binding")
+                wrapper = classified["command"]
+                expected_wrapper = {"episode_id": turn["episode_id"], "turn_id": turn["turn_id"], "commit_target_ref": turn["commit_target_ref"], "steering_revision": turn["steering_revision"], "role": "orchestrator", **{k: turn["commit_target"][k] for k in ("interaction_epoch", "checkpoint_revision", "goal_revision")}}
+                _require(set(wrapper) == set(expected_wrapper) | {"command"} and all(type(wrapper[k]) is type(v) and wrapper[k] == v for k, v in expected_wrapper.items()), "action wrapper witness binding")
+                if turn.get("context_delivery"):
+                    from .workflow_context import acknowledged_receipt
+                    _require(acknowledged_receipt(turn["context_delivery"], intent["command"].get("context_ack")) is not None, "action context acknowledgement")
+                _require(intent["state"] != "acknowledged" or turn["state"] == "settled" and turn.get("outcome") == "committed", "action acknowledged outcome")
+        else:
+            _require(not set(turn) & extension, "builder orchestrator fields")
         _require(type(turn["commit_target_ref"]) is str and re.fullmatch(r"commit-target:[a-f0-9]{32}", turn["commit_target_ref"]), "commit_target_ref")
         _counter(turn["steering_revision"], "turn revision", True)
         _require(turn["steering_revision"] <= episodes[turn["episode_id"]]["steering_revision"], "turn future revision")
@@ -192,6 +250,9 @@ def validate_ledger(value, run):
             _require(type(turn["dispatch_error"]) is str and len(turn["dispatch_error"]) <= 2000, "dispatch error")
         if "not_started" in turn:
             _require(turn["not_started"] is True, "positive not-started proof")
+        if "observed_task_id" in turn:
+            _require(turn["observed_task_id"] is None or type(turn["observed_task_id"]) is str, "observed task identity")
+            _require(turn["observed_task_id"] != turn["task_id"] and turn["state"] == "unknown" and turn.get("outcome") == "capture_unknown", "mismatched capture refusal")
         _observation(turn)
         if turn["state"] in {"captured", "settled"} and "observation" not in turn:
             before_spawn = not any(a.get("steering_turn_id") == turn["turn_id"] for a in run["activations"])

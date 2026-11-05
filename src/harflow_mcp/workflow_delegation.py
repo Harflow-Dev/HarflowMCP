@@ -489,11 +489,9 @@ def available_sessions(run: dict[str, Any], node: dict[str, Any], *, root: Path 
     return []
 
 
-def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict[str, Any], activation_id: str, *, question_id: str | None = None, execution_id: str | None = None, protocol_warnings: list[str] | None = None) -> None:
-    """Run final-JSON inspection requests without granting workflow state authority."""
+def validate_inspection_request(run, decision, checkpoint):
+    """Original inspection shape and allowance validator, without reading evidence."""
     w = _w()
-    from .workflow_inspection import inspect_request
-    run = supervisor.run()
     allowed = {"decision_id", "action", "reason", "requests", "next", "task_updates"}
     if run.get("definition", {}).get("context_delivery") == "optimized_v1":
         allowed.add("context_ack")
@@ -504,9 +502,17 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
     requests = decision.get("requests")
     if not isinstance(requests, list) or not requests or len(requests) > 1 or any(not isinstance(r, dict) for r in requests):
         raise w.WorkflowError("inspect requires exactly one request")
-    run = supervisor.run()
     if checkpoint.get("inspection_count", 0) + len(requests) > run["definition"].get("max_inspections", 20):
         raise w.WorkflowError("Inspection budget exhausted for this decision point")
+    return requests
+
+
+def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict[str, Any], activation_id: str, *, question_id: str | None = None, execution_id: str | None = None, protocol_warnings: list[str] | None = None) -> None:
+    """Run final-JSON inspection requests without granting workflow state authority."""
+    w = _w()
+    from .workflow_inspection import inspect_request
+    run = supervisor.run()
+    requests = validate_inspection_request(run, decision, checkpoint)
     results = [inspect_request(run, supervisor.store.root, request) for request in requests]
     if len(json.dumps(results, ensure_ascii=False)) > 32768:
         raise w.WorkflowError("Inspection response exceeds 32k; request a smaller page limit")
@@ -516,6 +522,8 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
             return
         if not question_id and "decision_goal_revision" in a and (next(t for t in r["pending"] if t["id"] == checkpoint["id"]).get("decision_activation_id") != activation_id or r.get("goal_revision") != a.get("decision_goal_revision") or next(t for t in r["pending"] if t["id"] == checkpoint["id"]).get("decision_id") != a.get("decision_id")):
             raise w.WorkflowError("Inspection checkpoint or goal changed before acceptance")
+        current_checkpoint = checkpoint if question_id else next(t for t in r["pending"] if t["id"] == checkpoint["id"])
+        validate_inspection_request(r, decision, current_checkpoint)
         a.update(status="completed", inspection_requests=copy.deepcopy(requests), protocol_warnings=protocol_warnings or [], decision_disposition="inspect")
         if r["status"] != "running":
             a["decision_ignored"] = "Human control changed run state before inspection acceptance"
@@ -968,6 +976,125 @@ def record_retained_control_session(supervisor: Any, activation: dict[str, Any],
         supervisor.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
 
 
+def accept_decision_locked(supervisor, r, node, token, activation, decision, execute, raw, protocol_warnings):
+    """Original role acceptance, revalidated inside the tree mutation boundary."""
+    w = _w()
+    t = next(t for t in r["pending"] if t["id"] == token["id"])
+    a = next(a for a in r["activations"] if a["id"] == activation["id"])
+    selected, assignments, join = validate_decision(r, node, t, decision, execute, root=supervisor.store.root)
+    completion_sources = {u["task_id"]: completion_evidence(r, node, t, u["task_id"])["id"] for u in decision.get("task_updates", []) if u["status"] == "completed"}
+    if (t.get("decision_id") != activation["decision_id"] or t.get("decision_activation_id") != activation["id"] or r.get("goal_revision") != activation.get("decision_goal_revision")):
+        raise w.WorkflowError("Decision checkpoint or goal changed before acceptance")
+    if a.get("decision_disposition"):
+        return
+    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings, decision_disposition="accepted")
+    if r["status"] != "running":
+        a["decision_ignored"] = "Human control changed run state before acceptance"
+        return
+    if not supervisor.tree.tree_running(r):
+        # A decision whose turn spanned a pause is ignored, not applied.
+        a["decision_ignored"] = "Workflow tree stopped running before acceptance"
+        return
+    r.pop("exhausted_retry_edges", None)
+    r["decisions"].append({**decision, "node_id": node["id"], "activation_id": activation["id"], "selected_join_id": join, "protocol_warnings": protocol_warnings})
+    action = decision["action"]
+    t["on_demand_count"] = 0
+    source = next((item for item in r["activations"] if item["id"] == t.get("execution_activation_id")), None)
+    explicit_retry = any(key.startswith(("retry:", "recover:", "recover_child:")) for key in assignments)
+    if action == "continue" and not explicit_retry and node.get("role") == "planning" and source and source.get("node_result", {}).get("status") == "succeeded":
+        planned = source["node_result"]["result"]
+        if planned.get("no_checklist_needed") is True:
+            r["checklist_disposition"] = {"status": "not_needed", "reason": planned["checklist_reason"], "execution_id": source["id"], "decision_id": decision["decision_id"]}
+        elif planned.get("tasks"):
+            r["checklist_disposition"] = {"status": "required", "reason": decision["reason"], "execution_id": source["id"], "decision_id": decision["decision_id"]}
+    if action == "continue":
+        if r.get("goal_replanning_required"):
+            r["goal_replan"] = copy.deepcopy(decision["goal_replan"])
+        r.pop("goal_replanning_required", None)
+        skip_id = next((key for key in assignments if key.startswith("skip_optional:")), None)
+        if skip_id:
+            execution_id = assignments[skip_id]["skip_execution_id"]
+            source = next(item for item in r["activations"] if item["id"] == execution_id)
+            authorization = r.get("optional_skip_authorizations", {}).get(execution_id, {})
+            skip_join = optional_review_refusal_join(r, node, source, t)
+            if not skip_join or authorization.get("allow_optional_review_skip") is not True or authorization.get("node_id") != node["id"] or authorization.get("source_decision_id") != t.get("decision_id"):
+                raise w.WorkflowError("Optional review skip authorization no longer matches this execution checkpoint")
+            source.update(optional_failure=True, optional_skip={"caller_reason": authorization["reason"], "orchestrator_reason": decision["reason"], "source_decision_id": authorization["source_decision_id"], "decision_id": decision["decision_id"], "skipped_at": time.time()})
+            for previous in optional_review_protocol_ancestors(r, node, source, t):
+                previous.update(optional_failure=True, optional_skip={**copy.deepcopy(source["optional_skip"]), "scope": "protocol_retry_ancestor", "skipped_by_execution_id": execution_id})
+            t["optional_failure_join"] = skip_join
+            for key in ("selected_connections", "selected_join_id", "accepted_decision_id", "assignments", "selection_reason", "selection_decision_id", "decision_id", "decision_attempts", "decision_error"):
+                t.pop(key, None)
+            return
+        t.update(selected_connections=[e["id"] for e in selected], selected_join_id=join, assignments=assignments, accepted_decision_id=t["decision_id"])
+        if node["type"] == "parallel_start":
+            t.update(selection_reason=decision["reason"], selection_decision_id=decision["decision_id"])
+        retry_id = next((key for key in assignments if key.startswith(("retry:", "recover:", "recover_child:"))), None)
+        if retry_id and retry_id.startswith("recover_child:"):
+            # Recovering a child reopens its failed decision: same child,
+            # preserved work, and no attempt consumed.
+            old_id = assignments[retry_id].get("recovery_execution_id", t.get("execution_activation_id"))
+            for key in ("execution_complete", "result", "completed_task_ids", "optional_failure_join", "selected_connections", "accepted_decision_id", "assignments", "resume_task_id", "resume_source_execution_id", "recovered_result", "recovered_failed_result", "authorized_artifact_refs"):
+                t.pop(key, None)
+            t.update(assignments[retry_id])
+            t["execution_activation_id"] = old_id
+            t["reopen_child_execution_id"] = old_id
+            source = next(item for item in r["activations"] if item["id"] == old_id)
+            t["input_result_refs"] = list(dict.fromkeys(source.get("input_result_refs", []) + t.get("input_result_refs", []) + [old_id]))
+        elif retry_id:
+            for key in ("child_session_mode", "child_session_ref", "child_session_reason"):
+                t.pop(key, None)
+            old_id = assignments[retry_id].get("recovery_execution_id", t.get("execution_activation_id"))
+            if assignments[retry_id].get("recovery_execution_id"):
+                t["recovery_return_checkpoint"] = {k: copy.deepcopy(v) for k, v in t.items() if k not in {"selected_connections", "selected_join_id", "assignments", "accepted_decision_id", "decision_id", "decision_attempts", "decision_error"}}
+                t["node_id"] = assignments[retry_id]["recovery_node_id"]
+            for key in ("execution_complete", "execution_activation_id", "result", "completed_task_ids", "optional_failure_join", "selected_connections", "accepted_decision_id", "assignments", "resume_task_id", "resume_source_execution_id", "recovered_result", "recovered_failed_result", "authorized_artifact_refs"):
+                t.pop(key, None)
+            t.update(assignments[retry_id], retry_of_execution_id=old_id)
+            source = next(item for item in r["activations"] if item["id"] == old_id)
+            t["input_result_refs"] = list(dict.fromkeys(source.get("input_result_refs", []) + t.get("input_result_refs", []) + [old_id]))
+        if execute or retry_id:
+            assignment = assignments[retry_id or "execute:" + token["id"]]
+            if assignment.get("execution_session_mode") == "fresh":
+                t.pop("resume_task_id", None)
+            t.update(assignment)
+            t.pop("requires_assignment", None)
+            t.pop("resume_failure_reason", None)
+            t.pop("decision_id", None)
+            t.pop("decision_attempts", None)
+            t.pop("decision_error", None)
+    elif action == "complete":
+        if r.get("goal_replanning_required"):
+            r["goal_replan"] = copy.deepcopy(decision["goal_replan"])
+            r.pop("goal_replanning_required", None)
+        if r.get("goal") is not None:
+            from .workflow_goals import validate_assessment
+            r["goal_assessment"] = validate_assessment(r, decision.get("goal_assessment"))
+            r.pop("goal_replanning_required", None)
+        if (r.get("goal_assessment") or {}).get("status") in {"unmet", "unverifiable"}:
+            if t["decision_id"] in r.get("accepted_inputs", {}):
+                t["decision_id"] = uuid.uuid4().hex
+            r.update(status="needs_input", input_question="How should the unmet or unverifiable goal be addressed?", input_question_items=[], input_decision_id=t["decision_id"], attention_reason=decision["reason"])
+        else:
+            r["pending"].remove(t)
+            r.update(status="completed", summary=decision["reason"])
+    elif action == "failed":
+        if r.get("runner_policy") == "guided" and node["type"] == "end" and unresolved_required(r, t):
+            r.update(status="needs_attention", attention_reason=decision["reason"], failed_decision_id=t["decision_id"])
+        else:
+            r.update(status="failed", failure_reason=decision["reason"], failed_decision_id=t["decision_id"])
+    else:
+        if source and source.get("node_result", {}).get("result", {}).get("failure_kind") == "usage_limit":
+            r["worker_usage_recovery"] = {"node_id": source["node_id"], "execution_id": source["id"], "decision_id": t["decision_id"], "failure_diagnostic": copy.deepcopy(source["node_result"]["result"].get("failure_diagnostic", {}))}
+        skip_available = bool(not execute and source and optional_review_refusal_join(r, node, source, t))
+        if t["decision_id"] in r.get("accepted_inputs", {}):
+            t["decision_id"] = uuid.uuid4().hex
+        r.update(status="needs_input", input_question=decision["question"], input_question_items=copy.deepcopy(decision.get("question_items", [])), input_decision_id=t["decision_id"], attention_reason=decision["reason"], optional_review_skip_available=skip_available)
+    for update in decision.get("task_updates", []):
+        item = next(x for x in r["tasks"] if x["id"] == update["task_id"])
+        item.update(status=update["status"], reason=update["reason"], completed_by_activation_id=completion_sources.get(update["task_id"]), status_decision_activation_id=activation["id"], status_changed_at=time.time())
+
+
 async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *, execute: bool = False) -> list[dict[str, Any]] | None:
     w = _w()
     from .workflow_on_demand import decision_lock
@@ -979,6 +1106,11 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             supervisor.update(lambda r: next(t for t in r["pending"] if t["id"] == token["id"]).update(decision_id=uuid.uuid4().hex, decision_attempts=0, on_demand_count=0, on_demand_results=[]), "decision_checkpoint")
         while True:
             run = supervisor.run()
+            from .orchestrator_steering import fence
+            try:
+                fence(supervisor.store, run, "decision_attempt_reserved")
+            except w.DispatchNotStarted:
+                return None
             token = next(t for t in run["pending"] if t["id"] == token["id"])
             if not supervisor.tree.tree_running(run):
                 return None
@@ -1002,7 +1134,10 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                     r["activations"].append(copy.deepcopy(activation))
                     target.update(decision_attempts=target.get("decision_attempts", 0) + 1, decision_activation_id=activation["id"])
                 supervisor.update(reserve, "decision_attempt_reserved")
-                outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": {**context, **({"correction": token["decision_error"]} if token.get("decision_error") else {})}})
+                try:
+                    outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": {**context, **({"correction": token["decision_error"]} if token.get("decision_error") else {})}})
+                except w.DispatchNotStarted:
+                    return None
             else:
                 activation = retained
                 attempt = activation["tasks"][-1] if activation["tasks"] else None
@@ -1019,6 +1154,15 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed"), "decision_interrupted")
                 return None
             raw = outcome.get("summary") or ""
+            try:
+                from .orchestrator_steering import fence
+                fence(supervisor.store, supervisor.run(refresh_atomic=True), "decision_accepted")
+            except w.DispatchNotStarted:
+                def superseded(r):
+                    a = next(a for a in r["activations"] if a["id"] == activation["id"])
+                    a.update(raw_output=raw, steering_superseded=True, decision_disposition="superseded_by_steering", status="completed")
+                supervisor.update(superseded, "ordinary_decision_superseded_by_steering")
+                return None
             try:
                 decision = parse_contract(raw, guided=run.get("runner_policy") == "guided")
                 decision, protocol_warnings = normalize_decision(run, node, token, decision, execute, root=supervisor.store.root)
@@ -1042,118 +1186,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 accept_ack(supervisor, activation["id"], decision)
                 completion_sources = {update["task_id"]: completion_evidence(live, node, token, update["task_id"])["id"] for update in decision.get("task_updates", []) if update["status"] == "completed"}
                 def accept(r: dict[str, Any]) -> None:
-                    t = next(t for t in r["pending"] if t["id"] == token["id"])
-                    a = next(a for a in r["activations"] if a["id"] == activation["id"])
-                    if (t.get("decision_id") != activation["decision_id"] or t.get("decision_activation_id") != activation["id"] or r.get("goal_revision") != activation.get("decision_goal_revision")):
-                        raise w.WorkflowError("Decision checkpoint or goal changed before acceptance")
-                    if a.get("decision_disposition"):
-                        return
-                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings, decision_disposition="accepted")
-                    if r["status"] != "running":
-                        a["decision_ignored"] = "Human control changed run state before acceptance"
-                        return
-                    if not supervisor.tree.tree_running(r):
-                        # A decision whose turn spanned a pause is ignored, not applied.
-                        a["decision_ignored"] = "Workflow tree stopped running before acceptance"
-                        return
-                    r.pop("exhausted_retry_edges", None)
-                    r["decisions"].append({**decision, "node_id": node["id"], "activation_id": activation["id"], "selected_join_id": join, "protocol_warnings": protocol_warnings})
-                    action = decision["action"]
-                    t["on_demand_count"] = 0
-                    source = next((item for item in r["activations"] if item["id"] == t.get("execution_activation_id")), None)
-                    explicit_retry = any(key.startswith(("retry:", "recover:", "recover_child:")) for key in assignments)
-                    if action == "continue" and not explicit_retry and node.get("role") == "planning" and source and source.get("node_result", {}).get("status") == "succeeded":
-                        planned = source["node_result"]["result"]
-                        if planned.get("no_checklist_needed") is True:
-                            r["checklist_disposition"] = {"status": "not_needed", "reason": planned["checklist_reason"], "execution_id": source["id"], "decision_id": decision["decision_id"]}
-                        elif planned.get("tasks"):
-                            r["checklist_disposition"] = {"status": "required", "reason": decision["reason"], "execution_id": source["id"], "decision_id": decision["decision_id"]}
-                    if action == "continue":
-                        if r.get("goal_replanning_required"):
-                            r["goal_replan"] = copy.deepcopy(decision["goal_replan"])
-                        r.pop("goal_replanning_required", None)
-                        skip_id = next((key for key in assignments if key.startswith("skip_optional:")), None)
-                        if skip_id:
-                            execution_id = assignments[skip_id]["skip_execution_id"]
-                            source = next(item for item in r["activations"] if item["id"] == execution_id)
-                            authorization = r.get("optional_skip_authorizations", {}).get(execution_id, {})
-                            skip_join = optional_review_refusal_join(r, node, source, t)
-                            if not skip_join or authorization.get("allow_optional_review_skip") is not True or authorization.get("node_id") != node["id"] or authorization.get("source_decision_id") != t.get("decision_id"):
-                                raise w.WorkflowError("Optional review skip authorization no longer matches this execution checkpoint")
-                            source.update(optional_failure=True, optional_skip={"caller_reason": authorization["reason"], "orchestrator_reason": decision["reason"], "source_decision_id": authorization["source_decision_id"], "decision_id": decision["decision_id"], "skipped_at": time.time()})
-                            for previous in optional_review_protocol_ancestors(r, node, source, t):
-                                previous.update(optional_failure=True, optional_skip={**copy.deepcopy(source["optional_skip"]), "scope": "protocol_retry_ancestor", "skipped_by_execution_id": execution_id})
-                            t["optional_failure_join"] = skip_join
-                            for key in ("selected_connections", "selected_join_id", "accepted_decision_id", "assignments", "selection_reason", "selection_decision_id", "decision_id", "decision_attempts", "decision_error"):
-                                t.pop(key, None)
-                            return
-                        t.update(selected_connections=[e["id"] for e in selected], selected_join_id=join, assignments=assignments, accepted_decision_id=t["decision_id"])
-                        if node["type"] == "parallel_start":
-                            t.update(selection_reason=decision["reason"], selection_decision_id=decision["decision_id"])
-                        retry_id = next((key for key in assignments if key.startswith(("retry:", "recover:", "recover_child:"))), None)
-                        if retry_id and retry_id.startswith("recover_child:"):
-                            # Recovering a child reopens its failed decision: same child,
-                            # preserved work, and no attempt consumed.
-                            old_id = assignments[retry_id].get("recovery_execution_id", t.get("execution_activation_id"))
-                            for key in ("execution_complete", "result", "completed_task_ids", "optional_failure_join", "selected_connections", "accepted_decision_id", "assignments", "resume_task_id", "resume_source_execution_id", "recovered_result", "recovered_failed_result", "authorized_artifact_refs"):
-                                t.pop(key, None)
-                            t.update(assignments[retry_id])
-                            t["execution_activation_id"] = old_id
-                            t["reopen_child_execution_id"] = old_id
-                            source = next(item for item in r["activations"] if item["id"] == old_id)
-                            t["input_result_refs"] = list(dict.fromkeys(source.get("input_result_refs", []) + t.get("input_result_refs", []) + [old_id]))
-                        elif retry_id:
-                            for key in ("child_session_mode", "child_session_ref", "child_session_reason"):
-                                t.pop(key, None)
-                            old_id = assignments[retry_id].get("recovery_execution_id", t.get("execution_activation_id"))
-                            if assignments[retry_id].get("recovery_execution_id"):
-                                t["recovery_return_checkpoint"] = {k: copy.deepcopy(v) for k, v in t.items() if k not in {"selected_connections", "selected_join_id", "assignments", "accepted_decision_id", "decision_id", "decision_attempts", "decision_error"}}
-                                t["node_id"] = assignments[retry_id]["recovery_node_id"]
-                            for key in ("execution_complete", "execution_activation_id", "result", "completed_task_ids", "optional_failure_join", "selected_connections", "accepted_decision_id", "assignments", "resume_task_id", "resume_source_execution_id", "recovered_result", "recovered_failed_result", "authorized_artifact_refs"):
-                                t.pop(key, None)
-                            t.update(assignments[retry_id], retry_of_execution_id=old_id)
-                            source = next(item for item in r["activations"] if item["id"] == old_id)
-                            t["input_result_refs"] = list(dict.fromkeys(source.get("input_result_refs", []) + t.get("input_result_refs", []) + [old_id]))
-                        if execute or retry_id:
-                            assignment = assignments[retry_id or "execute:" + token["id"]]
-                            if assignment.get("execution_session_mode") == "fresh":
-                                t.pop("resume_task_id", None)
-                            t.update(assignment)
-                            t.pop("requires_assignment", None)
-                            t.pop("resume_failure_reason", None)
-                            t.pop("decision_id", None)
-                            t.pop("decision_attempts", None)
-                            t.pop("decision_error", None)
-                    elif action == "complete":
-                        if r.get("goal_replanning_required"):
-                            r["goal_replan"] = copy.deepcopy(decision["goal_replan"])
-                            r.pop("goal_replanning_required", None)
-                        if r.get("goal") is not None:
-                            from .workflow_goals import validate_assessment
-                            r["goal_assessment"] = validate_assessment(r, decision.get("goal_assessment"))
-                            r.pop("goal_replanning_required", None)
-                        if (r.get("goal_assessment") or {}).get("status") in {"unmet", "unverifiable"}:
-                            if t["decision_id"] in r.get("accepted_inputs", {}):
-                                t["decision_id"] = uuid.uuid4().hex
-                            r.update(status="needs_input", input_question="How should the unmet or unverifiable goal be addressed?", input_question_items=[], input_decision_id=t["decision_id"], attention_reason=decision["reason"])
-                        else:
-                            r["pending"].remove(t)
-                            r.update(status="completed", summary=decision["reason"])
-                    elif action == "failed":
-                        if r.get("runner_policy") == "guided" and node["type"] == "end" and unresolved_required(r, t):
-                            r.update(status="needs_attention", attention_reason=decision["reason"], failed_decision_id=t["decision_id"])
-                        else:
-                            r.update(status="failed", failure_reason=decision["reason"], failed_decision_id=t["decision_id"])
-                    else:
-                        if source and source.get("node_result", {}).get("result", {}).get("failure_kind") == "usage_limit":
-                            r["worker_usage_recovery"] = {"node_id": source["node_id"], "execution_id": source["id"], "decision_id": t["decision_id"], "failure_diagnostic": copy.deepcopy(source["node_result"]["result"].get("failure_diagnostic", {}))}
-                        skip_available = bool(not execute and source and optional_review_refusal_join(r, node, source, t))
-                        if t["decision_id"] in r.get("accepted_inputs", {}):
-                            t["decision_id"] = uuid.uuid4().hex
-                        r.update(status="needs_input", input_question=decision["question"], input_question_items=copy.deepcopy(decision.get("question_items", [])), input_decision_id=t["decision_id"], attention_reason=decision["reason"], optional_review_skip_available=skip_available)
-                    for update in decision.get("task_updates", []):
-                        item = next(x for x in r["tasks"] if x["id"] == update["task_id"])
-                        item.update(status=update["status"], reason=update["reason"], completed_by_activation_id=completion_sources.get(update["task_id"]), status_decision_activation_id=activation["id"], status_changed_at=time.time())
+                    accept_decision_locked(supervisor, r, node, token, activation, decision, execute, raw, protocol_warnings)
                 try:
                     accepted = supervisor.update(accept, "decision_accepted", decision)
                 except w.WorkflowRunCandidateError as exc:

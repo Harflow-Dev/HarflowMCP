@@ -2065,7 +2065,36 @@ unsupported adapters refuse rather than silently dropping a cap. Issuance and ob
 usage are accounted separately from execution attempts. Unknown launch/delivery/capture outcomes
 are retained for observation and never automatically replayed.
 
-Only the builder/read subset is delivered here. Orchestrator/worker steering and scoped
-cancellation/replanning remain unavailable. See [steering contracts](contracts.md#builder-conversation-steering)
+Builder/read and the separately gated orchestrator subset are implemented in source. Worker
+steering and scoped cancellation/replanning remain unavailable. See [steering contracts](contracts.md#builder-conversation-steering)
 and the accepted [ST01 specification](decisions/ST01-steering.md) for framing, authority and
 state-model rationale.
+
+
+## Explicit orchestrator conversation steering
+
+Use the same `workflow-steering-status`, `workflow-steer` and `workflow-steering-history` ctl
+commands, or their agent MCP counterparts, against the root workflow run. Require the fresh
+`workflow-steering-orchestrator.v1` capability, read the exact current target and copy every
+identity/revision into the request. Nested targets require verified reciprocal source links;
+an arbitrary child ID or task label is not sufficient. The original qualified external caller
+or a positively verified native human may request a turn; managed agents cannot self-grant control.
+
+Admission holds new affected scheduling at a safe decision boundary. Active siblings and already
+issued children retain their real work and can publish results. Conversation is not an interrupt,
+cancellation, rewind or reselection operation. A committed decision wins against an older request;
+refresh after stale or boundary-pending refusal. Active control turns queue only where their exact
+settlement can be observed. Unknown delivery never authorizes another dispatch.
+
+Ordinary prose waits for another explicit caller request and cannot advance the workflow. To
+commit execution, the orchestrator must return the strict whole-final frame with its issued
+wrapper and an ordinary valid configured decision. Current goal/graph/assignment/ownership and
+completion evidence still apply; quoted examples cannot execute. Refused output and real usage
+remain in history without a refund or automatic repair turn. A sibling result can stale the
+witness; explicitly retarget with the refreshed observation rather than reusing the old frame.
+
+The ordinary unsteered orchestrator protocol remains unchanged. Dismissal clears a settled hold
+without scheduling; resumption uses its actual checkpoint. Native ownership takeover revokes
+in-flight command authority without killing a harness. There is no worker tool-policy expansion,
+external process-restart enrollment or approval-answering endpoint. See the precise
+[orchestrator contract](contracts.md#orchestrator-conversation-steering).

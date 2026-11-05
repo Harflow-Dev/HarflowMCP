@@ -57,7 +57,7 @@ def pending_steering_handoff(run, observed_turn_ids):
     The request already owns its issuance. Never loop an old unknown/failed owner;
     an explicit same-request observation can recover those without another effect.
     """
-    return run.get("kind") == "builder" and any(
+    return any(
         turn["turn_id"] not in observed_turn_ids and turn["state"] in {"queued", "reserved", "captured"}
         for turn in run.get("steering", {}).get("turns", [])
     )

@@ -3,7 +3,8 @@
 Date: 2026-11-05 (Asia/Jakarta). Status: proposed normative specification for primary/owner adjudication; no implementation or schema acceptance implied.
 Subsequent owner/primary decision, 2026-11-05: grammar/state and authority policy A accepted
 for the separately assigned ST02 builder implementation, including active-turn queueing.
-Worker policy B and ST04 adapter cancellation decisions remain later gates. Implementation
+The owner subsequently authorized ST03-A orchestrator implementation using ST02 evidence as
+bounded entry. Worker policy B and ST04 adapter cancellation decisions remain later gates. Implementation
 qualification, consumer adoption and owner acceptance are recorded separately in
 [ST02](../migration-receipts/ST02.md); candidate later-role schemas remain proposed.
 

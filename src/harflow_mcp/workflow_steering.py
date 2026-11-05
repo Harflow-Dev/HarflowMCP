@@ -52,6 +52,9 @@ from .steering_schema import validate_ledger
 
 def semantic(run):
     result = {key: run.get(key) for key in ("builder_draft", "draft_revision", "source_revision", "source_saved_definition", "source_name", "definition_hash", "goal_revision", "interaction_owner", "interaction_handover", "input_question", "pending_inputs", "orchestrator_usage_recovery")}
+    if run.get("kind") != "builder":
+        from .orchestrator_steering import _semantic
+        result["orchestration"] = _semantic(run)
     result["ordinary_builder_identity"] = ordinary_builder_identity(run)
     result["definition_digest"] = _digest(run.get("definition"))
     return result
@@ -99,8 +102,8 @@ def _transport(storage, monitor):
 
 
 def _authorize(run, principal, monitor):
-    if run.get("parent_link") or run.get("kind") != "builder":
-        raise SteeringError("steering_role_unsupported", "Only root builders support steering")
+    if run.get("parent_link") or run.get("kind") not in {"builder", "workflow"}:
+        raise SteeringError("steering_role_unsupported", "Steering must address a qualified builder or workflow root")
     if "steering" not in run:
         raise SteeringError("steering_source_unavailable", "Historical run lacks qualified steering admission")
     if monitor:
@@ -118,7 +121,24 @@ def _storage(root):
     return WorkflowStore(root)
 
 
-def target(run):
+def target(run, storage=None, witness=None):
+    if run.get("kind") != "builder":
+        from .orchestrator_steering import current_target, targets
+        if storage is None:
+            raise SteeringError("steering_source_unavailable", "Orchestrator targets require the qualified tree store")
+        if witness is not None:
+            from .steering_schema import _target as qualify_target
+            try:
+                qualify_target(witness, run["workflow_run_id"])
+                if witness["role"] != "orchestrator":
+                    raise ValueError("Wrong steering role")
+            except (ValueError, TypeError):
+                raise SteeringError("malformed_command", "A complete issued orchestrator target is required") from None
+            return current_target(storage, run, witness)
+        choices = targets(storage, run)
+        if not choices:
+            raise SteeringError("steering_target_stale", "No current orchestrator checkpoint")
+        return choices[0]
     s = run["steering"]
     return {"root_workflow_run_id": run["workflow_run_id"], "workflow_run_id": run["workflow_run_id"],
             "path": [run["workflow_run_id"]], "role": "builder", "node_id": "builder", "token_id": None,
@@ -137,7 +157,7 @@ def _history(run, kind, **fields):
     s["history"].append({"sequence": s["sequence"], "kind": kind, "timestamp": time.time(), **fields})
 
 
-def _eligibility(run, monitor):
+def _eligibility(run, monitor, storage=None):
     ledger = run["steering"]
     actions, refusals = [], []
     if monitor:
@@ -149,14 +169,15 @@ def _eligibility(run, monitor):
     active = next((ep for ep in reversed(ledger["episodes"]) if ep["hold"]), None)
     if active:
         actions.append("dismiss")
-    if run["status"] in {"cancelled", "cancelling"}:
+    if run["status"] in ({"cancelled", "cancelling"} if run.get("kind") == "builder" else {"completed", "failed", "cancelled", "cancelling"}):
         return actions, [{"code": "workflow_terminal", "message": "Cancelled builders cannot issue conversations"}]
     if active and (active["state"] in UNSETTLED or any(t["state"] == "captured" for t in ledger["turns"])):
         return actions, [{"code": "steering_busy", "message": "Observe the same issuance; no replacement is supported"}]
     from .tasks import get_backend
-    candidate = run["definition"]["orchestrator"]
-    if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
-        return actions, [{"code": "steering_budget_unsupported", "message": "Selected adapter/settings cannot enforce the finite harness cap"}]
+    if run.get("kind") == "builder":
+        candidate = run["definition"]["orchestrator"]
+        if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
+            return actions, [{"code": "steering_budget_unsupported", "message": "Selected adapter/settings cannot enforce the finite harness cap"}]
     if run.get("input_question") or run.get("pending_inputs") or run.get("orchestrator_usage_recovery"):
         return actions, [{"code": "steering_question_pending", "message": "Use the existing interaction endpoint first"}]
     if len(ledger["turns"]) >= ROOT_TURNS or len(ledger["requests"]) >= REQUESTS or len(ledger["history"]) >= 500:
@@ -177,10 +198,29 @@ def get_workflow_steering(workflow_run_id, *, root=None, monitor=False):
     run = storage.get_run(workflow_run_id, refresh_atomic=True)
     _authorize(run, principal, monitor)
     s = run["steering"]
-    actions, refusals = _eligibility(run, monitor)
+    actions, refusals = _eligibility(run, monitor, storage)
+    if run.get("kind") == "builder":
+        issued_targets = [target(run)]
+    else:
+        from .orchestrator_steering import targets, admission
+        issued_targets = targets(storage, run)
+        eligible = []
+        target_refusals = []
+        for issued in issued_targets:
+            try:
+                candidate, _, _, _ = admission(storage, run, {"target": issued, "allow_fresh_context": True})
+                from .tasks import get_backend
+                if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
+                    raise SteeringError("steering_budget_unsupported", "Target adapter/settings cannot enforce the finite harness cap")
+                eligible.append(issued)
+            except SteeringError as exc:
+                target_refusals.append({"code": exc.code, "message": str(exc)})
+        if not eligible:
+            actions = [a for a in actions if a not in {"open", "reply", "retarget"}]
+            refusals.extend(target_refusals or [{"code": "steering_target_stale", "message": "No current orchestration decision checkpoint"}])
     return {"steering_version": 1, "root_workflow_run_id": workflow_run_id, "owner": s["owner"],
             "interaction_epoch": run["interaction_epoch"], "control_revision": s["control_revision"],
-            "targets": [target(run)], "episodes": copy.deepcopy(s["episodes"]), "sequence": s["sequence"],
+            "targets": issued_targets, "episodes": copy.deepcopy(s["episodes"]), "sequence": s["sequence"],
             "pending_steering_count": sum(ep["hold"] for ep in s["episodes"]),
             "budgets": {"root_issuances": len(s["turns"]), "root_limit": ROOT_TURNS, "episode_limit": EPISODE_TURNS,
                         "provenance": "durable_nonrefundable_issuance", "harness_turn_cap_maximum": 8},
@@ -345,3 +385,8 @@ def summary(run):
              "state": latest["state"] if latest else "idle", "steering_revision": latest["steering_revision"] if latest else None,
              "hold": held(run), "latest_reply_ref": latest["latest_reply_ref"] if latest else None},
             "pending_steering_count": sum(ep["hold"] for ep in episodes)}
+
+
+async def run_orchestrator_turn(supervisor, run_id):
+    from .orchestrator_steering import run_turn
+    return await run_turn(supervisor, run_id)

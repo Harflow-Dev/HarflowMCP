@@ -248,7 +248,7 @@ def validate_action(storage: Any, run: dict[str, Any], checkpoint: dict[str, Any
     return entry, mode, reference
 
 
-async def call(supervisor: Any, node: dict[str, Any], token: dict[str, Any], checkpoint: dict[str, Any], action: dict[str, Any], orchestration_id: str, *, question_id: str | None = None) -> bool:
+async def call(supervisor: Any, node: dict[str, Any], token: dict[str, Any], checkpoint: dict[str, Any], action: dict[str, Any], orchestration_id: str, *, question_id: str | None = None, steering_intent: dict | None = None) -> bool:
     """Reserve, acknowledge, dispatch once, then return to the same checkpoint."""
     from .workflows import WorkflowError, WorkflowSupervisor
     run = supervisor.run()
@@ -277,19 +277,34 @@ async def call(supervisor: Any, node: dict[str, Any], token: dict[str, Any], che
         if checkpoint.get("on_demand_count", 0) >= run["definition"].get("max_on_demand_calls", 5):
             supervisor.attention(f"On-demand call allowance exhausted for {entry['title']}: {action['assignment']}")
             return False
-        cid, execution_id = uuid.uuid4().hex, uuid.uuid4().hex
+        cid, execution_id = (steering_intent["call_id"], steering_intent["execution_id"]) if steering_intent else (uuid.uuid4().hex, uuid.uuid4().hex)
         reservation = {"id": cid, "call_number": 1 + sum(c["node_id"] == entry["node_id"] for c in current_owner.get("on_demand_calls", [])), "node_id": entry["node_id"], "source_workflow_run_id": entry["source_workflow_run_id"], "local_node_id": entry["local_node_id"], "title": entry["title"], "assignment": action["assignment"], "reason": action["reason"], "checkpoint": {"workflow_run_id": run["workflow_run_id"], "decision_id": checkpoint["decision_id"], "token_id": token["id"], "question_id": question_id}, "origin": {"kind": "child_question" if question_id and node.get("type") == "workflow" else "node_question" if question_id else "routing", "node_id": node["id"], "title": node.get("title", node["id"]), "workflow_run_id": run["workflow_run_id"]}, "status": "reserved", "started_at": None, "finished_at": None, "execution_id": execution_id, "result_ref": {"workflow_run_id": owner, "execution_id": execution_id}, "task_id": None, "result": None, "failure": None, "before_count": checkpoint.get("on_demand_count", 0), "orchestration_activation_id": orchestration_id, "action": copy.deepcopy(action), "dispatch_state": "preparing", "execution_session_mode": mode, "resume_task_id": reference}
         def reserve(r: dict[str, Any]) -> None:
             if r.get("status") != "running":
                 raise WorkflowError("On-demand owner stopped before reservation")
             if any(c["status"] in ACTIVE for c in r.get("on_demand_calls", [])):
                 raise WorkflowError("Owner already has an unresolved on-demand reservation")
+            if steering_intent:
+                fresh = r if owner == run["workflow_run_id"] else supervisor.run(refresh_atomic=True)
+                current = next(t for t in fresh["pending"] if t["id"] == token["id"])
+                validate_action(supervisor.store, fresh, current, action)
+                if current.get("decision_activation_id") != orchestration_id or current.get("decision_id") != checkpoint.get("decision_id"):
+                    raise WorkflowError("Steered specialist checkpoint changed before reservation")
             r.setdefault("on_demand_calls", []).append(reservation)
             if owner == run["workflow_run_id"]:
+                before_attempts = next(t for t in r["pending"] if t["id"] == token["id"]).get("decision_attempts", 0) if steering_intent else None
                 reflect_reservation(r, reservation)
-        supervisor.store.update_run(owner, reserve, "on_demand_reserved", cid)
+                if steering_intent:
+                    next(t for t in r["pending"] if t["id"] == token["id"])["decision_attempts"] = before_attempts
+        supervisor.store.update_run(owner, reserve, "on_demand_reserved", {"call_id": cid, "steering_intent": steering_intent} if steering_intent else cid)
         if owner != run["workflow_run_id"]:
-            supervisor.update(lambda r: reflect_reservation(r, reservation), "on_demand_checkpoint_applied", cid)
+            def reflect_steered(r):
+                current = next(t for t in r["pending"] if t["id"] == token["id"])
+                attempts = current.get("decision_attempts", 0)
+                reflect_reservation(r, reservation)
+                if steering_intent:
+                    current["decision_attempts"] = attempts
+            supervisor.update(reflect_steered, "on_demand_checkpoint_applied", {"call_id": cid, "steering_intent": steering_intent} if steering_intent else cid)
         supervisor.store.update_run(owner, lambda r: next(c for c in r["on_demand_calls"] if c["id"] == cid).update(dispatch_state="checkpoint_applied"), "on_demand_acknowledged", cid)
         if not supervisor.tree.tree_running(supervisor.run()):
             return False

@@ -541,7 +541,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             elif action == "steering-history":
                 wp.add_argument("--cursor")
                 wp.add_argument("--limit", type=int, default=50)
-            wp.description = "Explicit bounded builder steering. Original qualified external caller or verified human only; no automatic conversational loop, worker/orchestrator control or cancellation."
+            wp.description = "Explicit bounded builder or orchestrator steering. Original qualified external caller or verified human only; no automatic conversational loop, worker steering or cancellation."
         if action in {"send", "cancel-message"}:
             wp.add_argument("--monitor", action="store_true")
             if action == "send":

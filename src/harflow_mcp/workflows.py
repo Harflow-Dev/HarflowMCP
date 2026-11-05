@@ -1330,9 +1330,11 @@ class WorkflowStore:
             current_root = (run.get("parent_link") or {}).get("root_workflow_run_id") or run_id
             if current_root != root_id:
                 raise WorkflowRunDocumentError(run_id, "Run root changed before mutation locks", code="workflow_run_unavailable")
+            from .orchestrator_steering import fence as steering_fence
+            steering_fence(self, run, event, detail)
             if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "invocation_reserved", "child_decision_reopened"}:
                 from .workflow_steering import held
-                if held(run):
+                if run.get("kind") == "builder" and held(run):
                     raise DispatchNotStarted("Conversation hold prevents another ordinary dispatch")
                 root = run if root_id == run_id else self.get_run(root_id)
                 runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
@@ -1356,6 +1358,9 @@ class WorkflowStore:
                     raise SteeringError("steering_active", "Conversation hold blocks ordinary recovery")
             mutator(run)
             semantic_changed(steering_before, run)
+            if event.startswith("control:") and "steering" in run and run.get("kind") != "builder":
+                run["steering"]["control_revision"] += 1
+                run["steering"]["checkpoint_revision"] += 1
             if event == "builder_draft_applied" and isinstance(detail, dict):
                 preview_witness(run, detail["task_id"])
             from .workflow_messages import reconcile as reconcile_messages
@@ -3470,7 +3475,7 @@ class WorkflowSupervisor:
                     reservation["question_id"] = q["question_id"]
             try:
                 if not existing_attempt:
-                    self.update(reserve, "dispatch_reserved", reservation)
+                    self.update(reserve, "dispatch_reserved", {**reservation, "steering_role": role, "activation_id": activation["id"]})
             except BaseException:
                 # No spawn was requested; failed persistence must not strand a permit.
                 self.tree.release_slot(control=role != "node")
@@ -4279,6 +4284,9 @@ class WorkflowSupervisor:
                     busy = len([tid for tid in active if tid not in self.tree.executing_children])
                     recovering_tokens = {(a.get("token") or {}).get("id") for a in run["activations"] if a.get("invocation") or any(t.get("status") in {"reserved", "running", "uncertain"} for t in a["tasks"])}
                     for token in sorted(run["pending"], key=lambda t: t["id"] not in recovering_tokens):
+                        from .orchestrator_steering import scheduling_held
+                        if scheduling_held(self.store, run, token):
+                            continue
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
                         if not self._arrive_join(token):
@@ -4294,6 +4302,20 @@ class WorkflowSupervisor:
                             else:
                                 self.attention("Current workflow goal lacks a satisfied evidence assessment")
                         break
+                from .workflow_steering import held as conversation_held, pending_turn
+                root_id = (run.get("parent_link") or {}).get("root_workflow_run_id") or run_id
+                conversation_root = run if root_id == run_id else self.store.get_run(root_id, refresh_atomic=True)
+                if conversation_held(conversation_root) and not active:
+                    if root_id == run_id:
+                        from .orchestrator_steering import run_turn, settle_dismissals
+                        settle_dismissals(self)
+                        if pending_turn(conversation_root) or any(t["state"] == "captured" for t in conversation_root["steering"]["turns"]):
+                            await run_turn(self, run_id)
+                        if not conversation_held(self.run(refresh_atomic=True)):
+                            if self.run(refresh_atomic=True)["status"] == "paused":
+                                break
+                            continue
+                    break
                 if run["status"] in TERMINAL and not active:
                     break
                 if not active and (run["status"] in {"paused", "needs_attention", "needs_input"} or self.tree.root_suspended(run, refresh_atomic=True)):
@@ -4510,7 +4532,8 @@ async def _main(args: Any) -> None:
             if not receipt_refused:
                 final = storage.get_run(args.run_id)
                 from .workflow_builder_finalization import pending_steering_handoff
-                if pending_steering_handoff(final, observed_steering_turns) or (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
+                from .workflow_steering import held as steering_held
+                if pending_steering_handoff(final, observed_steering_turns) or (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"} and (final["status"] == "cancelling" or not steering_held(final))):
                     _launch(storage, args.run_id)
 
 

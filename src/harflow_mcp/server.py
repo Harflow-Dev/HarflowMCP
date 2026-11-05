@@ -3003,7 +3003,7 @@ async def _steering_call(action: str, workflow_run_id: str, **kwargs: Any) -> di
 @mcp.tool()
 @_task_document_errors
 async def get_workflow_steering(workflow_run_id: str) -> dict[str, Any]:
-    """Read exact builder steering targets, revisions, holds and bounded conversation budgets.
+    """Read exact builder or orchestrator steering targets, revisions, holds and conversation budgets.
 
     Only the qualified original external caller or verified native human is eligible. A managed
     worker, builder or orchestrator has no parent/sibling steering authority. Reading issues no turn.
@@ -3025,13 +3025,15 @@ async def get_workflow_steering_history(workflow_run_id: str, cursor: str | None
 @mcp.tool()
 @_task_document_errors
 async def steer_workflow(workflow_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Explicitly request one bounded builder conversation turn using the current target and revisions.
+    """Explicitly request one bounded builder or orchestrator turn using the current target and revisions.
 
     Open/reply/retarget require exact engine-issued identity, a unique request_id and verbatim text.
     Preserve all spaces, newlines and Unicode. Prose replies wait for another explicit caller
-    request; only a valid framed builder proposal commits an unsaved proposal. There is no automatic
-    back-and-forth loop or permission expansion. MCP cannot claim native take_owner/release_owner.
-    Orchestrator/worker steering and cancellation/reselection are unsupported in this capability.
+    request; a valid framed builder proposal stays unsaved, while a current orchestrator frame
+    commits only configured validated actions. Admission holds new affected scheduling and preserves
+    already issued work and active sibling evidence. There is no automatic conversational loop or
+    permission expansion. MCP cannot claim native take_owner/release_owner. Worker steering and
+    cancellation/reselection remain unsupported.
     """
     return await _steering_call("steer", workflow_run_id, request=request)
 

@@ -436,6 +436,19 @@ def _child_outcome(value, path):
 OPTIONAL.update(builder_has_repo_context=bool, builder_followup=bool, builder_turn_prompt=str, builder_turn_feedback_ids=_array(str), builder_messages=_array(_object({**_fields("id prompt status inbox_message_id task_id", numbers="created_at"), "inbox_message_id": NULL_STRING})))
 
 
+def validate_steering_receipts(value, run_id):
+    """Child receipts are exact witnesses, never independently issued authority."""
+    root_id = (value.get("parent_link") or {}).get("root_workflow_run_id") or run_id
+    for family, digest_key in (("steering_hold_receipts", "target_digest"), ("steering_action_receipts", "command_digest")):
+        for key, receipt in value.get(family, {}).items():
+            expected = {"root_workflow_run_id", "turn_id", digest_key} | ({"state"} if family == "steering_action_receipts" else set())
+            if (type(receipt) is not dict or set(receipt) != expected or key != receipt.get("turn_id")
+                    or receipt.get("root_workflow_run_id") != root_id
+                    or type(receipt.get(digest_key)) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt[digest_key])
+                    or family == "steering_action_receipts" and receipt["state"] != "applied"):
+                raise ValueError("Malformed exact steering child receipt")
+
+
 def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
     """Validate inner authority without applying graph or runtime semantics."""
     try:
@@ -449,6 +462,7 @@ def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
         if value["workflow_run_id"] != run_id:
             raise ValueError("Workflow run id does not match source id")
         _shape(value, {**CORE, **OPTIONAL}, "run")
+        validate_steering_receipts(value, run_id)
         if "steering" in value:
             from .workflow_steering import validate_ledger
             validate_ledger(value["steering"], value)
@@ -543,3 +557,7 @@ OPTIONAL.update(messages=_array(_message), message_sequence=_counter)
 OPTIONAL["interaction_history"] = _array(_object({"interaction_id": str, "action": str, "answer": str, "answer_truncated": bool, "answered_by": str, "answered_at": NUMBER, "workflow_run_id": _id}))
 
 OPTIONAL["interaction_history_truncated"] = bool
+
+OPTIONAL.update(
+    steering_hold_receipts=_map(_object({"root_workflow_run_id": _id, "turn_id": _id, "target_digest": str})),
+    steering_action_receipts=_map(_object({"root_workflow_run_id": _id, "turn_id": _id, "command_digest": str, "state": str})))

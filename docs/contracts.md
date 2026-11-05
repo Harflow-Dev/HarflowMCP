@@ -2045,8 +2045,9 @@ ST02 adds `workflow-steering-read.v1` and `workflow-steering-builder.v1` to the 
 version-info capability gate. The addition retains ctl/event wire v1 and the existing product
 line; it does not qualify a new release or any Mac/Rust consumer. Only root builder runs with
 qualified steering admission support the operation. Historical runs without that ledger refuse;
-unknown identity does not become an external owner. Orchestrator/worker steering and scoped
-cancellation/replanning are separate unavailable capabilities.
+unknown identity does not become an external owner. ST03-A extends the shared operations for
+[orchestrator steering](#orchestrator-conversation-steering). Worker steering and scoped
+cancellation/replanning remain unavailable capabilities.
 
 Public operations are `workflow-steering-status ROOT`, `workflow-steering-history ROOT
 [--cursor CURSOR] [--limit 50]`, and `workflow-steer ROOT --request-file FILE` (all with `--json`).
@@ -2137,3 +2138,57 @@ draft/preview changes can be explicitly retargeted with a fresh target observati
 ST02 exposes steering through its durable ordered history and optional run summary/digests. It
 does not add the full candidate normalized task-event vocabulary proposed in ST01, nor advertise
 an event capability for that vocabulary. Existing unknown-kind behavior is unchanged.
+
+
+## Orchestrator conversation steering
+
+ST03-A adds `workflow-steering-orchestrator.v1` alongside the shared read capability. The same
+ctl/MCP status, history and mutation operations above support qualified delegation workflows.
+Call the root run operation and select a complete engine-issued orchestrator target. The root
+ledger owns issuance, control epoch and history, including verified nested targets. A child ID or
+path alone never grants authority. Historical/unavailable sources refuse; no external application
+restart enrollment, managed-worker control, approval response or new node/backend authority is added.
+
+An orchestrator target binds the exact root/run/reciprocal nested path, token, decision, activation,
+goal, definition/graph, assignment and scheduling checkpoint. `assignment_digest` binds the bounded
+reciprocal tree choices/results; builder-only draft/source/preview fields and `assignment_revision`
+are null. Global `eligible_actions` describes actions available for at least one current target;
+admission still verifies the exact selected target and its own configured adapter. Admission and ordinary decision
+acceptance share the root tree mutation lock. Admission first prevents the unaccepted old decision
+from advancing execution; acceptance first changes the snapshot and an old request refuses stale.
+Already accepted assignments are issued work. An intermediate accepted assignment awaiting its
+execution reservation refuses admission until a qualified safe boundary; steering cannot retract
+or replace it. Ordinary messages never open steering or receive stale steering text as context.
+
+An active ordinary control turn may queue only with its exact generation bound and observed before
+a conversation launches. A scheduling hold blocks new affected reservations and new root decisions;
+it does not interrupt an active harness, rewind a child, erase completed branches or claim siblings
+stopped. Nested control uses a durable root fence and reciprocal links. Unknown source, capture,
+claim or delivery retains its hold; recovery observes the same durable identity rather than spawning
+again. Sibling completion and goal/graph/assignment/owner changes invalidate the old command witness.
+A caller must explicitly retarget after observing that new state.
+
+One explicit request reserves one nonrefundable conversational issuance and at most eight harness
+turns (a smaller configured cap remains smaller), independently of ordinary decision/execution
+attempts. Unsupported finite caps refuse. Exact final prose persists awaiting the caller with no
+automatic second conversational turn or graph advance. Successful observed exit and complete final
+capture/drain are prerequisites to command acceptance. The shared strict whole-final classifier
+and closed wrapper apply with `role:"orchestrator"`; `command` is the ordinary configured decision
+object. Optimized context mode issues a dedicated full bootstrap receipt and requires its exact
+`context_ack` in the framed command; it never borrows another ordinary turn's acknowledgement.
+Current target/epoch/revisions and the original role validators still govern configured
+continuations, context acknowledgements, completion evidence and normal limits. Malformed/unframed
+commands refuse, rather than silently becoming prose. A valid nonterminal action closes the
+conversation once and follows the existing normal protocol; it is not a conversational loop.
+
+Status preserves active execution and reports the scheduling hold separately. An idle held run
+uses a real paused checkpoint and honest reason, without fabricated questions or attention IDs.
+Settled dismissal clears the hold without scheduling; ordinary recovery still checks independent
+blockers. Native ownership takeover invalidates in-flight commands without terminating their
+harnesses. Usage/output and accepted decisions remain evidence even when a command is refused.
+
+Canonical producer fixtures are isolated synthetic service results, with no real-provider,
+installed-runtime, consumer or release qualification implied. ST03-A adds no normalized steering
+event capability. Pin its complete producer manifest and immutable source before independently
+assigned byte-identical Swift fixture vendoring or Rust implementation. Worker tool policy,
+cancellation/replan and consumer UI/runtime selection remain separate assignments.
