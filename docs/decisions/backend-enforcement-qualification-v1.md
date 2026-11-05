@@ -114,9 +114,13 @@ argument into a different pinned launch path.
 The installed Claude check uses explicit isolated HOME/config/runtime paths,
 no inherited credentials/proxies/startup variables, disabled user/project settings,
 hooks/plugins/MCP and exact fake credentials/loopback provider. The local fixture listener owns an ephemeral 127.0.0.1 port exclusively and
-uses a one-use nonce-bound route. It accepts only the expected messages method/path,
-bounded bodies/request count, and fixed bounded SSE script; redirects, unexpected
-requests and alternate endpoint fallback fail. Measure exact destination admission
+uses one-use nonce-bound routes. Before the provider phase it permits exactly one
+`GET /<nonce>/preflight` positive-control exchange. The provider phase permits only
+the expected `POST /<nonce>/v1/messages`, bounded bodies/request count, and fixed
+bounded SSE script; redirects, unexpected requests and alternate endpoint fallback
+fail. Preflight must actually observe denied fork/posix_spawn and outside-read
+operations, an allowed inside-read control, and allowed-versus-denied listener
+destinations under the exact same profile before any vendor process starts. Measure exact destination admission
 against an independently owned denied loopback endpoint before vendor startup.
 Only the no-tools message/result protocol is in the initial vendor scope; actual
 native tool permission and full production backend features remain unqualified.
