@@ -449,6 +449,9 @@ def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
         if value["workflow_run_id"] != run_id:
             raise ValueError("Workflow run id does not match source id")
         _shape(value, {**CORE, **OPTIONAL}, "run")
+        if "steering" in value:
+            from .workflow_steering import validate_ledger
+            validate_ledger(value["steering"], value)
         from .workflow_interactions import validate_caller, validate_handover
         if "interaction_caller" in value:
             validate_caller(value["interaction_caller"])

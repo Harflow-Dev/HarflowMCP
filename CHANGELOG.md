@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add explicit bounded builder conversational steering through ctl and agent MCP, with original-caller process binding, native human ownership recovery, exact revision/witness checks, durable idempotency and queued active-turn handling. Prose waits for another caller request; framed proposals stay unsaved and preserve Apply/Save. Ordinary builder behavior remains unchanged. Worker/orchestrator steering, cancellation/replanning, consumer adoption and real-backend qualification remain separate work.
+
 ## 0.0.10
 
 - Pair task-list publication fences with exact epoch, process and operation tokens. Task reads and snapshot catalog projections no longer close another publication; failed invalidation, aborted writes and failed derivative projections close only their own token. Retention uses the same pairing.

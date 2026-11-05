@@ -1,0 +1,347 @@
+"""Process-bound, durable one-request/one-turn root-builder conversations.
+
+The ledger is authority; detached supervisors never retry an uncertain issuance.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import hashlib
+import json
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from .steering_output import classify_final, strict_loads
+from .workflows import WorkflowError
+
+ROOT_TURNS = 32
+EPISODE_TURNS = 8
+REQUESTS = 256
+EPISODES = 32
+TEXT_BYTES = 32 * 1024
+HISTORY_BYTES = 256 * 1024
+STATES = {"expired", "target_terminal", "classifying", "queued_boundary", "turn_reserved", "discussing", "delivery_unknown", "awaiting_caller", "command_refused", "committed", "dismissed", "stale", "dismiss_pending_settlement"}
+UNSETTLED = {"classifying", "queued_boundary", "turn_reserved", "discussing", "delivery_unknown", "dismiss_pending_settlement"}
+
+
+class SteeringError(WorkflowError):
+    def __init__(self, code, message, **data):
+        self.code = code
+        self.data = {"request_id": None, "episode_id": None, "current_revision": None,
+                     "current_interaction_epoch": None, "current_target_ref": None,
+                     "receipt_ref": None, "retryable": False, "next_action": "Refresh steering status", **data}
+        super().__init__(message)
+
+
+def _digest(value):
+    return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+def initialize(run):
+    """Only engine admission may install this qualified ledger."""
+    run["interaction_epoch"] = 0
+    run["steering"] = {"schema_version": 1, "control_revision": 0, "checkpoint_revision": 0,
+                       "sequence": 0, "episodes": [], "requests": {}, "turns": [], "commits": [],
+                       "history": [], "owner": run.get("interaction_owner", "caller")}
+
+
+from .steering_schema import validate_ledger
+
+
+def semantic(run):
+    result = {key: run.get(key) for key in ("builder_draft", "draft_revision", "source_revision", "source_saved_definition", "source_name", "definition_hash", "goal_revision", "interaction_owner", "interaction_handover", "input_question", "pending_inputs", "orchestrator_usage_recovery")}
+    result["ordinary_builder_identity"] = ordinary_builder_identity(run)
+    result["definition_digest"] = _digest(run.get("definition"))
+    return result
+
+
+def ordinary_builder_identity(run):
+    ordinary = [a for a in run.get("activations", []) if a.get("role") == "builder" and not a.get("steering_turn_id")]
+    latest = ordinary[-1] if ordinary else None
+    return {"activation_id": latest["id"] if latest else None, "task_id": latest["tasks"][-1]["task_id"] if latest and latest["tasks"] else None}
+
+
+def semantic_changed(before, run):
+    if "steering" in run and before != semantic(run):
+        run["steering"]["checkpoint_revision"] += 1
+        if before.get("interaction_owner") != run.get("interaction_owner") or before.get("interaction_handover") != run.get("interaction_handover"):
+            run["interaction_epoch"] += 1
+            run["steering"]["control_revision"] += 1
+            run["steering"]["owner"] = run.get("interaction_owner", "caller")
+
+
+def held(run):
+    return any(ep["hold"] for ep in run.get("steering", {}).get("episodes", []))
+
+
+def _transport(storage, monitor):
+    # Deny managed callers before looking up the requested root, including env-only evidence.
+    from . import lineage, takeover, workflow_interactions
+    refusal = takeover.env_agent_refusal(None)
+    if refusal:
+        raise SteeringError("managed_caller_forbidden", "Managed callers cannot steer workflows")
+    detection = lineage.detect_caller_detail(storage.root / "tasks")
+    if detection.caller is not None:
+        raise SteeringError("managed_caller_forbidden", "Managed callers cannot steer workflows")
+    if detection.undecidable is not None:
+        raise SteeringError("caller_undecidable", "Caller ancestry is unavailable")
+    if monitor:
+        refusal = takeover.caller_refusal(storage.root / "tasks")
+        if refusal:
+            raise SteeringError("caller_undecidable" if refusal[0] == "caller_undecidable" else "managed_caller_forbidden", refusal[1])
+        return None
+    current = workflow_interactions.capture_transport_parent()
+    if current["kind"] != "external_parent":
+        raise SteeringError("caller_undecidable", "External application parent cannot be qualified")
+    return current
+
+
+def _authorize(run, principal, monitor):
+    if run.get("parent_link") or run.get("kind") != "builder":
+        raise SteeringError("steering_role_unsupported", "Only root builders support steering")
+    if "steering" not in run:
+        raise SteeringError("steering_source_unavailable", "Historical run lacks qualified steering admission")
+    if monitor:
+        return
+    admitted = run.get("interaction_caller")
+    from . import identity
+    if run["steering"]["owner"] != "caller" or admitted != principal or not admitted or admitted.get("kind") != "external_parent":
+        raise SteeringError("steering_not_owner", "Caller does not match original process binding")
+    if identity.check_detail(admitted["identity"])[0] != "alive":
+        raise SteeringError("caller_undecidable", "Original caller generation is not positively alive")
+
+
+def _storage(root):
+    from .workflows import WorkflowStore
+    return WorkflowStore(root)
+
+
+def target(run):
+    s = run["steering"]
+    return {"root_workflow_run_id": run["workflow_run_id"], "workflow_run_id": run["workflow_run_id"],
+            "path": [run["workflow_run_id"]], "role": "builder", "node_id": "builder", "token_id": None,
+            **ordinary_builder_identity(run), "decision_id": None,
+            "checkpoint_revision": s["checkpoint_revision"], "goal_revision": run.get("goal_revision", 0),
+            "definition_digest": _digest(run["definition"]).removeprefix("sha256:"), "assignment_revision": None, "assignment_digest": None,
+            "draft_revision": run.get("draft_revision", 0), "source_revision": run.get("source_revision"),
+            "source_workflow_id": (run.get("source_saved_definition") or {}).get("workflow_id"), "source_definition_digest": _digest(run.get("source_saved_definition")),
+            "preview_hash": _digest(run.get("builder_draft", {})), "interaction_epoch": run["interaction_epoch"],
+            "control_revision": s["control_revision"]}
+
+
+def _history(run, kind, **fields):
+    s = run["steering"]
+    s["sequence"] += 1
+    s["history"].append({"sequence": s["sequence"], "kind": kind, "timestamp": time.time(), **fields})
+
+
+def _eligibility(run, monitor):
+    ledger = run["steering"]
+    actions, refusals = [], []
+    if monitor:
+        actions.append("take_owner")
+        from . import identity
+        admitted = run.get("interaction_caller") or {}
+        if admitted.get("kind") == "external_parent" and identity.check_detail(admitted["identity"])[0] == "alive":
+            actions.append("release_owner")
+    active = next((ep for ep in reversed(ledger["episodes"]) if ep["hold"]), None)
+    if active:
+        actions.append("dismiss")
+    if run["status"] in {"cancelled", "cancelling"}:
+        return actions, [{"code": "workflow_terminal", "message": "Cancelled builders cannot issue conversations"}]
+    if active and (active["state"] in UNSETTLED or any(t["state"] == "captured" for t in ledger["turns"])):
+        return actions, [{"code": "steering_busy", "message": "Observe the same issuance; no replacement is supported"}]
+    from .tasks import get_backend
+    candidate = run["definition"]["orchestrator"]
+    if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
+        return actions, [{"code": "steering_budget_unsupported", "message": "Selected adapter/settings cannot enforce the finite harness cap"}]
+    if run.get("input_question") or run.get("pending_inputs") or run.get("orchestrator_usage_recovery"):
+        return actions, [{"code": "steering_question_pending", "message": "Use the existing interaction endpoint first"}]
+    if len(ledger["turns"]) >= ROOT_TURNS or len(ledger["requests"]) >= REQUESTS or len(ledger["history"]) >= 500:
+        return actions, [{"code": "steering_budget_exhausted", "message": "Root conversation capacity reached"}]
+    if active:
+        if active["state"] in {"awaiting_caller", "command_refused"} and time.time() - active["created_at"] <= 1800 and sum(t["episode_id"] == active["episode_id"] for t in ledger["turns"]) < EPISODE_TURNS:
+            actions.append("reply")
+        if len(ledger["episodes"]) < EPISODES:
+            actions.append("retarget")
+    elif len(ledger["episodes"]) < EPISODES:
+        actions.append("open")
+    return actions, refusals
+
+
+def get_workflow_steering(workflow_run_id, *, root=None, monitor=False):
+    storage = _storage(root)
+    principal = _transport(storage, monitor)
+    run = storage.get_run(workflow_run_id, refresh_atomic=True)
+    _authorize(run, principal, monitor)
+    s = run["steering"]
+    actions, refusals = _eligibility(run, monitor)
+    return {"steering_version": 1, "root_workflow_run_id": workflow_run_id, "owner": s["owner"],
+            "interaction_epoch": run["interaction_epoch"], "control_revision": s["control_revision"],
+            "targets": [target(run)], "episodes": copy.deepcopy(s["episodes"]), "sequence": s["sequence"],
+            "pending_steering_count": sum(ep["hold"] for ep in s["episodes"]),
+            "budgets": {"root_issuances": len(s["turns"]), "root_limit": ROOT_TURNS, "episode_limit": EPISODE_TURNS,
+                        "provenance": "durable_nonrefundable_issuance", "harness_turn_cap_maximum": 8},
+            "eligible_actions": actions, "refusals": refusals,
+            "recovery": "Replay the exact request to observe the same issuance; uncertain delivery is never reissued"}
+
+
+def get_workflow_steering_history(workflow_run_id, cursor=None, limit=50, *, root=None, monitor=False):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise SteeringError("malformed_command", "History limit must be 1 through 100")
+    storage = _storage(root)
+    principal = _transport(storage, monitor)
+    run = storage.get_run(workflow_run_id, refresh_atomic=True)
+    _authorize(run, principal, monitor)
+    offset = 0
+    if cursor is not None:
+        try:
+            rid, raw = cursor.split(":")
+            if rid != workflow_run_id or not raw.isdecimal():
+                raise ValueError()
+            offset = int(raw)
+        except (ValueError, AttributeError):
+            raise SteeringError("malformed_command", "History cursor does not belong to this root") from None
+    items = []
+    size = 0
+    for item in run["steering"]["history"][offset:]:
+        encoded = len(json.dumps(item, ensure_ascii=False).encode())
+        if len(items) >= limit or size + encoded > HISTORY_BYTES:
+            break
+        items.append(copy.deepcopy(item)); size += encoded
+    end = offset + len(items)
+    more = end < len(run["steering"]["history"])
+    return {"root_workflow_run_id": workflow_run_id, "items": items, "has_more": more,
+            "next_cursor": f"{workflow_run_id}:{end}" if more else None, "history_incomplete": False, "gap": False}
+
+
+def _request(request):
+    if type(request) is not dict:
+        raise SteeringError("malformed_command", "Request must be a JSON object")
+    try:
+        encoded = json.dumps(request, ensure_ascii=True, allow_nan=False)
+        if len(encoded.encode()) > 128 * 1024:
+            raise ValueError("Request exceeds 128 KiB")
+        value = strict_loads(encoded)
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        raise SteeringError("malformed_command", "Request must be bounded finite UTF-8 JSON") from None
+    common = {"schema_version", "request_id", "action", "expected_interaction_epoch", "expected_control_revision"}
+    action = value.get("action")
+    owner = action in {"take_owner", "release_owner"}
+    required = common | ({"reason"} if owner else {"episode_id", "expected_steering_revision", "target"})
+    allowed = required | (set() if owner else {"text", "allow_fresh_context", "reason", "supersedes_episode_id"})
+    if not required <= set(value) or set(value) - allowed or value.get("schema_version") != 1 or type(value.get("schema_version")) is not int or action not in {"open", "reply", "retarget", "dismiss", "take_owner", "release_owner"}:
+        raise SteeringError("malformed_command", "Invalid steering request fields")
+    try:
+        if str(uuid.UUID(value["request_id"])) != value["request_id"]:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise SteeringError("malformed_command", "request_id must be a canonical UUID") from None
+    for key in ("expected_interaction_epoch", "expected_control_revision"):
+        if type(value[key]) is not int or value[key] < 0:
+            raise SteeringError("malformed_command", "Expected revisions must be nonnegative integers")
+    if owner:
+        if type(value["reason"]) is not str or not value["reason"].strip() or len(value["reason"].encode()) > TEXT_BYTES:
+            raise SteeringError("malformed_command", "Ownership changes require bounded reason")
+    else:
+        if action != "retarget" and "supersedes_episode_id" in value or action != "dismiss" and "reason" in value:
+            raise SteeringError("malformed_command", "Fields do not belong to this steering action")
+        if action == "open":
+            if value["episode_id"] is not None or value["expected_steering_revision"] is not None:
+                raise SteeringError("malformed_command", "Open requires null episode/revision")
+        elif type(value["episode_id"]) is not str or type(value["expected_steering_revision"]) is not int or value["expected_steering_revision"] < 1:
+            raise SteeringError("malformed_command", "Episode/revision required")
+        if action in {"open", "reply", "retarget"}:
+            if type(value.get("text")) is not str or not value["text"].strip() or len(value["text"].encode()) > TEXT_BYTES:
+                raise SteeringError("malformed_command", "Steering text must be nonblank and at most 32 KiB")
+        elif "text" in value:
+            raise SteeringError("malformed_command", "Dismiss does not accept text")
+        if type(value.get("allow_fresh_context", False)) is not bool:
+            raise SteeringError("malformed_command", "allow_fresh_context must be boolean")
+        if type(value["target"]) is not dict:
+            raise SteeringError("malformed_command", "A complete issued target is required")
+    if not owner:
+        value.setdefault("allow_fresh_context", False)
+    return value
+
+
+async def steer_workflow(workflow_run_id, request, *, root=None, monitor=False):
+    storage = _storage(root)
+    principal = await asyncio.to_thread(_transport, storage, monitor)
+    request = _request(request)
+    digest = _digest({k: v for k, v in request.items() if k != "request_id"})
+    scheduled = False
+    result = None
+    binding = _digest({"state_root": str(storage.root), "principal": "native_human" if monitor else principal, "epoch": request["expected_interaction_epoch"]})
+    def mutate(run):
+        nonlocal result, scheduled
+        from .steering_admission import admit
+        result, scheduled = admit(storage, run, principal, monitor, request, digest, binding)
+    storage.update_run(workflow_run_id, mutate, "steering_requested")
+    if scheduled:
+        from .workflows import _launch
+        _launch(storage, workflow_run_id)
+    return result
+
+
+def _episode(run, turn):
+    return next(ep for ep in run["steering"]["episodes"] if ep["episode_id"] == turn["episode_id"])
+
+
+def pending_turn(run):
+    return next((t for t in run.get("steering", {}).get("turns", []) if t["state"] in {"queued", "reserved", "spawn_intent", "running", "unknown"}), None)
+
+
+def preview_witness(run, task_id):
+    """Called after the exact own preview mutation and checkpoint increment, under root CAS."""
+    turn = next((t for t in run.get("steering", {}).get("turns", []) if t["task_id"] == task_id and t["state"] in {"spawn_intent", "running"}), None)
+    if turn is None:
+        return
+    # A preview cannot repair an already stale external draft or revoked epoch.
+    before = turn["commit_target"]
+    now = target(run)
+    if before["draft_revision"] != now["draft_revision"] - 1 or before["checkpoint_revision"] != now["checkpoint_revision"] - 1 or any(before[k] != now[k] for k in before if k not in {"draft_revision", "checkpoint_revision", "preview_hash"}):
+        turn["witness_stale"] = True
+        return
+    turn["preview_receipts"].append({"draft_revision": now["draft_revision"], "preview_hash": now["preview_hash"]})
+    turn["commit_target"] = now
+    turn["commit_target_ref"] = "commit-target:" + uuid.uuid4().hex
+
+
+def preview_response(run, task_id):
+    turn = next((t for t in run.get("steering", {}).get("turns", []) if t["task_id"] == task_id), None)
+    if not turn:
+        return {}
+    return {"commit_target_ref": turn["commit_target_ref"], "commit_target": copy.deepcopy(turn["commit_target"])}
+
+
+def _source_check(storage, run):
+    if run.get("source_name") and run.get("source_saved_definition") is not None:
+        try:
+            current = storage.get(run["source_name"])
+        except (OSError, ValueError, KeyError):
+            raise SteeringError("steering_source_unavailable", "Saved builder source cannot be verified", next_action="Start a new builder from the refreshed source") from None
+        if current != run["source_saved_definition"]:
+            raise SteeringError("steering_target_stale", "Saved builder source changed", next_action="Start a new builder from the refreshed source")
+
+
+async def run_builder_turn(supervisor, run_id):
+    from .steering_runner import run_builder_turn as execute
+    return await execute(supervisor, run_id)
+
+
+def summary(run):
+    """Small additive projection; never exposes private bindings or caller prose."""
+    ledger = run.get("steering")
+    if not ledger:
+        return {}
+    episodes = ledger["episodes"]
+    latest = episodes[-1] if episodes else None
+    return {"steering_summary": {"steering_version": 1, "owner": ledger["owner"],
+             "interaction_epoch": run["interaction_epoch"], "control_revision": ledger["control_revision"],
+             "sequence": ledger["sequence"], "episode_id": latest["episode_id"] if latest else None,
+             "state": latest["state"] if latest else "idle", "steering_revision": latest["steering_revision"] if latest else None,
+             "hold": held(run), "latest_reply_ref": latest["latest_reply_ref"] if latest else None},
+            "pending_steering_count": sum(ep["hold"] for ep in episodes)}

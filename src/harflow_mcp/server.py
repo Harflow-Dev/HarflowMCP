@@ -2987,6 +2987,55 @@ async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+async def _steering_call(action: str, workflow_run_id: str, **kwargs: Any) -> dict[str, Any]:
+    """One application/authority service for agent MCP and native ctl steering."""
+    from . import workflow_steering
+    try:
+        if action == "steer":
+            await _guard_mutation()
+            return await workflow_steering.steer_workflow(workflow_run_id, kwargs["request"], root=_reg().log_dir.parent)
+        function = workflow_steering.get_workflow_steering if action == "status" else workflow_steering.get_workflow_steering_history
+        return await asyncio.to_thread(function, workflow_run_id, root=_reg().log_dir.parent, **kwargs)
+    except workflow_steering.SteeringError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code, **exc.data}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def get_workflow_steering(workflow_run_id: str) -> dict[str, Any]:
+    """Read exact builder steering targets, revisions, holds and bounded conversation budgets.
+
+    Only the qualified original external caller or verified native human is eligible. A managed
+    worker, builder or orchestrator has no parent/sibling steering authority. Reading issues no turn.
+    """
+    return await _steering_call("status", workflow_run_id)
+
+
+@mcp.tool()
+@_task_document_errors
+async def get_workflow_steering_history(workflow_run_id: str, cursor: str | None = None, limit: StrictInt = 50) -> dict[str, Any]:
+    """Read a bounded ordered steering history page; cursors never authorize a mutation.
+
+    Reconnect by reading the original receipt rather than resending a conversation after response
+    loss. A new external process generation cannot claim an earlier application's ownership.
+    """
+    return await _steering_call("history", workflow_run_id, cursor=cursor, limit=limit)
+
+
+@mcp.tool()
+@_task_document_errors
+async def steer_workflow(workflow_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Explicitly request one bounded builder conversation turn using the current target and revisions.
+
+    Open/reply/retarget require exact engine-issued identity, a unique request_id and verbatim text.
+    Preserve all spaces, newlines and Unicode. Prose replies wait for another explicit caller
+    request; only a valid framed builder proposal commits an unsaved proposal. There is no automatic
+    back-and-forth loop or permission expansion. MCP cannot claim native take_owner/release_owner.
+    Orchestrator/worker steering and cancellation/reselection are unsupported in this capability.
+    """
+    return await _steering_call("steer", workflow_run_id, request=request)
+
+
 @mcp.tool()
 @_task_document_errors
 async def revise_workflow_goal(run_id: str, goal: str, expected_revision: StrictInt) -> dict[str, Any]:

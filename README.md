@@ -27,6 +27,12 @@ lost or uncertain owner/capture evidence remains visible. Full diagnostics retai
 dispatcher identity. See [supervision](docs/supervision.md#dispatch-origin-owner-and-responding-server).
 For stable read-only parent-process observation continuity, use `harflow-ctl status TASK_ID --observer-parent --json` (also supported by `status-batch`); see [public contracts](docs/contracts.md#ctl-parent-observation-continuity).
 
+Builders support explicitly requested conversational turns through ctl and agent MCP steering.
+A prose reply waits for another caller request; a valid framed proposal remains subject to draft
+revision checks and explicit Apply/Save. This requires the qualified original external caller or
+a verified native human and a supported finite harness cap. Ordinary builder messages keep their
+existing behavior. See [builder steering](docs/workflows.md#explicit-builder-conversation-steering).
+
 Workflow callers can see every pending child question in status and wait replies and answer them independently by decision ID through the root run. Questions and structured clarification items remain complete, and forwarded answers return a durable child acceptance receipt. Resolved attention reasons disappear when execution resumes; unreadable workflow approval metadata is reported separately from requests needing a decision. See [workflow input and recovery](docs/workflows.md).
 
 Permission features use cached, binary-bound qualification: measured versions seed the cache, and unseen versions run isolated no-paid behavior probes before use. `harflow-ctl qualify <backend>` explicitly reruns the probes; cached discovery reports per-feature results. Add `--qualification-only` to `permission-preview` or `workflow-preview NAME` to discover only the features requested by that launch without provider self-tests; `qualify --feature FEATURE` is repeatable. Ordinary permission previews may qualify requested features. Automatic probes currently require macOS isolation. See [qualification](docs/harness-permissions.md).

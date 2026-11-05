@@ -2031,3 +2031,41 @@ launch alongside the primary directory, and retains them on resume. This setting
 or publication authority and belongs to agent nodes, rather than orchestrators or builders.
 See [observed task outcomes](task-outcomes.md) for repository discovery, comparison provenance
 and observation limits.
+
+## Explicit builder conversation steering
+
+The additive builder steering API separates an intentional conversation from an unsaved proposal.
+It is explicitly requested: ordinary workflow messages and `workflow-builder-followup` retain
+context/legacy behavior. Read the current target and revisions first:
+
+```sh
+harflow-ctl workflow-steering-status RUN_ID --monitor --json
+harflow-ctl workflow-steer RUN_ID --monitor --request-file request.json --json
+harflow-ctl workflow-steering-history RUN_ID --monitor --limit 50 --json
+```
+
+Agent callers use `get_workflow_steering`, `get_workflow_steering_history` and `steer_workflow`
+through MCP. The same application service enforces both transports. An eligible external caller
+must match the original qualified parent process generation; an MCP connection label or supplied
+owner name is not authority. Managed nodes, builders and orchestrators cannot steer their parent
+or siblings. Native human ownership actions require positive caller verification. Same-process
+reconnect can observe durable receipts; a restarted external application cannot enroll itself as
+the prior owner. Native recovery remains explicit.
+
+One accepted open/reply request authorizes one bounded provider issuance. Ordinary final prose is
+retained verbatim and waits for another explicit request; it does not finalize a proposal, save a
+definition or automatically prompt again. A framed builder command must match the current turn,
+commit witness and draft/source revisions before producing an unsaved proposal. Preview updates
+retain the existing active-builder/draft CAS. Editor Apply and Save remain explicit. Initial
+ordinary builder creation keeps its existing save behavior.
+
+A conversation retains the builder's configured read-only tool authority; that harness mode is
+not a new OS confinement guarantee. Supported finite harness caps are required before launch;
+unsupported adapters refuse rather than silently dropping a cap. Issuance and observed provider
+usage are accounted separately from execution attempts. Unknown launch/delivery/capture outcomes
+are retained for observation and never automatically replayed.
+
+Only the builder/read subset is delivered here. Orchestrator/worker steering and scoped
+cancellation/replanning remain unavailable. See [steering contracts](contracts.md#builder-conversation-steering)
+and the accepted [ST01 specification](decisions/ST01-steering.md) for framing, authority and
+state-model rationale.

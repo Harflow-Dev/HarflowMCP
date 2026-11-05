@@ -1084,6 +1084,8 @@ class WorkflowStore:
                 header = self._catalog_run_header(run)
                 header['_source_identity'] = captured_source
                 catalog.record(header, float(run['created_at']), run.get('status') not in TERMINAL, run_id)
+        from .workflow_steering import summary as steering_summary
+        run.update(steering_summary(run))
         return run
 
     @layout_operation
@@ -1329,6 +1331,9 @@ class WorkflowStore:
             if current_root != root_id:
                 raise WorkflowRunDocumentError(run_id, "Run root changed before mutation locks", code="workflow_run_unavailable")
             if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "invocation_reserved", "child_decision_reopened"}:
+                from .workflow_steering import held
+                if held(run):
+                    raise DispatchNotStarted("Conversation hold prevents another ordinary dispatch")
                 root = run if root_id == run_id else self.get_run(root_id)
                 runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
                 if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
@@ -1343,7 +1348,16 @@ class WorkflowStore:
             suspension_fields = ("attention_reason", "attention_source", "input_question", "input_question_items", "input_decision_id", "input_source", "optional_review_skip_available")
             suspension_before = {key: copy.deepcopy(run[key]) for key in suspension_fields if key in run}
             accepted_before = set(run.get("accepted_inputs") or {})
+            from .workflow_steering import semantic as steering_semantic, semantic_changed, preview_witness
+            steering_before = copy.deepcopy(steering_semantic(run))
+            if event in {"control:resume", "control:recover", "scheduler_recovery_requested"}:
+                from .workflow_steering import held, SteeringError
+                if held(run):
+                    raise SteeringError("steering_active", "Conversation hold blocks ordinary recovery")
             mutator(run)
+            semantic_changed(steering_before, run)
+            if event == "builder_draft_applied" and isinstance(detail, dict):
+                preview_witness(run, detail["task_id"])
             from .workflow_messages import reconcile as reconcile_messages
             reconcile_messages(run)
             if attention_before[0] in {"needs_input", "needs_attention", "paused", "failed"} and run.get("status") in {"running", "building", "starting", "pending"}:
@@ -1437,6 +1451,8 @@ class WorkflowStore:
                     failure.receipt_diagnostic = exc.as_dict()
                 raise failure from exc
             run["settling"] = _run_settling(run)
+            from .workflow_steering import summary as steering_summary
+            run.update(steering_summary(run))
             return run
 
     @layout_operation
@@ -1466,6 +1482,8 @@ class WorkflowStore:
         run["interaction_caller"] = admission(caller)
         if interaction_owner is not None:
             run["interaction_owner"] = interaction_owner
+        from .workflow_steering import initialize as initialize_steering
+        initialize_steering(run)
         run["permission_policy"] = permission_policy
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         from .workflow_native import scheduling_policy
@@ -1519,6 +1537,9 @@ class WorkflowStore:
             if size > ANSWER_BYTES:
                 raise WorkflowError("Workflow answer exceeds 64 KiB UTF-8")
         observed = self.get_run(run_id, refresh_atomic=True)
+        from .workflow_steering import held, SteeringError
+        if action in {"resume", "recover"} and held(observed):
+            raise SteeringError("steering_active", "Dismiss or complete the held conversation before ordinary recovery")
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         guarded = attention_checkpoint_id is not None
         if _message_resume and (action != "resume" or instructions is not None or additional_attempts or decision_id or _internal):
@@ -2628,7 +2649,8 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
         r.update(builder_draft=draft, draft_revision=expected_draft_revision + 1)
         current["draft_applied"] = True
     run = storage.update_run(run_id, apply, "builder_draft_applied", {"task_id": caller.record.task_id, "expected_draft_revision": expected_draft_revision, "definition": draft})
-    return {"workflow_run_id": run_id, "draft_revision": run["draft_revision"], "builder_draft": run["builder_draft"]}
+    from .workflow_steering import preview_response
+    return {"workflow_run_id": run_id, "draft_revision": run["draft_revision"], "builder_draft": run["builder_draft"], **preview_response(run, caller.record.task_id)}
 
 
 @root_operation
@@ -2642,6 +2664,9 @@ async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | No
     launch = False
     def queue(r: dict[str, Any]) -> None:
         nonlocal launch
+        from .workflow_steering import held, SteeringError
+        if held(r):
+            raise SteeringError("steering_active", "Use explicit steering requests while conversation is held")
         from .workflow_messages import _authorize
         _authorize(storage, r, interaction_owner, "message")
         if _require_idle:
@@ -3706,9 +3731,12 @@ class WorkflowSupervisor:
                     return None
                 timed_out = True
                 break
-            if role == "builder" and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run(refresh_atomic=True).get("builder_messages", [])):
+            from .workflow_steering import held as steering_held
+            if role == "builder" and not steering_held(self.run(refresh_atomic=True)) and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run(refresh_atomic=True).get("builder_messages", [])):
                 messages: list[dict[str, Any]] = []
                 def claim_live(r: dict[str, Any]) -> None:
+                    if steering_held(r):
+                        return
                     for m in r.get("builder_messages", []):
                         if m["status"] == "pending":
                             m["status"] = "forwarding"
@@ -4322,6 +4350,12 @@ class WorkflowSupervisor:
         if recovered_forwarding:
             return
         while True:
+            from .workflow_steering import held, pending_turn, run_builder_turn
+            current = self.run(refresh_atomic=True)
+            if held(current):
+                if pending_turn(current):
+                    await run_builder_turn(self, run_id)
+                return
             feedback: list[dict[str, Any]] = []
             def claim(r: dict[str, Any]) -> None:
                 feedback.extend(m for m in r.get("builder_messages", []) if m["status"] in {"pending", "deferred"})
@@ -4333,7 +4367,17 @@ class WorkflowSupervisor:
                         r.update(editing_definition=copy.deepcopy(r.get("builder_draft", baseline)), editing_source={"name": r["name"], "revision": baseline.get("revision", 0), "saved_definition": baseline}, source_name=r["name"], source_revision=baseline.get("revision", 0), source_saved_definition=baseline)
                     r.update(builder_followup=True, builder_turn_prompt="\n".join(m["prompt"] for m in feedback), builder_turn_feedback_ids=[m["id"] for m in feedback])
             self.update(claim, "builder_feedback_claimed")
+            current = self.run(refresh_atomic=True)
+            if held(current):
+                if pending_turn(current):
+                    await run_builder_turn(self, run_id)
+                return
             await self._build_turn(run_id)
+            current = self.run(refresh_atomic=True)
+            if held(current):
+                if pending_turn(current):
+                    await run_builder_turn(self, run_id)
+                return
             continue_turn = False
             def settle(r: dict[str, Any]) -> None:
                 nonlocal continue_turn
@@ -4366,35 +4410,9 @@ class WorkflowSupervisor:
         if self.run().get("builder_has_repo_context") is False:
             prompt += "\nNo user repository was supplied. Your working directory is an isolated HarflowMCP builder workspace; do not infer a project or search elsewhere for repository context. Refine the supplied canvas and request without repository-specific skills or files."
         result = await self._dispatch({"id": "builder", "title": "Workflow builder"}, prompt, "builder", a)
-        if result and self.run()["status"] == "running":
-            try:
-                current = self.run()
-                applied = next(x for x in current["activations"] if x["id"] == a["id"]).get("draft_applied", False)
-                proposal = copy.deepcopy(current["builder_draft"] if applied else parse_json(result.get("summary") or ""))
-                baseline = current.get("editing_definition", current.get("generated_definition", {}))
-                previous_nodes = {n["id"]: n for n in baseline.get("nodes", [])}
-                for proposed_node in proposal.get("nodes", []):
-                    if proposed_node.get("type") == "agent" and "execution_mode" not in proposed_node:
-                        proposed_node["execution_mode"] = previous_nodes.get(proposed_node["id"], {}).get("execution_mode", "headless") if proposed_node["id"] in previous_nodes else "prefer_subagent"
-                d = validate_definition({**proposal, "name": current["name"], "routing_mode": "explicit"})
-                d["draft"] = True
-                if "editing_definition" in self.run() or self.run().get("builder_followup"):
-                    metadata = self.run().get("editing_source", {"name": self.run()["name"], "revision": self.run().get("generated_definition", {}).get("revision", 0)})
-                    d["revision"] = metadata["revision"] if metadata["name"] == d["name"] else 0
-                    d.pop("updated_at", None)
-                    self.update(lambda r: (r.update(status="completed", generated_definition=d, builder_draft=d, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_edit_proposed")
-                else:
-                    if current.get("caller_record"):
-                        from types import SimpleNamespace
-                        from .workflow_inspection import guard_saved_workflow_authority
-                        record = task_store.TaskRecord(**current["caller_record"])
-                        # The guard sees the resolved dependency tree before any write.
-                        saved = self.store.save(d["name"], d, authority_guard=lambda tree: guard_saved_workflow_authority(SimpleNamespace(record=record), tree))
-                    else:
-                        saved = self.store.save(d["name"], d)
-                    self.update(lambda r: (r.update(status="completed", generated_definition=saved, builder_draft=saved, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_saved")
-            except (ValueError, FileExistsError) as exc:
-                self.attention(f"Workflow proposal was invalid: {exc}" if "editing_definition" in self.run() else f"Generated workflow was not saved: {exc}")
+        if result:
+            from .workflow_builder_finalization import finish_ordinary_builder
+            finish_ordinary_builder(self, a, result)
         def stop(r: dict[str, Any]) -> None:
             next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed" if r["status"] == "completed" else "failed")
             if r["status"] == "cancelling":
@@ -4444,18 +4462,24 @@ async def _main(args: Any) -> None:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        run = storage.get_run(args.run_id)
-        if run["kind"] == "builder" and run["status"] in TERMINAL and not any(m["status"] in {"pending", "deferred"} for m in run.get("builder_messages", [])):
-            return
-        from . import lineage
-        from .task_documents import qualify_payload
-        caller = lineage.Caller(qualify_payload(run["caller_record"], run["caller_record"]["task_id"], task_store.TaskRecord), run.get("caller_method", "ancestry")) if run.get("caller_record") else None
-        supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller, execution_mode="supervised"), storage)
         receipt_refused = False
+        observed_steering_turns = set()
         try:
+            run = storage.get_run(args.run_id)
+            observed_steering_turns = {t["turn_id"] for t in run.get("steering", {}).get("turns", [])}
+            if run["kind"] == "builder" and run["status"] in TERMINAL and not any(m["status"] in {"pending", "deferred"} for m in run.get("builder_messages", [])):
+                return
+            from . import lineage
+            from .task_documents import qualify_payload
+            caller = lineage.Caller(qualify_payload(run["caller_record"], run["caller_record"]["task_id"], task_store.TaskRecord), run.get("caller_method", "ancestry")) if run.get("caller_record") else None
+            supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller, execution_mode="supervised"), storage)
             try:
                 if run["kind"] == "builder" and run["status"] != "cancelling":
-                    await supervisor.build(args.run_id)
+                    from .workflow_steering import pending_turn, held, run_builder_turn
+                    if pending_turn(run) or any(t["state"] == "captured" for t in run.get("steering", {}).get("turns", [])):
+                        await run_builder_turn(supervisor, args.run_id)
+                    elif not held(run):
+                        await supervisor.build(args.run_id)
                 else:
                     await supervisor.execute(args.run_id)
             except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
@@ -4485,7 +4509,8 @@ async def _main(args: Any) -> None:
             lock.close(unlock=True)
             if not receipt_refused:
                 final = storage.get_run(args.run_id)
-                if (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
+                from .workflow_builder_finalization import pending_steering_handoff
+                if pending_steering_handoff(final, observed_steering_turns) or (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
                     _launch(storage, args.run_id)
 
 

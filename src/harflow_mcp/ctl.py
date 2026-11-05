@@ -517,7 +517,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     workflow_parsers = []
     from .workflow_reads import RUN_SCOPES, RUN_STATUSES
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message", "limit-hits"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message", "limit-hits", "steer", "steering-status", "steering-history"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action == "recover":
             wp.description = "Explicitly recover a failed settled run or an interrupted root with a confirmed-dead scheduler. Supply a reason; uncertain task ownership blocks recovery. Interrupted recovery preserves existing attempts and decision budgets."
@@ -533,6 +533,15 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("name")
         if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "artifacts", "recover", "abandon-dispatch", "send", "cancel-message"}:
             wp.add_argument("workflow_run_id")
+        if action in {"steer", "steering-status", "steering-history"}:
+            wp.add_argument("workflow_run_id")
+            wp.add_argument("--monitor", action="store_true", help="Verified human interaction channel; the flag alone grants no authority")
+            if action == "steer":
+                wp.add_argument("--request-file", required=True, help="Bounded UTF-8 steering request JSON, or - for stdin")
+            elif action == "steering-history":
+                wp.add_argument("--cursor")
+                wp.add_argument("--limit", type=int, default=50)
+            wp.description = "Explicit bounded builder steering. Original qualified external caller or verified human only; no automatic conversational loop, worker/orchestrator control or cancellation."
         if action in {"send", "cancel-message"}:
             wp.add_argument("--monitor", action="store_true")
             if action == "send":
@@ -1623,6 +1632,16 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         from .workflow_interactions import capture_transport_parent
         capture_transport_parent()
     async def invoke() -> Any:
+        if action in {"steer", "steering-status", "steering-history"}:
+            from . import workflow_steering
+            options = {"root": default_log_dir().parent, "monitor": args.monitor}
+            if action == "steer":
+                from .workflow_steering_transport import load_request
+                request = load_request(args.request_file)
+                return await workflow_steering.steer_workflow(args.workflow_run_id, request, **options)
+            if action == "steering-history":
+                return await asyncio.to_thread(workflow_steering.get_workflow_steering_history, args.workflow_run_id, cursor=args.cursor, limit=args.limit, **options)
+            return await asyncio.to_thread(workflow_steering.get_workflow_steering, args.workflow_run_id, **options)
         if getattr(args, 'monitor_view', False) and action in {'list', 'status', 'detail'}:
             from .catalog import Catalog
             from .workflow_inspection import page_indexing_response
@@ -1785,6 +1804,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
     except id_resolution.IdResolutionError as exc:
         return _fail(args, exc.code, str(exc), exc.data)
     except Exception as exc:
+        if action in {"steer", "steering-status", "steering-history"}:
+            from .workflow_steering import SteeringError
+            if isinstance(exc, SteeringError):
+                return _fail(args, exc.code, str(exc), exc.data)
         data = getattr(getattr(exc, "error", None), "data", None)
         code = data.get("code") if isinstance(data, dict) else None
         if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable", "attention_checkpoint_required", "attention_checkpoint_unavailable", "attention_checkpoint_stale", *id_resolution.CODES}:

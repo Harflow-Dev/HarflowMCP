@@ -2038,3 +2038,102 @@ overrides and do not register, authenticate or enable network access. Caller
 approval responses still authorize an exact action, not future-session policy.
 See [harness permissions](harness-permissions.md#mcp-approvals-are-separate-from-command-permissions).
 The builder shortcut's Proposed removal is not accepted by this specification.
+
+## Builder conversation steering
+
+ST02 adds `workflow-steering-read.v1` and `workflow-steering-builder.v1` to the ordinary fresh
+version-info capability gate. The addition retains ctl/event wire v1 and the existing product
+line; it does not qualify a new release or any Mac/Rust consumer. Only root builder runs with
+qualified steering admission support the operation. Historical runs without that ledger refuse;
+unknown identity does not become an external owner. Orchestrator/worker steering and scoped
+cancellation/replanning are separate unavailable capabilities.
+
+Public operations are `workflow-steering-status ROOT`, `workflow-steering-history ROOT
+[--cursor CURSOR] [--limit 50]`, and `workflow-steer ROOT --request-file FILE` (all with `--json`).
+The request file is at most 128 KiB UTF-8, must be a single strict JSON object, and rejects duplicate
+keys and nonfinite numbers; `-` reads stdin. JSON parsing preserves caller text. `--monitor`
+selects the native human channel but still requires positive human verification. MCP tools
+`get_workflow_steering`, `get_workflow_steering_history`, and `steer_workflow` call the same service;
+MCP has no monitor authority override. Errors retain the service's code and structured data in
+the ctl envelope or MCP error data. IDs are exact for this initial operation, not prefix searches.
+
+A normal request is a closed object containing `schema_version:1`, canonical UUID `request_id`,
+`action` (`open`, `reply`, `retarget`, `dismiss`), `expected_interaction_epoch`,
+`expected_control_revision`, `episode_id`, `expected_steering_revision`, and complete `target`.
+Open supplies null episode/revision. Open/reply/retarget supply nonblank verbatim `text` (32 KiB
+UTF-8 maximum); `allow_fresh_context` is false by default. Retarget explicitly includes
+`supersedes_episode_id` and fresh text. Dismiss cannot carry answer text. Native `take_owner` and
+`release_owner` use a separate root object with schema/request/action/expected epoch/control
+revision and a nonempty `reason`, without a fabricated episode or target.
+
+Read the full target from status and echo it exactly: root/source/path/role, node/token/activation/
+task/decision identities, checkpoint/goal/definition digest, assignment revision/digest,
+draft/source revision and source workflow/digest, preview hash, interaction epoch and control
+revision. Inapplicable fields are null. These references are not bearer authority. Admission and
+final proposal acceptance serialize under the root mutation lock; stale targets refuse without
+retargeting text. An external MCP caller must match the original positively qualified process
+identity/generation. Native humans share eligibility; the first valid revision CAS wins. Native
+ownership takeover revokes external steering, without killing a task, granting permissions or
+answering an approval. Release requires the original external process still to be qualified.
+External application restart enrollment remains unsupported; the same qualified process may
+reconnect and observe durable receipts.
+
+An accepted open/reply request reserves one nonrefundable conversational issuance before launch.
+It may queue at an active builder boundary; existing tools/effects remain real. If admission wins
+before ordinary final acceptance, that old final is preserved as superseded and cannot publish a
+proposal or use the initial autosave path. If ordinary final acceptance wins first, its saved
+result is real and the old steering snapshot refuses. Old active preview writes are preserved;
+their changed draft makes a queued steering witness stale. No mid-turn interruption or rollback
+is implied. Unknown claims/spawn/capture/drain remain held and do not authorize replacement.
+
+The provider receives the exact issued steering/turn/commit witness. A successful complete final
+containing ordinary prose is persisted, exposes awaiting-caller status, and schedules nothing
+else. Only a whole-final `HARFLOW_COMMIT_V1` / strict JSON object / `END_HARFLOW_COMMIT_V1` frame
+attempts a proposal. The closed wrapper contains `episode_id`, `turn_id`, `commit_target_ref`,
+`steering_revision`, `interaction_epoch`, `checkpoint_revision`, `goal_revision`, `role:"builder"`,
+and `command:{definition,expected_draft_revision}`. Role validators and source/draft CAS still
+apply. A current frame creates an unsaved proposal; it does not Apply/Save the editor. Own accepted
+preview writes advance that turn's commit witness, returned by the preview tool. Older witnesses
+and external draft edits refuse. Prose after preview publication does not finalize the preview.
+
+Quoted JSON/decision IDs in discussion cannot commit. Whole-document unframed role JSON, malformed
+frames, duplicate keys, conflicting commands, stale identities and wrong-role payloads are refused
+and cannot silently become conversation. See the exact lexical grammar and adversarial examples
+in [ST01](decisions/ST01-steering.md#5-exact-final-output-grammar). Ordinary non-steering behavior,
+including initial builder autosave and preview-summary completion, remains unchanged.
+
+Status/history and optional run `steering_summary` expose revision, hold, state, latest reply
+reference and budgets separately from actual question/attention IDs. They never fabricate question
+text or add steering to `pending_inputs`. A hold blocks ordinary resume/follow-up from bypassing
+steering. Settled explicit dismissal clears its hold without scheduling; normal continuation still
+uses its real checkpoint and independent authority. History is ordered, bounded and paged with
+root-bound cursors. A duplicate request with identical canonical payload returns its durable
+receipt; changed payload conflicts. Unknown issuance is observed under its existing identity,
+never resent. Provider/harness usage retains observed/unavailable provenance independently of
+execution-attempt counters. Finite supported harness caps are required; no dollar cap or individual
+tool-effect count is claimed. Read-only builder configuration is retained without claiming new OS
+confinement.
+
+Canonical `ctl-steering-*` fixtures are synthetic isolated-service specimens, not real-provider or
+native consumer qualification. Producer manifest/source identity must be pinned before subsequent
+byte-identical Swift vendoring and independent Rust adoption. No sibling build dependency or
+client runtime selection is introduced.
+
+Implementation bounds are 8 issuances/episode, 32 issuances and 32 episodes/root, and 256 retained
+request identities/root. A turn receives at most 8 harness turns (a smaller configured positive
+cap remains smaller); issuance accounting is separate from those harness turns. Episodes accept
+replies for 30 minutes. Caller text is at most 32 KiB and final text at most 64 KiB; admission
+reserves retained-text capacity before dispatch. Pending/unknown identities are never evicted to
+make room; capacity refuses rather than reopening old request IDs. History pages accept limits
+1–100 with a 256 KiB page budget. These are bounded service defaults, not measured provider-cost
+limits or real-backend qualification.
+
+The original saved definition remains the editor's Save baseline. If another editor changes or
+deletes that saved source, continuation/proposal is refused and requires a new builder from the
+refreshed source. Retargeting an episode does not silently rebase Save authority. Explicit dismiss
+and native ownership recovery remain available even when that source is unavailable. Same-run
+draft/preview changes can be explicitly retargeted with a fresh target observation.
+
+ST02 exposes steering through its durable ordered history and optional run summary/digests. It
+does not add the full candidate normalized task-event vocabulary proposed in ST01, nor advertise
+an event capability for that vocabulary. Existing unknown-kind behavior is unchanged.

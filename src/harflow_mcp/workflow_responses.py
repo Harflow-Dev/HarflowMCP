@@ -21,7 +21,7 @@ PUBLIC_VIEWS = frozenset(VIEWS) | {"goal", "goal_history", "goal_assessment"}
 # These lossless views are fetched only when their digest changes. Executions have
 # individual identities so a new checkpoint does not resend old worker results.
 MONITOR_FIELDS = ("on_demand_nodes", "on_demand_calls", "on_demand_state", "goal", "goal_history", "goal_assessment", "definition", "owner_contracts", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "orchestrator_usage_recovery", "worker_usage_recovery", "usage_recovery_history", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
-MONITOR_FIELDS += ("messages", "resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
+MONITOR_FIELDS += ("steering_summary", "pending_steering_count", "messages", "resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
 VIEWS.update({field: field for field in MONITOR_FIELDS})
 VIEWS["execution_index"] = "execution_index"
 
@@ -67,6 +67,9 @@ def _digest(value: Any) -> str:
 
 
 def _view_value(run: dict[str, Any], view: str) -> Any:
+    if view in {"steering_summary", "pending_steering_count"}:
+        from .workflow_steering import summary as steering_summary
+        return steering_summary(run).get(view)
     if view == "resource_waits":
         return _activation_resource_waits(run)
     if view == "execution_index":
@@ -167,7 +170,7 @@ COMPACT_FIELDS = frozenset({
     "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling",
     "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract",
     "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count", "attention_checkpoint_id", "monitor_controls",
-    "resolved_from", "messages", "messages_truncated", "interaction_state", "interaction_history", "interaction_history_truncated", "workflow_id", "approval_summary",
+    "resolved_from", "messages", "messages_truncated", "steering_summary", "pending_steering_count", "interaction_state", "interaction_history", "interaction_history_truncated", "workflow_id", "approval_summary",
     "parent_workflow_run_id", "root_workflow_run_id", "parent_execution_id", "orchestrator_mode", "orchestrator_session_owner_run_id",
     "pending_inputs", "pending_attention", "input_delivery_receipt", "input_source", "tree_settling", "suspended_via_root",
     "checklist_disposition", "usage_limit_recovery", "on_demand_calls_count", "on_demand_state", "response_version", "details",
@@ -223,6 +226,8 @@ def project_run(item: dict[str, Any], selected: frozenset[str]) -> dict[str, Any
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "resumed_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count", "attention_checkpoint_id")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    from .workflow_steering import summary as steering_summary
+    result.update(steering_summary(run))
     if "monitor_controls" in run:
         result["monitor_controls"] = copy.deepcopy(run["monitor_controls"])
     if isinstance(run.get("resolved_from"), dict):
