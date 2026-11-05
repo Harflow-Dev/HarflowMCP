@@ -1,0 +1,105 @@
+{
+  "events": [
+    {
+      "authority": true,
+      "capacity": true,
+      "enrolled": true,
+      "epoch": "epoch-1",
+      "identity": "immutable-1",
+      "kind": "admit",
+      "payload": "payload-1",
+      "qualified_budgets": true,
+      "qualified_profile": true,
+      "request_id": "contain-1",
+      "result_accepted": false,
+      "scope_exact": true,
+      "single_provider": true
+    },
+    {
+      "kind": "prepare_stop"
+    },
+    {
+      "kind": "deliver_stop"
+    },
+    {
+      "kind": "stop_ack"
+    },
+    {
+      "inventory_complete": true,
+      "kind": "observe",
+      "obligations_settled": true,
+      "proofs": {
+        "all_obligations_settled": true,
+        "claims_settled": true,
+        "complete_closure": true,
+        "exit_reaped": true,
+        "extents_reconciled": true,
+        "final_watermark": true,
+        "future_issuance_fence": true,
+        "handles_settled": true,
+        "input_reconciled": true,
+        "job_quiescent": true,
+        "lossless_capture": true,
+        "messages_reconciled": true,
+        "no_pending_mutation": true,
+        "original_enrollment": true,
+        "qualified_profile": true,
+        "release_journal_complete": true,
+        "resources_reconciled": true,
+        "sessions_reconciled": true,
+        "stale_callback_fence": true,
+        "stderr_eof": true,
+        "stdout_eof": true,
+        "writers_quiescent": true
+      }
+    },
+    {
+      "kind": "certify"
+    },
+    {
+      "kind": "release"
+    },
+    {
+      "authority": true,
+      "effect_safe": true,
+      "epoch": "epoch-1",
+      "identity": "immutable-1",
+      "kind": "replace",
+      "payload": "payload-2",
+      "remaining_attempts": 1,
+      "request_id": "replace-1"
+    },
+    {
+      "authority": true,
+      "budget": true,
+      "claims": true,
+      "configuration": true,
+      "effect_safe": true,
+      "kind": "prepare_dispatch"
+    },
+    {
+      "kind": "deliver_dispatch"
+    },
+    {
+      "kind": "dispatch_ack"
+    },
+    {
+      "kind": "old_callback"
+    },
+    {
+      "kind": "crash"
+    },
+    {
+      "kind": "recover"
+    }
+  ],
+  "format": "harflow.steering.poststart.candidate",
+  "hypothetical": true,
+  "kind": "scenario",
+  "provenance": "synthetic_specification",
+  "python_runtime_support": false,
+  "runtime_qualified": false,
+  "rust_adoption": false,
+  "status": "specified_unimplemented",
+  "v": 1
+}

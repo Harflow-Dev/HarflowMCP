@@ -1,0 +1,399 @@
+{
+  "$id": "urn:harflow:st04-poststart-v1:certificate.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "maxProperties": 100,
+  "properties": {
+    "contain_request_id": {
+      "maxLength": 36,
+      "minLength": 1,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "effect_verifier": {
+      "additionalProperties": false,
+      "maxProperties": 100,
+      "properties": {
+        "digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "harflow.steering.poststart.candidate",
+      "type": "string"
+    },
+    "hypothetical": {
+      "const": true,
+      "type": "boolean"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "maxProperties": 100,
+      "properties": {
+        "activation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "assignment_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "attempt": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "candidate": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "closure_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "configuration_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "containment_generation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "control_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "definition_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "goal_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "goal_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grant_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "interaction_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "launch_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "node": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "owner_generation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "process_generation": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "root": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "target_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "verifier_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "visit": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "activation",
+        "task",
+        "attempt",
+        "visit",
+        "definition_digest",
+        "goal_digest",
+        "goal_revision",
+        "interaction_revision",
+        "control_revision",
+        "target_revision",
+        "assignment_digest",
+        "configuration_digest",
+        "grant_digest",
+        "owner_generation",
+        "containment_generation",
+        "process_generation",
+        "launch_id",
+        "profile_digest",
+        "verifier_digest",
+        "closure_digest",
+        "node",
+        "candidate"
+      ],
+      "type": "object"
+    },
+    "inventory": {
+      "items": {
+        "additionalProperties": false,
+        "maxProperties": 100,
+        "properties": {
+          "actor": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "generation": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "obligation": {
+            "enum": [
+              "required",
+              "incidental",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "settlement": {
+            "enum": [
+              "satisfied",
+              "failed",
+              "pending",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "generation",
+          "obligation",
+          "settlement"
+        ],
+        "type": "object"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "type": "array"
+    },
+    "kind": {
+      "const": "certificate",
+      "type": "string"
+    },
+    "ledger_epoch": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "proofs": {
+      "additionalProperties": false,
+      "maxProperties": 100,
+      "properties": {
+        "all_obligations_settled": {
+          "type": "boolean"
+        },
+        "claims_settled": {
+          "type": "boolean"
+        },
+        "complete_closure": {
+          "type": "boolean"
+        },
+        "exit_reaped": {
+          "type": "boolean"
+        },
+        "extents_reconciled": {
+          "type": "boolean"
+        },
+        "final_watermark": {
+          "type": "boolean"
+        },
+        "future_issuance_fence": {
+          "type": "boolean"
+        },
+        "handles_settled": {
+          "type": "boolean"
+        },
+        "input_reconciled": {
+          "type": "boolean"
+        },
+        "job_quiescent": {
+          "type": "boolean"
+        },
+        "lossless_capture": {
+          "type": "boolean"
+        },
+        "messages_reconciled": {
+          "type": "boolean"
+        },
+        "no_pending_mutation": {
+          "type": "boolean"
+        },
+        "original_enrollment": {
+          "type": "boolean"
+        },
+        "qualified_profile": {
+          "type": "boolean"
+        },
+        "release_journal_complete": {
+          "type": "boolean"
+        },
+        "resources_reconciled": {
+          "type": "boolean"
+        },
+        "sessions_reconciled": {
+          "type": "boolean"
+        },
+        "stale_callback_fence": {
+          "type": "boolean"
+        },
+        "stderr_eof": {
+          "type": "boolean"
+        },
+        "stdout_eof": {
+          "type": "boolean"
+        },
+        "writers_quiescent": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "qualified_profile",
+        "no_pending_mutation",
+        "sessions_reconciled",
+        "resources_reconciled",
+        "messages_reconciled",
+        "original_enrollment",
+        "complete_closure",
+        "future_issuance_fence",
+        "exit_reaped",
+        "stdout_eof",
+        "stderr_eof",
+        "input_reconciled",
+        "lossless_capture",
+        "final_watermark",
+        "writers_quiescent",
+        "extents_reconciled",
+        "handles_settled",
+        "claims_settled",
+        "release_journal_complete",
+        "job_quiescent",
+        "stale_callback_fence",
+        "all_obligations_settled"
+      ],
+      "type": "object"
+    },
+    "provenance": {
+      "const": "synthetic_specification",
+      "type": "string"
+    },
+    "python_runtime_support": {
+      "const": false,
+      "type": "boolean"
+    },
+    "runtime_qualified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "rust_adoption": {
+      "const": false,
+      "type": "boolean"
+    },
+    "status": {
+      "const": "specified_unimplemented",
+      "type": "string"
+    },
+    "v": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "format",
+    "v",
+    "status",
+    "provenance",
+    "python_runtime_support",
+    "rust_adoption",
+    "runtime_qualified",
+    "hypothetical",
+    "kind",
+    "contain_request_id",
+    "ledger_epoch",
+    "identity",
+    "proofs",
+    "effect_verifier",
+    "inventory"
+  ],
+  "type": "object"
+}

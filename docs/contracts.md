@@ -2323,3 +2323,15 @@ claimed. Actual accepted execution effects are not expired under the never-start
 Poststart containment/replacement, alternate routes, other runtime/session/invocation modes,
 consumer adoption and selected-runtime qualification remain unsupported or separately assigned.
 No unsupported case falls back to legacy cancellation, a fresh provider or another graph path.
+
+
+## Poststart steering candidate specification
+
+The owner-approved [ST04 poststart policy](decisions/ST04-poststart.md) and
+[closed candidate schemas/fault model](decisions/ST04-poststart-schema.md) have a
+separate `contracts/candidates/st04-poststart-v1` manifest. They are synthetic
+specification assets, not supported ctl/MCP responses or control authority.
+`workflow-steering-poststart.v1` is reserved and unadvertised. The existing
+prestart capability never escalates into poststart control. Accepting-runtime
+implementation, Rust adoption, actual profile qualification, consumer integration
+and release remain separate gates.

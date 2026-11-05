@@ -1,0 +1,563 @@
+{
+  "$id": "urn:harflow:st04-poststart-v1:scenario.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "maxProperties": 100,
+  "properties": {
+    "events": {
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "authority": {
+                "type": "boolean"
+              },
+              "capacity": {
+                "type": "boolean"
+              },
+              "enrolled": {
+                "type": "boolean"
+              },
+              "epoch": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "identity": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "const": "admit",
+                "type": "string"
+              },
+              "payload": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "qualified_budgets": {
+                "type": "boolean"
+              },
+              "qualified_profile": {
+                "type": "boolean"
+              },
+              "request_id": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "result_accepted": {
+                "type": "boolean"
+              },
+              "scope_exact": {
+                "type": "boolean"
+              },
+              "single_provider": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id",
+              "epoch",
+              "payload",
+              "authority",
+              "capacity",
+              "result_accepted",
+              "enrolled",
+              "single_provider",
+              "scope_exact",
+              "qualified_profile",
+              "qualified_budgets",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "prepare_stop",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "deliver_stop",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "stop_ack",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "inventory_complete": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "observe",
+                "type": "string"
+              },
+              "obligations_settled": {
+                "type": "boolean"
+              },
+              "proofs": {
+                "additionalProperties": false,
+                "maxProperties": 100,
+                "properties": {
+                  "all_obligations_settled": {
+                    "type": "boolean"
+                  },
+                  "claims_settled": {
+                    "type": "boolean"
+                  },
+                  "complete_closure": {
+                    "type": "boolean"
+                  },
+                  "exit_reaped": {
+                    "type": "boolean"
+                  },
+                  "extents_reconciled": {
+                    "type": "boolean"
+                  },
+                  "final_watermark": {
+                    "type": "boolean"
+                  },
+                  "future_issuance_fence": {
+                    "type": "boolean"
+                  },
+                  "handles_settled": {
+                    "type": "boolean"
+                  },
+                  "input_reconciled": {
+                    "type": "boolean"
+                  },
+                  "job_quiescent": {
+                    "type": "boolean"
+                  },
+                  "lossless_capture": {
+                    "type": "boolean"
+                  },
+                  "messages_reconciled": {
+                    "type": "boolean"
+                  },
+                  "no_pending_mutation": {
+                    "type": "boolean"
+                  },
+                  "original_enrollment": {
+                    "type": "boolean"
+                  },
+                  "qualified_profile": {
+                    "type": "boolean"
+                  },
+                  "release_journal_complete": {
+                    "type": "boolean"
+                  },
+                  "resources_reconciled": {
+                    "type": "boolean"
+                  },
+                  "sessions_reconciled": {
+                    "type": "boolean"
+                  },
+                  "stale_callback_fence": {
+                    "type": "boolean"
+                  },
+                  "stderr_eof": {
+                    "type": "boolean"
+                  },
+                  "stdout_eof": {
+                    "type": "boolean"
+                  },
+                  "writers_quiescent": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "qualified_profile",
+                  "no_pending_mutation",
+                  "sessions_reconciled",
+                  "resources_reconciled",
+                  "messages_reconciled",
+                  "original_enrollment",
+                  "complete_closure",
+                  "future_issuance_fence",
+                  "exit_reaped",
+                  "stdout_eof",
+                  "stderr_eof",
+                  "input_reconciled",
+                  "lossless_capture",
+                  "final_watermark",
+                  "writers_quiescent",
+                  "extents_reconciled",
+                  "handles_settled",
+                  "claims_settled",
+                  "release_journal_complete",
+                  "job_quiescent",
+                  "stale_callback_fence",
+                  "all_obligations_settled"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "kind",
+              "proofs",
+              "inventory_complete",
+              "obligations_settled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "certify",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "release",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "authority": {
+                "type": "boolean"
+              },
+              "effect_safe": {
+                "type": "boolean"
+              },
+              "epoch": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "identity": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "const": "replace",
+                "type": "string"
+              },
+              "payload": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "remaining_attempts": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "request_id": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "request_id",
+              "epoch",
+              "payload",
+              "authority",
+              "effect_safe",
+              "remaining_attempts",
+              "identity"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "authority": {
+                "type": "boolean"
+              },
+              "budget": {
+                "type": "boolean"
+              },
+              "claims": {
+                "type": "boolean"
+              },
+              "configuration": {
+                "type": "boolean"
+              },
+              "effect_safe": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "prepare_dispatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "authority",
+              "effect_safe",
+              "budget",
+              "configuration",
+              "claims"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "deliver_dispatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "dispatch_ack",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "authority": {
+                "type": "boolean"
+              },
+              "budget": {
+                "type": "boolean"
+              },
+              "claims": {
+                "type": "boolean"
+              },
+              "configuration": {
+                "type": "boolean"
+              },
+              "effect_safe": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "context_change",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "authority",
+              "effect_safe",
+              "budget",
+              "configuration",
+              "claims"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "crash",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "recover",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "old_callback",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "accept_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "id": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "const": "sibling_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "maxProperties": 100,
+            "properties": {
+              "kind": {
+                "const": "capacity_pressure",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "format": {
+      "const": "harflow.steering.poststart.candidate",
+      "type": "string"
+    },
+    "hypothetical": {
+      "const": true,
+      "type": "boolean"
+    },
+    "kind": {
+      "const": "scenario",
+      "type": "string"
+    },
+    "provenance": {
+      "const": "synthetic_specification",
+      "type": "string"
+    },
+    "python_runtime_support": {
+      "const": false,
+      "type": "boolean"
+    },
+    "runtime_qualified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "rust_adoption": {
+      "const": false,
+      "type": "boolean"
+    },
+    "status": {
+      "const": "specified_unimplemented",
+      "type": "string"
+    },
+    "v": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "format",
+    "v",
+    "status",
+    "provenance",
+    "python_runtime_support",
+    "rust_adoption",
+    "runtime_qualified",
+    "hypothetical",
+    "kind",
+    "events"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,578 @@
+{
+  "$id": "urn:harflow:st04-poststart-v1:request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "maxProperties": 100,
+      "properties": {
+        "format": {
+          "const": "harflow.steering.poststart.candidate",
+          "type": "string"
+        },
+        "hypothetical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "identity": {
+          "additionalProperties": false,
+          "maxProperties": 100,
+          "properties": {
+            "activation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "assignment_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "attempt": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "candidate": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "closure_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "configuration_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "containment_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "control_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "definition_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "goal_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "goal_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "grant_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "interaction_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "launch_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "node": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "owner_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "process_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "profile_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "root": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "target_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "task": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "verifier_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "visit": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root",
+            "activation",
+            "task",
+            "attempt",
+            "visit",
+            "definition_digest",
+            "goal_digest",
+            "goal_revision",
+            "interaction_revision",
+            "control_revision",
+            "target_revision",
+            "assignment_digest",
+            "configuration_digest",
+            "grant_digest",
+            "owner_generation",
+            "containment_generation",
+            "process_generation",
+            "launch_id",
+            "profile_digest",
+            "verifier_digest",
+            "closure_digest",
+            "node",
+            "candidate"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "contain_request",
+          "type": "string"
+        },
+        "ledger_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "profile": {
+          "additionalProperties": false,
+          "maxProperties": 100,
+          "properties": {
+            "digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "expected_time_budgets": {
+              "additionalProperties": false,
+              "maxProperties": 100,
+              "properties": {
+                "background": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "number"
+                },
+                "execution": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "number"
+                },
+                "grace": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "number"
+                },
+                "stop": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "stop",
+                "grace",
+                "execution",
+                "background"
+              ],
+              "type": "object"
+            },
+            "name": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "version": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "digest",
+            "expected_time_budgets"
+          ],
+          "type": "object"
+        },
+        "provenance": {
+          "const": "synthetic_specification",
+          "type": "string"
+        },
+        "python_runtime_support": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "runtime_qualified": {
+          "const": false,
+          "type": "boolean"
+        },
+        "rust_adoption": {
+          "const": false,
+          "type": "boolean"
+        },
+        "scope": {
+          "const": "original_launch_complete_owned_closure",
+          "type": "string"
+        },
+        "status": {
+          "const": "specified_unimplemented",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format",
+        "v",
+        "status",
+        "provenance",
+        "python_runtime_support",
+        "rust_adoption",
+        "runtime_qualified",
+        "hypothetical",
+        "kind",
+        "request_id",
+        "ledger_epoch",
+        "identity",
+        "scope",
+        "reason",
+        "profile"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "maxProperties": 100,
+      "properties": {
+        "certificate_digest": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "contain_request_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "effect_verifier": {
+          "additionalProperties": false,
+          "maxProperties": 100,
+          "properties": {
+            "digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "version": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "digest"
+          ],
+          "type": "object"
+        },
+        "expected_remaining_attempts": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format": {
+          "const": "harflow.steering.poststart.candidate",
+          "type": "string"
+        },
+        "hypothetical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "identity": {
+          "additionalProperties": false,
+          "maxProperties": 100,
+          "properties": {
+            "activation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "assignment_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "attempt": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "candidate": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "closure_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "configuration_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "containment_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "control_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "definition_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "goal_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "goal_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "grant_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "interaction_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "launch_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "node": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "owner_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "process_generation": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "profile_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "root": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "target_revision": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "task": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "verifier_digest": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "visit": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root",
+            "activation",
+            "task",
+            "attempt",
+            "visit",
+            "definition_digest",
+            "goal_digest",
+            "goal_revision",
+            "interaction_revision",
+            "control_revision",
+            "target_revision",
+            "assignment_digest",
+            "configuration_digest",
+            "grant_digest",
+            "owner_generation",
+            "containment_generation",
+            "process_generation",
+            "launch_id",
+            "profile_digest",
+            "verifier_digest",
+            "closure_digest",
+            "node",
+            "candidate"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "replacement_request",
+          "type": "string"
+        },
+        "ledger_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provenance": {
+          "const": "synthetic_specification",
+          "type": "string"
+        },
+        "python_runtime_support": {
+          "const": false,
+          "type": "boolean"
+        },
+        "request_id": {
+          "maxLength": 36,
+          "minLength": 1,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "runtime_qualified": {
+          "const": false,
+          "type": "boolean"
+        },
+        "rust_adoption": {
+          "const": false,
+          "type": "boolean"
+        },
+        "status": {
+          "const": "specified_unimplemented",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format",
+        "v",
+        "status",
+        "provenance",
+        "python_runtime_support",
+        "rust_adoption",
+        "runtime_qualified",
+        "hypothetical",
+        "kind",
+        "request_id",
+        "contain_request_id",
+        "ledger_epoch",
+        "identity",
+        "certificate_digest",
+        "effect_verifier",
+        "expected_remaining_attempts"
+      ],
+      "type": "object"
+    }
+  ]
+}

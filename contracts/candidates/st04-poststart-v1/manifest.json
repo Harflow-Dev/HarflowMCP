@@ -1,0 +1,2150 @@
+{
+  "capability_advertised": false,
+  "expectations": {
+    "certificate.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "contain-request.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "structural_valid_untrusted",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "crash-cut-0.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "crash",
+          "recover",
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-1.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "crash",
+          "recover",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-10.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "crash",
+          "recover",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-11.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack",
+          "crash",
+          "recover"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-12.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack",
+          "crash",
+          "recover"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-2.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 0
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "crash",
+          "recover",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "unknown",
+        "verdicts": [
+          "stop_delivery_unknown",
+          "no_stop_delivery",
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-3.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "crash",
+          "recover",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-4.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "crash",
+          "recover",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-5.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "crash",
+          "recover",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-6.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "crash",
+          "recover",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-7.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "crash",
+          "recover",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-8.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "crash",
+          "recover",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "crash-cut-9.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "unknown",
+        "effects": {
+          "dispatch": 0,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "crash",
+          "recover"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "launch_unknown",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "launch_delivery_unknown",
+          "no_dispatch",
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "hypothetical-sequence.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "acknowledged",
+        "effects": {
+          "dispatch": 1,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold",
+          "atomic_control_attempt_lineage_launch",
+          "exclusion_handoff",
+          "dispatch_intent",
+          "dispatch_ack"
+        ],
+        "lineage": {
+          "attempt_id": "attempt-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "decision_id": "control-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "identity": "immutable-1",
+          "launch_id": "launch-db047f636e354a05a84b8fcfd346c90d254c61c6442e85d31c8dc12a56e18571",
+          "supersedes": "contain-1"
+        },
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "replacement_running",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": 0,
+        "replacement": {
+          "authority": true,
+          "effect_safe": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-2",
+          "remaining_attempts": 1,
+          "request_id": "replace-1"
+        },
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "incidental-pending.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-all-obligations-settled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-claims-settled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-complete-closure.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-exit-reaped.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-extents-reconciled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-final-watermark.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-future-issuance-fence.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-handles-settled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-input-reconciled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-job-quiescent.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-lossless-capture.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-messages-reconciled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-no-pending-mutation.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-original-enrollment.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-qualified-profile.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-release-journal-complete.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-resources-reconciled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-sessions-reconciled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-stale-callback-fence.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-stderr-eof.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-stdout-eof.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "missing-writers-quiescent.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-caller-authority.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "closed_shape",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-duplicate-actor.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "duplicate_actor",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-float-revision.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "invalid_revision",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-float-version.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "candidate_only",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-ordinary-frame.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "closed_shape",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-profile-binding.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "profile_mismatch",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-reference-syntax.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "invalid_request_id",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-runtime-header.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "candidate_only",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-scope.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "unsupported_scope",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-utf8-string-budget.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "invalid_string",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reject-verifier-binding.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "verifier_mismatch",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "replacement-request.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "structural_valid_untrusted",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "reused-action-request-scenario.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "hypothetical_valid",
+        "runtime_authorized": false
+      },
+      "model": {
+        "accepted_result": false,
+        "candidate_only": true,
+        "certificate": true,
+        "certificate_revision": 1,
+        "complete": true,
+        "dispatch_status": "none",
+        "effects": {
+          "dispatch": 0,
+          "stop": 1
+        },
+        "evidence_revision": 1,
+        "fenced": true,
+        "intent": {
+          "authority": true,
+          "enrolled": true,
+          "epoch": "epoch-1",
+          "identity": "immutable-1",
+          "payload": "payload-1",
+          "qualified_budgets": true,
+          "qualified_profile": true,
+          "request_id": "contain-1",
+          "scope_exact": true,
+          "single_provider": true
+        },
+        "journal": [
+          "intent",
+          "future_issuance_and_acceptance_fence",
+          "completion_space_reserved",
+          "stop_delivery_intent",
+          "stop_ack",
+          "bounded_observation",
+          "certificate",
+          "old_claims_release",
+          "coordinator_exclusion_hold"
+        ],
+        "model_decisions": 0,
+        "old_callback_mutations": 0,
+        "original_attempt_charged": true,
+        "original_identity": "immutable-1",
+        "phase": "ready_to_replan",
+        "proofs": {
+          "all_obligations_settled": true,
+          "claims_settled": true,
+          "complete_closure": true,
+          "exit_reaped": true,
+          "extents_reconciled": true,
+          "final_watermark": true,
+          "future_issuance_fence": true,
+          "handles_settled": true,
+          "input_reconciled": true,
+          "job_quiescent": true,
+          "lossless_capture": true,
+          "messages_reconciled": true,
+          "no_pending_mutation": true,
+          "original_enrollment": true,
+          "qualified_profile": true,
+          "release_journal_complete": true,
+          "resources_reconciled": true,
+          "sessions_reconciled": true,
+          "stale_callback_fence": true,
+          "stderr_eof": true,
+          "stdout_eof": true,
+          "writers_quiescent": true
+        },
+        "released": true,
+        "remaining_attempts": null,
+        "replacement": null,
+        "runtime_authorized": false,
+        "siblings": [],
+        "stop_status": "acknowledged",
+        "verdicts": [
+          "request_identity_reused",
+          "replacement_required",
+          "launch_delivery_unknown",
+          "no_dispatch",
+          "old_callback_fenced"
+        ]
+      }
+    },
+    "unknown-obligation-settled.json": {
+      "classification": {
+        "candidate_valid": false,
+        "code": "settlement_unknown",
+        "runtime_authorized": false
+      },
+      "model": null
+    },
+    "zero-budget-untrusted-witness.json": {
+      "classification": {
+        "candidate_valid": true,
+        "code": "structural_valid_untrusted",
+        "runtime_authorized": false
+      },
+      "model": null
+    }
+  },
+  "files": [
+    {
+      "bytes": 2734,
+      "filename": "certificate.json",
+      "sha256": "567b2b64ac584eb3333180657b229e2b108033883c0599386c1d7e27f4fe9cfb"
+    },
+    {
+      "bytes": 9416,
+      "filename": "certificate.schema.json",
+      "sha256": "34f061e7326341b67d6963822d13cedea7618b85c212d2388b6626fa3926f754"
+    },
+    {
+      "bytes": 2057,
+      "filename": "contain-request.json",
+      "sha256": "bec0391d0e4cfbefb055d3efda41c25d1c3d238fb40e69c383f5a945755469cb"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-0.json",
+      "sha256": "a7731bbaca3a7ea8bbdc6b357cfcce31881aedff0830e84674d151e0074ac0ee"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-1.json",
+      "sha256": "75ce448e5055d677b95f51fa3ef036b8f09115679920209d8e4e7e14481e74c5"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-10.json",
+      "sha256": "af8671d57a0a7e478e84bd2aa0356df8185285f2d0e790a210f98c0013d2cc00"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-11.json",
+      "sha256": "ac9142cb10fcbf0ffc26a6964ac6cdc33c67febf25b53a515fa20abb29cf8af4"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-12.json",
+      "sha256": "f21418015bfc736f44f6eb8de11418b5189923dafcd5a3605359ef64fe3deea6"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-2.json",
+      "sha256": "0e25a2e89edd577cb7c2553c4c852b6bfac1bfcef8a32a99ec7fc91d61f3496d"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-3.json",
+      "sha256": "ab77e6182f75f23de1fc29a02e5e7f4d01a9a44557551dbf575508aef4bc86f3"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-4.json",
+      "sha256": "5bf47281e0768b995383ed5c800d59fbae4021ded42a640c490236b6aa00cfd4"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-5.json",
+      "sha256": "b31bf42499806bf261537467f8f8262762bac73341f18725cebf5ca6f6051293"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-6.json",
+      "sha256": "e99b5da347be786beba3cc4a224d2f93ece1eb56889375a107676ac5a15f98ed"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-7.json",
+      "sha256": "a1a1c67c4382e660254baaaf9d26f0d3c877929b724ddb04a701abcc2915d6b8"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-8.json",
+      "sha256": "39e307751c4c8d3f2fbd2ca8f5de52dff31bde60c7c9768092bd0d4ffc55ca06"
+    },
+    {
+      "bytes": 2399,
+      "filename": "crash-cut-9.json",
+      "sha256": "b8702eb94533a50b65373e536ae68e9cb69ef43b7fe43c935020d856dbcfef61"
+    },
+    {
+      "bytes": 2327,
+      "filename": "hypothetical-sequence.json",
+      "sha256": "5f4f0d54872eac4cbb732026998cceba054f3ab87913b14c88f54375f324d618"
+    },
+    {
+      "bytes": 2732,
+      "filename": "incidental-pending.json",
+      "sha256": "dc15827c530ab86a4b5914f0660c8d03bf718cc7cdc2825a1b6a511b803ddaf1"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-all-obligations-settled.json",
+      "sha256": "95b53c6ee25d4271d15c15fe7ed675165605c3b3a951259971c77fdb98ee19b2"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-claims-settled.json",
+      "sha256": "efde8da20569c2c4c05e6c12f46e810bc5fb9d0a1f0ca82c09662865a7727c70"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-complete-closure.json",
+      "sha256": "a81bc0589aa1d4f280359e70aad6ce276a359bf5dc748b053ccee6b149d7d266"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-exit-reaped.json",
+      "sha256": "ac728af9084acdae0368737613e57ed951d6cd961c71c31fad1e9b08d7fb49b0"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-extents-reconciled.json",
+      "sha256": "fcbd7db8ba23fb0548892c33bdca1f65a6c2b5de97ef7ca2d8d4e29d9f502a83"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-final-watermark.json",
+      "sha256": "f64c7111fd93029e7037e7f31026297dc2504c4d5435e0eb65da801062eb48c9"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-future-issuance-fence.json",
+      "sha256": "a504530ee64f04f1f9aca3de5c94191bf162195fdbeb1575d51825e5de700ee3"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-handles-settled.json",
+      "sha256": "bd2337d29e9445929c4cd9b05f62bff356431075ec7b5b9ee57982f761460564"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-input-reconciled.json",
+      "sha256": "410051cfefefa7b6858ace909efbd52935774bea087f77dbb202b8727825986a"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-job-quiescent.json",
+      "sha256": "442221ccaca4d542e342deecc516af68d678f3ccd3035ab4cef90410c382d64d"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-lossless-capture.json",
+      "sha256": "f53bb0bec8cd6aaad22a6c3711f551908d33af95e48e127ff48111d92ebc50ee"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-messages-reconciled.json",
+      "sha256": "2c2368381ebde7583a570dc7d381d076d9c43dd89af9ef511c7dc149e89e3809"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-no-pending-mutation.json",
+      "sha256": "bd13b4f566b87cbc5f15c2eb8f9205591b63c51dec8754403e9b5d9f33b1821e"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-original-enrollment.json",
+      "sha256": "1c9e3177a238b2d805c06abf1c8898390b4e3b6f429bd37c785a1d4cc928a832"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-qualified-profile.json",
+      "sha256": "3d54d4fe7301b9613d3d63c3b30eba26bb3686e2cee34e7cb0932de4036ac6d9"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-release-journal-complete.json",
+      "sha256": "9ca3ea540c38924e057feaafb6b80d3a048d111751e295e4354dbde0da245301"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-resources-reconciled.json",
+      "sha256": "8569412fd15d55f7b68e2aebe70e3807dc592f3370690f0ee9dcc9cd95dc387c"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-sessions-reconciled.json",
+      "sha256": "8b223563815c0de61b952d705063e203ef39398b8eb3bdf1113a9e52d91a8201"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-stale-callback-fence.json",
+      "sha256": "8c76ca3aaf0daf78dbf0c3e7ca11d74b3a46d82e7f4241351a9020f41d6ed3f4"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-stderr-eof.json",
+      "sha256": "ee9420f7a3466c3c6ef2c3eae6b8df9c1a188ad2558096d1e08408e146bc84e4"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-stdout-eof.json",
+      "sha256": "9c9ff319ac290b1d0d9ec5a2814499ca281fba89c028f18d62d3d3970f2bba71"
+    },
+    {
+      "bytes": 2735,
+      "filename": "missing-writers-quiescent.json",
+      "sha256": "6501ad29cbc5b6da3055672a86a1e1ac4e1e89466d8b7e63dde07175850467a9"
+    },
+    {
+      "bytes": 2078,
+      "filename": "reject-caller-authority.json",
+      "sha256": "fb771c1f1dc89cce183bca9b1345bd03930f966c19d29aeac4a8cc98150df04b"
+    },
+    {
+      "bytes": 2875,
+      "filename": "reject-duplicate-actor.json",
+      "sha256": "0c8c1fc8bab63992c477799a065c0b629aaf442f6880de5900bf58c5d406df55"
+    },
+    {
+      "bytes": 2059,
+      "filename": "reject-float-revision.json",
+      "sha256": "d5e7921fdbe19265b231a33ecf944b1d18de1d32c69410f9c651b77d613ebad7"
+    },
+    {
+      "bytes": 2059,
+      "filename": "reject-float-version.json",
+      "sha256": "a94b49a36a23698ef37c7f1162260cfc6a2faed7a2207207658c47e0838277d8"
+    },
+    {
+      "bytes": 2088,
+      "filename": "reject-ordinary-frame.json",
+      "sha256": "2ed924f89abbdf574c656677dd5a3926963a377c36c6196ed4df4f75c6e306fe"
+    },
+    {
+      "bytes": 2057,
+      "filename": "reject-profile-binding.json",
+      "sha256": "0c1182af68587b98938be4119671d3e227880c66da9bbd787403febacf296251"
+    },
+    {
+      "bytes": 2047,
+      "filename": "reject-reference-syntax.json",
+      "sha256": "61716fc253cac1e9e9b80a982e932265f7d7aa68d019848374837b5b989b2dc4"
+    },
+    {
+      "bytes": 2056,
+      "filename": "reject-runtime-header.json",
+      "sha256": "68e6de646e72df192a8322eecbb177dc4070021701e6ed9f3050d43b785c353b"
+    },
+    {
+      "bytes": 2030,
+      "filename": "reject-scope.json",
+      "sha256": "5d5b17a76da023ea6aeef93f5774ba86fcf1d7e3c487ef8469a7ef6f63ccb8cd"
+    },
+    {
+      "bytes": 6134,
+      "filename": "reject-utf8-string-budget.json",
+      "sha256": "6824af44af76a10953cca58f9b41b1210c11b7cea00c5ce0e54e2dba987c0a77"
+    },
+    {
+      "bytes": 2066,
+      "filename": "reject-verifier-binding.json",
+      "sha256": "2396134a7c5fa228d0f69b62fd62cd88a193d25a973a7e50f5a12adce29ae62f"
+    },
+    {
+      "bytes": 2066,
+      "filename": "replacement-request.json",
+      "sha256": "e473cac68c2342b1e8f7d2fed0ad2da6376a68e4342b18f5f706e2bfd3ec225f"
+    },
+    {
+      "bytes": 15944,
+      "filename": "request.schema.json",
+      "sha256": "4a8a66e44c17f716cf071ce65d86d1139052c6bce5805bc67913d169ad07d859"
+    },
+    {
+      "bytes": 2327,
+      "filename": "reused-action-request-scenario.json",
+      "sha256": "3653d418c80c677321ebd7fc042e778f8d5f48184ac4c6bb7f21eb04e928f4b2"
+    },
+    {
+      "bytes": 15055,
+      "filename": "scenario.schema.json",
+      "sha256": "6b24106edbd6aa3a2c66aecc18865f4c268990f2879fbaaac268c997c6049d41"
+    },
+    {
+      "bytes": 2731,
+      "filename": "unknown-obligation-settled.json",
+      "sha256": "3b670914664354cc6e98feaa67d94ab34fb6b933fd0ec4b49a009ff844019528"
+    },
+    {
+      "bytes": 2066,
+      "filename": "zero-budget-untrusted-witness.json",
+      "sha256": "08533ad326309a0a02aef91ff803c28403637904fae53f31f43baf9c88b9c399"
+    }
+  ],
+  "format": "harflow.steering.poststart.candidate",
+  "provenance": "synthetic_specification",
+  "python_runtime_support": false,
+  "reserved_capability": "workflow-steering-poststart.v1",
+  "runtime_qualified": false,
+  "rust_adoption": false,
+  "specifications": [
+    {
+      "path": "docs/decisions/ST04-poststart.md",
+      "sha256": "3887a75a884d21c1faa7b9dcbed22b4e870facb50dff8a8673dac8af305a1ab5"
+    },
+    {
+      "path": "docs/decisions/ST04-poststart-schema.md",
+      "sha256": "044779ec1feaa365cb08877c0ad244da3fd0f4dff88d02a766209efd8590d3e4"
+    }
+  ],
+  "status": "specified_unimplemented",
+  "v": 1
+}

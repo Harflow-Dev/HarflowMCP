@@ -547,6 +547,17 @@ predecessor expiry, preserving accepted decisions/effects, unknown/current proof
 counts/provenance and explicit gaps. Full dispatcher quiescence and permanent compact lineage/task-ID
 proofs precede detail retirement. Neither detail expiry nor a compact certificate grants dispatch.
 
+### Owner-approved poststart candidate policy — 2026-11-05
+
+The owner approved the bounded two-request poststart policy in
+[ST04 poststart](ST04-poststart.md), with [candidate schemas and fault model](ST04-poststart-schema.md).
+The first replacement preserves the exact assignment/node/candidate and uses a closed
+control decision, with no provider replanner, budget refund or issued-effect expiry.
+All old-domain obligations must settle; trusted effect verification and qualified
+original-launch containment remain required. This specification approval does not
+implement or advertise poststart controls, adopt Rust contracts, qualify a runtime
+or accept broader route/assignment changes.
+
 ### Broader cancellation and route reselection remains a later gate
 
 ST02/ST03 refuse cancellation/reselection via prose or steering action. ST04 candidate separate
