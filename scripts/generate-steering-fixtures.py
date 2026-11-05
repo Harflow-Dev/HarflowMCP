@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate ST02/ST03-A producer specimens from isolated service calls and a synthetic provider.
+"""Generate ST02/ST03-A/ST03-B producer specimens from isolated service calls and a synthetic provider.
 
 No backend CLI/provider is invoked. Admission/requests/status/history/final classification use
 production application code with fixed clocks/identities and a fixture-only in-process task.
@@ -267,24 +267,175 @@ async def orchestrator_specimens(base):
     return output
 
 
+class FixtureWorkerRegistry(FixtureRegistry):
+    """Synthetic provider with durable task bytes for production ownership readers."""
+    def __init__(self, root, final="Discuss the exact assignment before submitting a result.", **changes):
+        super().__init__(root, final, **changes)
+        self.tasks = {}
+
+    async def start(self, prompt, repo, **kwargs):
+        from harflow_mcp import store
+        task = await super().start(prompt, repo, **kwargs)
+        value = task.snapshot()
+        value.update(timed_out=False, outcome_unknown=False, is_error=False)
+        self.tasks[task.task_id] = task
+        store.write(self.log_dir, store.TaskRecord(task_id=task.task_id, backend=kwargs['backend'].name,
+            session_id=value['session_id'], repo_path=str(repo), started_at='2026-11-05T00:00:00Z',
+            freedom=kwargs['freedom'], network=kwargs.get('network'), model=kwargs.get('model'),
+            reasoning_effort=kwargs.get('reasoning_effort'), max_turns=kwargs['max_turns'],
+            status=value['status'], exit_code=value['exit_code'], output_drained=value['output_drained']))
+        return task
+
+    def attach(self, task_id):
+        return self.tasks.get(task_id)
+
+
+async def worker_specimens(base):
+    """Actual explicit v2 upgrade, worker service and bounded history projection."""
+    from itertools import count
+    from harflow_mcp import store
+    from harflow_mcp.worker_steering_runner import run_worker_turn
+    ids = count(2000)
+    output = {}
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(steering, '_transport', return_value=None))
+        stack.enter_context(patch.object(workflows, '_launch'))
+        stack.enter_context(patch('time.time', return_value=AT))
+        stack.enter_context(patch('uuid.uuid4', side_effect=lambda: uuid.UUID(int=next(ids))))
+        stack.enter_context(patch.object(identity, 'own_identity', return_value={'pid': 6789, 'start_time': 'fixture-generation', 'markers': []}))
+        stack.enter_context(state_ownership.state_session(resolve_layout(root=base)))
+        storage = workflows.WorkflowStore(base)
+        definition = workflows.validate_definition({'name': 'worker-steering-example',
+            'orchestrator': {'backend': 'claude'},
+            'nodes': [{'id': 'start', 'type': 'start'},
+                      {'id': 'work', 'type': 'agent', 'role': 'implementation',
+                       'instructions': 'Perform only the immutable assigned work.',
+                       'agent': {'backend': 'claude', 'model': 'sonnet', 'max_turns': 17},
+                       'freedom': 'write_in_repo', 'execution_mode': 'headless'},
+                      {'id': 'end', 'type': 'end'}],
+            'connections': [{'id': 'begin', 'source': 'start', 'target': 'work'},
+                            {'id': 'finish', 'source': 'work', 'target': 'end'}]})
+        def put(name, result):
+            output['ctl-steering-' + name + '.json'] = (envelope(CTL_FORMAT, {'result': result}), 0)
+        def checkpoint(label):
+            repo = base / label
+            repo.mkdir()
+            run = storage.create_run(definition, 'Complete the exact assigned task.', repo,
+                freedom='write_in_repo', interaction_owner='monitor')
+            rid = run['workflow_run_id']
+            provider_id = 'ordinary-' + label
+            execution_id = 'execution-' + label
+            token = {'id': 'token-' + label, 'node_id': 'work', 'stack': [], 'context': {},
+                'assignment_prompt': 'Implement only fixture-task.', 'assigned_task_ids': ['fixture-task'],
+                'input_result_refs': [], 'execution_activation_id': execution_id,
+                'execution_session_mode': 'fresh', 'accepted_decision_id': 'accepted-' + label}
+            candidate = next(n['agent'] for n in definition['nodes'] if n['id'] == 'work')
+            ordinary = {'task_id': provider_id, 'status': 'completed', 'exit_code': 0,
+                'output_drained': True, 'timed_out': False, 'outcome_unknown': False, 'is_error': False,
+                'summary': 'Unaccepted ordinary output.', 'session_id': 'ordinary-session-' + label,
+                'usage': {'input_tokens': 9, 'output_tokens': 4}, 'num_turns': 7, 'total_cost_usd': 0.01}
+            activation = {'id': execution_id, 'node_id': 'work', 'role': 'node', 'status': 'running',
+                'created_at': AT, 'token': token.copy(), 'assignment_prompt': token['assignment_prompt'],
+                'assigned_task_ids': ['fixture-task'], 'input_result_refs': [],
+                'execution_session_mode': 'fresh', 'visit_id': token['id'], 'attempt_in_visit': 1,
+                'tasks': [{'task_id': provider_id, 'status': 'completed', 'candidate': candidate,
+                    'repo_path': str(repo), 'freedom': 'write_in_repo', 'network': None, 'result': ordinary}]}
+            storage.update_run(rid, lambda r: r.update(status='running', runner_policy='guided',
+                execution_initialized=True, pending=[token], activations=[activation],
+                tasks=[{'id': 'fixture-task', 'title': 'Bounded assigned work', 'description': 'Preserve the immutable assignment.', 'status': 'pending', 'source_activation_id': 'fixture-plan'}]), 'fixture_worker_checkpoint')
+            store.write(base / 'tasks', store.TaskRecord(task_id=provider_id, backend='claude',
+                session_id=ordinary['session_id'], repo_path=str(repo), started_at='2026-11-05T00:00:00Z',
+                freedom='write_in_repo', model='sonnet', max_turns=17, status='completed', exit_code=0, output_drained=True))
+            return rid
+        async def upgrade(rid):
+            status = steering.get_workflow_steering(rid, root=base, monitor=True)
+            return await steering.steer_workflow(rid, {'schema_version': 2, 'ledger_epoch': 0,
+                'request_id': str(uuid.uuid4()), 'action': 'upgrade',
+                'expected_interaction_epoch': status['interaction_epoch'],
+                'expected_control_revision': status['control_revision'],
+                'reason': 'Use the explicitly approved bounded epoch-scoped steering protocol.'}, root=base, monitor=True)
+        def request(rid, action='open'):
+            status = steering.get_workflow_steering(rid, root=base, monitor=True)
+            episode = status['episodes'][-1] if action != 'open' else None
+            return {'schema_version': 2, 'ledger_epoch': status['ledger_epoch'], 'request_id': str(uuid.uuid4()),
+                'action': action, 'expected_interaction_epoch': status['interaction_epoch'],
+                'expected_control_revision': status['control_revision'],
+                'episode_id': episode['episode_id'] if episode else None,
+                'expected_steering_revision': episode['steering_revision'] if episode else None,
+                'target': next(t for t in status['targets'] if t['role'] == 'worker'),
+                'text': 'Discuss this exact worker assignment.', 'allow_fresh_context': True}
+        rid = checkpoint('main')
+        put('window-upgrade-admitted', await upgrade(rid))
+        put('window-upgraded-status', steering.get_workflow_steering(rid, root=base, monitor=True))
+        put('worker-ready', steering.get_workflow_steering(rid, root=base, monitor=True))
+        put('worker-admitted', await steering.steer_workflow(rid, request(rid), root=base, monitor=True))
+        registry = FixtureWorkerRegistry(base)
+        await run_worker_turn(workflows.WorkflowSupervisor(registry, storage), rid)
+        awaiting = steering.get_workflow_steering(rid, root=base, monitor=True)
+        assert awaiting['episodes'][-1]['state'] == 'awaiting_caller'
+        put('worker-awaiting-caller', awaiting)
+        put('worker-history', steering.get_workflow_steering_history(rid, root=base, monitor=True))
+        # Exceed the former 32 lifetime issuance limit through real explicit requests.
+        for _ in range(39):
+            await steering.steer_workflow(rid, request(rid, 'reply'), root=base, monitor=True)
+            await run_worker_turn(workflows.WorkflowSupervisor(registry, storage), rid)
+        window_status = steering.get_workflow_steering(rid, root=base, monitor=True)
+        assert window_status['budgets']['root_issuances'] == 40
+        assert len(storage.get_run(rid)['steering']['turns']) <= 33
+        put('window-status', window_status)
+        put('window-history', steering.get_workflow_steering_history(rid, root=base, monitor=True))
+        await steering.steer_workflow(rid, request(rid, 'reply'), root=base, monitor=True)
+        turn = storage.get_run(rid)['steering']['turns'][-1]
+        wrapper = {key: turn[key] for key in ('episode_id', 'turn_id', 'commit_target_ref', 'steering_revision')}
+        wrapper.update({key: turn['commit_target'][key] for key in ('interaction_epoch', 'checkpoint_revision', 'goal_revision')})
+        wrapper.update(role='worker', command={'status': 'succeeded',
+            'result': {'summary': 'Completed only the immutable assignment.', 'completed_task_ids': ['fixture-task']},
+            'evidence': ['Synthetic provider observed one finite response.']})
+        registry.final = 'HARFLOW_COMMIT_V1\n' + json.dumps(wrapper) + '\nEND_HARFLOW_COMMIT_V1'
+        await run_worker_turn(workflows.WorkflowSupervisor(registry, storage), rid)
+        committed = steering.get_workflow_steering(rid, root=base, monitor=True)
+        assert committed['episodes'][-1]['state'] == 'committed'
+        assert len([a for a in storage.get_run(rid)['activations'] if a['role'] == 'node']) == 1
+        put('worker-committed', committed)
+        rid = checkpoint('unknown')
+        await upgrade(rid)
+        await steering.steer_workflow(rid, request(rid), root=base, monitor=True)
+        await run_worker_turn(workflows.WorkflowSupervisor(FixtureWorkerRegistry(base, output_drained=False), storage), rid)
+        unknown = steering.get_workflow_steering(rid, root=base, monitor=True)
+        assert unknown['episodes'][-1]['state'] == 'delivery_unknown'
+        put('worker-capture-unknown', unknown)
+        rid = checkpoint('stale')
+        await upgrade(rid)
+        await steering.steer_workflow(rid, request(rid), root=base, monitor=True)
+        storage.update_run(rid, lambda r: r.update(goal='A revised caller goal.', goal_revision=1), 'fixture_goal_change')
+        await run_worker_turn(workflows.WorkflowSupervisor(FixtureWorkerRegistry(base), storage), rid)
+        stale = steering.get_workflow_steering(rid, root=base, monitor=True)
+        assert stale['episodes'][-1]['state'] == 'command_refused'
+        assert storage.get_run(rid)['steering']['turns'][-1]['outcome'] == 'steering_target_stale'
+        put('worker-stale', stale)
+    return output
+
+
 def generate():
     with tempfile.TemporaryDirectory() as temporary:
         documents = asyncio.run(specimens(Path(temporary) / 'state'))
         documents.update(asyncio.run(orchestrator_specimens(Path(temporary) / 'orchestrator-state')))
+        documents.update(asyncio.run(worker_specimens(Path(temporary) / 'worker-state')))
     manifest = json.loads((BUNDLE / 'manifest.json').read_text())
     output = {}
     for name, (document, code) in documents.items():
         output[BUNDLE / name] = canonical(document)
         manifest['files'][name] = hashlib.sha256(output[BUNDLE / name]).hexdigest()
         manifest['cases'][name] = {'encoding': 'json', 'expected_product_version': PRODUCT_VERSION,
-                                  'format': CTL_FORMAT, 'required_capabilities': ['workflow-steering-orchestrator.v1' if name.startswith('ctl-steering-orchestrator-') else 'workflow-steering-builder.v1'],
+                                  'format': CTL_FORMAT, 'required_capabilities': (['workflow-steering-worker.v1', 'workflow-steering-window.v1'] if name.startswith('ctl-steering-worker-') else ['workflow-steering-window.v1'] if name.startswith('ctl-steering-window-') else ['workflow-steering-orchestrator.v1'] if name.startswith('ctl-steering-orchestrator-') else ['workflow-steering-builder.v1']),
                                   'valid': True, 'exit_code': code}
     version = json.loads((BUNDLE / 'version-info.json').read_text())
     version.update(product_version=PRODUCT_VERSION, capabilities=list(CAPABILITIES))
     output[BUNDLE / 'version-info.json'] = canonical(version)
     manifest['files']['version-info.json'] = hashlib.sha256(output[BUNDLE / 'version-info.json']).hexdigest()
-    for capability in ('workflow-steering-read.v1', 'workflow-steering-builder.v1', 'workflow-steering-orchestrator.v1'):
-        name = 'invalid-steering-missing-' + capability.removesuffix('.v1') + '.json'
+    for capability in ('workflow-steering-read.v1', 'workflow-steering-builder.v1', 'workflow-steering-orchestrator.v1', 'workflow-steering-worker.v1', 'workflow-steering-window.v1'):
+        assert capability in CAPABILITIES
+        name = 'invalid-steering-missing-' + capability.rsplit('.', 1)[0] + '.json'
         doc = {**version, 'capabilities': [item for item in version['capabilities'] if item != capability]}
         output[BUNDLE / name] = canonical(doc)
         manifest['files'][name] = hashlib.sha256(output[BUNDLE / name]).hexdigest()

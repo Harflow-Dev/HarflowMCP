@@ -130,6 +130,9 @@ def target(run, storage=None, witness=None):
             from .steering_schema import _target as qualify_target
             try:
                 qualify_target(witness, run["workflow_run_id"])
+                if witness["role"] == "worker":
+                    from .worker_steering import current_target as worker_target
+                    return worker_target(storage, run, witness)
                 if witness["role"] != "orchestrator":
                     raise ValueError("Wrong steering role")
             except (ValueError, TypeError):
@@ -180,14 +183,13 @@ def _eligibility(run, monitor, storage=None):
             return actions, [{"code": "steering_budget_unsupported", "message": "Selected adapter/settings cannot enforce the finite harness cap"}]
     if run.get("input_question") or run.get("pending_inputs") or run.get("orchestrator_usage_recovery"):
         return actions, [{"code": "steering_question_pending", "message": "Use the existing interaction endpoint first"}]
-    if len(ledger["turns"]) >= ROOT_TURNS or len(ledger["requests"]) >= REQUESTS or len(ledger["history"]) >= 500:
-        return actions, [{"code": "steering_budget_exhausted", "message": "Root conversation capacity reached"}]
+    if ledger["schema_version"] == 1 and (len(ledger["turns"]) >= ROOT_TURNS or len(ledger["requests"]) >= REQUESTS or len(ledger["history"]) >= 500 or len(ledger["episodes"]) >= EPISODES):
+        return actions, [{"code": "steering_budget_exhausted", "message": "Legacy steering storage requires explicit epoch-scoped upgrade"}]
     if active:
-        if active["state"] in {"awaiting_caller", "command_refused"} and time.time() - active["created_at"] <= 1800 and sum(t["episode_id"] == active["episode_id"] for t in ledger["turns"]) < EPISODE_TURNS:
+        if active["state"] in {"awaiting_caller", "command_refused"} and time.time() - active["created_at"] <= 1800 and (ledger["schema_version"] == 2 or sum(t["episode_id"] == active["episode_id"] for t in ledger["turns"]) < EPISODE_TURNS):
             actions.append("reply")
-        if len(ledger["episodes"]) < EPISODES:
-            actions.append("retarget")
-    elif len(ledger["episodes"]) < EPISODES:
+        actions.append("retarget")
+    else:
         actions.append("open")
     return actions, refusals
 
@@ -204,13 +206,18 @@ def get_workflow_steering(workflow_run_id, *, root=None, monitor=False):
     else:
         from .orchestrator_steering import targets, admission
         issued_targets = targets(storage, run)
+        from .worker_steering import targets as worker_targets
+        issued_targets += worker_targets(storage, run)
         eligible = []
         target_refusals = []
         for issued in issued_targets:
             try:
-                candidate, _, _, _ = admission(storage, run, {"target": issued, "allow_fresh_context": True})
+                selected_admission = admission
+                if issued["role"] == "worker":
+                    from .worker_steering import admission as selected_admission
+                candidate, _, _, _ = selected_admission(storage, run, {"target": issued, "allow_fresh_context": True})
                 from .tasks import get_backend
-                if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
+                if (candidate.get("caller_approvals") and issued["role"] != "worker") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
                     raise SteeringError("steering_budget_unsupported", "Target adapter/settings cannot enforce the finite harness cap")
                 eligible.append(issued)
             except SteeringError as exc:
@@ -222,9 +229,12 @@ def get_workflow_steering(workflow_run_id, *, root=None, monitor=False):
             "interaction_epoch": run["interaction_epoch"], "control_revision": s["control_revision"],
             "targets": issued_targets, "episodes": copy.deepcopy(s["episodes"]), "sequence": s["sequence"],
             "pending_steering_count": sum(ep["hold"] for ep in s["episodes"]),
-            "budgets": {"root_issuances": len(s["turns"]), "root_limit": ROOT_TURNS, "episode_limit": EPISODE_TURNS,
+            "budgets": {"root_issuances": s.get("cumulative", {}).get("issuances", len(s["turns"])), "root_limit": ROOT_TURNS if s["schema_version"] == 1 else None, "episode_limit": EPISODE_TURNS if s["schema_version"] == 1 else None,
                         "provenance": "durable_nonrefundable_issuance", "harness_turn_cap_maximum": 8},
-            "eligible_actions": actions, "refusals": refusals,
+            "eligible_actions": actions + (["upgrade"] if s["schema_version"] == 1 else []), "refusals": refusals,
+            "request_schema_version": 2 if s["schema_version"] == 2 else 1,
+            "protocol_upgrade": {"schema_version": 2, "ledger_epoch": 0, "action": "upgrade"} if s["schema_version"] == 1 else None,
+            **({"ledger_epoch": s["ledger_epoch"], "history_floor": s["history_floor"], "cumulative": copy.deepcopy(s["cumulative"])} if s["schema_version"] == 2 else {}),
             "recovery": "Replay the exact request to observe the same issuance; uncertain delivery is never reissued"}
 
 
@@ -246,15 +256,20 @@ def get_workflow_steering_history(workflow_run_id, cursor=None, limit=50, *, roo
             raise SteeringError("malformed_command", "History cursor does not belong to this root") from None
     items = []
     size = 0
-    for item in run["steering"]["history"][offset:]:
+    for item in run["steering"]["history"]:
+        if item["sequence"] <= offset:
+            continue
         encoded = len(json.dumps(item, ensure_ascii=False).encode())
         if len(items) >= limit or size + encoded > HISTORY_BYTES:
             break
         items.append(copy.deepcopy(item)); size += encoded
-    end = offset + len(items)
-    more = end < len(run["steering"]["history"])
+    end = items[-1]["sequence"] if items else offset
+    more = end < run["steering"]["sequence"]
+    sequences = [h["sequence"] for h in run["steering"]["history"]]
+    incomplete = bool(run["steering"].get("history_floor", 0) or any(h.get("kind") == "history_gap" for h in run["steering"]["history"]) or any(b != a + 1 for a, b in zip(sequences, sequences[1:])))
+    gap = offset < run["steering"].get("history_floor", 0) or any(i.get("kind") == "history_gap" for i in items) or any(b != a + 1 for a, b in zip([offset] + [i["sequence"] for i in items], [i["sequence"] for i in items]))
     return {"root_workflow_run_id": workflow_run_id, "items": items, "has_more": more,
-            "next_cursor": f"{workflow_run_id}:{end}" if more else None, "history_incomplete": False, "gap": False}
+            "next_cursor": f"{workflow_run_id}:{end}" if more else None, "history_incomplete": incomplete, "gap": gap}
 
 
 def _request(request):
@@ -267,21 +282,23 @@ def _request(request):
         value = strict_loads(encoded)
     except (ValueError, TypeError, RecursionError, UnicodeError):
         raise SteeringError("malformed_command", "Request must be bounded finite UTF-8 JSON") from None
-    common = {"schema_version", "request_id", "action", "expected_interaction_epoch", "expected_control_revision"}
+    common = ({"ledger_epoch"} if value.get("schema_version") == 2 else set()) | {"schema_version", "request_id", "action", "expected_interaction_epoch", "expected_control_revision"}
     action = value.get("action")
-    owner = action in {"take_owner", "release_owner"}
+    owner = action in {"take_owner", "release_owner", "upgrade"}
     required = common | ({"reason"} if owner else {"episode_id", "expected_steering_revision", "target"})
     allowed = required | (set() if owner else {"text", "allow_fresh_context", "reason", "supersedes_episode_id"})
-    if not required <= set(value) or set(value) - allowed or value.get("schema_version") != 1 or type(value.get("schema_version")) is not int or action not in {"open", "reply", "retarget", "dismiss", "take_owner", "release_owner"}:
+    if not required <= set(value) or set(value) - allowed or value.get("schema_version") not in {1, 2} or type(value.get("schema_version")) is not int or action not in {"open", "reply", "retarget", "dismiss", "take_owner", "release_owner", "upgrade"}:
         raise SteeringError("malformed_command", "Invalid steering request fields")
     try:
         if str(uuid.UUID(value["request_id"])) != value["request_id"]:
             raise ValueError()
     except (ValueError, TypeError, AttributeError):
         raise SteeringError("malformed_command", "request_id must be a canonical UUID") from None
-    for key in ("expected_interaction_epoch", "expected_control_revision"):
+    for key in (("ledger_epoch",) if value["schema_version"] == 2 else ()) + ("expected_interaction_epoch", "expected_control_revision"):
         if type(value[key]) is not int or value[key] < 0:
             raise SteeringError("malformed_command", "Expected revisions must be nonnegative integers")
+    if action == "upgrade" and (value["schema_version"] != 2 or value["ledger_epoch"] != 0):
+        raise SteeringError("malformed_command", "Upgrade requires schema_version2 and ledger_epoch0")
     if owner:
         if type(value["reason"]) is not str or not value["reason"].strip() or len(value["reason"].encode()) > TEXT_BYTES:
             raise SteeringError("malformed_command", "Ownership changes require bounded reason")
@@ -320,6 +337,8 @@ async def steer_workflow(workflow_run_id, request, *, root=None, monitor=False):
         from .steering_admission import admit
         result, scheduled = admit(storage, run, principal, monitor, request, digest, binding)
     storage.update_run(workflow_run_id, mutate, "steering_requested")
+    from .steering_lifecycle import maintain
+    maintain(storage, workflow_run_id)
     if scheduled:
         from .workflows import _launch
         _launch(storage, workflow_run_id)
@@ -369,7 +388,11 @@ def _source_check(storage, run):
 
 async def run_builder_turn(supervisor, run_id):
     from .steering_runner import run_builder_turn as execute
-    return await execute(supervisor, run_id)
+    try:
+        return await execute(supervisor, run_id)
+    finally:
+        from .steering_lifecycle import maintain
+        maintain(supervisor.store, run_id)
 
 
 def summary(run):
@@ -389,4 +412,8 @@ def summary(run):
 
 async def run_orchestrator_turn(supervisor, run_id):
     from .orchestrator_steering import run_turn
-    return await run_turn(supervisor, run_id)
+    try:
+        return await run_turn(supervisor, run_id)
+    finally:
+        from .steering_lifecycle import maintain
+        maintain(supervisor.store, run_id)

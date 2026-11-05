@@ -1332,6 +1332,13 @@ class WorkflowStore:
                 raise WorkflowRunDocumentError(run_id, "Run root changed before mutation locks", code="workflow_run_unavailable")
             from .orchestrator_steering import fence as steering_fence
             steering_fence(self, run, event, detail)
+            from .steering_lifecycle import fence as worker_steering_fence
+            worker_steering_fence(self, run, event, detail)
+            if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "node_assignment_reserved"}:
+                activation_id = detail.get("activation_id") if isinstance(detail, dict) else None
+                activation = next((a for a in run["activations"] if a["id"] == activation_id), None)
+                if activation and activation.get("worker_result_required"):
+                    raise DispatchNotStarted("Worker steering requires an explicit result; ordinary execution cannot replenish its allowance")
             if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "invocation_reserved", "child_decision_reopened"}:
                 from .workflow_steering import held
                 if run.get("kind") == "builder" and held(run):
@@ -1418,6 +1425,17 @@ class WorkflowStore:
             try:
                 for task_id, receipt in receipts.items():
                     path = self.owners / f"{task_id}.json"
+                    # Retired steering authority outlives inline activation history.
+                    from .bounded_io import read_receipt
+                    try:
+                        previous_receipt = read_receipt(path)
+                    except FileNotFoundError:
+                        previous_receipt = None
+                    if previous_receipt and previous_receipt.get("steering_binding"):
+                        if (previous_receipt.get("workflow_run_id") != receipt["workflow_run_id"]
+                                or previous_receipt.get("workflow_execution_id") != receipt["workflow_execution_id"]):
+                            raise WorkflowError("Steering ownership changed before receipt replacement")
+                        receipt["steering_binding"] = previous_receipt["steering_binding"]
                     receipt_document = encode_receipt(receipt, task_id)
                     from .bounded_io import RECEIPT_BYTES
                     if len(json.dumps(receipt_document, ensure_ascii=False).encode("utf-8")) > RECEIPT_BYTES:
@@ -1545,6 +1563,9 @@ class WorkflowStore:
         from .workflow_steering import held, SteeringError
         if action in {"resume", "recover"} and held(observed):
             raise SteeringError("steering_active", "Dismiss or complete the held conversation before ordinary recovery")
+        if action in {"resume", "recover"}:
+            from .steering_lifecycle import control_guard
+            control_guard(self, observed)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         guarded = attention_checkpoint_id is not None
         if _message_resume and (action != "resume" or instructions is not None or additional_attempts or decision_id or _internal):
@@ -2157,6 +2178,10 @@ class WorkflowStore:
                     if t["task_id"] == task_id:
                         return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"], "workflow_status": r["status"], "workflow_settling": r.get("settling", False)}
         if receipt is not None:
+            from .steering_lifecycle import retired_association
+            retired = retired_association(self, receipt, task_id)
+            if retired is not None:
+                return retired
             raise WorkflowError("Workflow ownership receipt no longer matches its run")
         from .task_supervision import read_task_record
         record = read_task_record(self.root / "tasks", task_id)
@@ -2212,6 +2237,26 @@ class WorkflowStore:
         """Recover recorded outcomes, or authoritative quota failures after confirmed death."""
         def reconcile(r: dict[str, Any]) -> None:
             for activation in r["activations"]:
+                if activation.get("worker_result_required"):
+                    # The dedicated owner observes exact original/steering generations;
+                    # generic recovery cannot advance a steering question or result.
+                    if r["status"] == "cancelling":
+                        from .task_supervision import owner_holds_unsettled
+                        for task in activation["tasks"]:
+                            if task["status"] not in {"reserved", "running", "uncertain"}:
+                                continue
+                            record = task_store.read(self.root / "tasks", task["task_id"])
+                            if record is None or owner_holds_unsettled(self.root / "tasks", record):
+                                continue
+                            liveness = task_liveness(self.root / "tasks", record)
+                            if (liveness["process_alive"] is not False or not liveness["outcome_known"]
+                                    or record.status not in task_store.TERMINAL_RECORD_STATUSES
+                                    or not record.output_drained or type(record.exit_code) is not int):
+                                continue
+                            snapshot = task_store.snapshot(self.root / "tasks", record)
+                            # Observation only: never reconnect a result or advance a question.
+                            task.update(status=snapshot["status"], result=snapshot, liveness=liveness)
+                    continue
                 for task in activation["tasks"]:
                     if task.get("execution_kind") == "native_subagent" and task.get("status") in {"completed", "failed"}:
                         transport = next((t for a in r["activations"] for t in a["tasks"] if t["task_id"] == task.get("transport_task_id")), {})
@@ -4182,7 +4227,7 @@ class WorkflowSupervisor:
             # An unreadable or mismatched child puts the tree in needs_attention.
             self.attention(next(a.get("result_error", "Child invocation is uncertain") for a in self.run(refresh_atomic=True)["activations"] if a.get("invocation") and a.get("status") == "uncertain"))
             return False
-        if any(t["status"] == "uncertain" for a in self.run(refresh_atomic=True)["activations"] for t in a["tasks"]):
+        if any(t["status"] == "uncertain" for a in self.run(refresh_atomic=True)["activations"] if not a.get("worker_result_required") for t in a["tasks"]):
             timed = any(t.get("status") == "uncertain" and t.get("timeout_deadline") is not None for a in self.run(refresh_atomic=True)["activations"] for t in a["tasks"])
             self.attention("Supervisor interrupted during a timed node: persisted timeout deadline requires process reconciliation; no worker or timer replayed" if timed else "Supervisor interrupted: reconcile observed task results before continuing; dispatches were not replayed")
             return False
@@ -4275,6 +4320,8 @@ class WorkflowSupervisor:
                                 from .workflow_on_demand import cancel_reservations
                                 cancel_reservations(r)
                                 for activation in r["activations"]:
+                                    if activation.get("worker_result_required") and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
+                                        activation["status"] = "cancelled"
                                     if activation["role"] == "node" and activation.get("pending_question_id") and not activation.get("node_result"):
                                         activation["status"] = "cancelled"
                             self.update(cancelled, "cancelled")
@@ -4285,7 +4332,8 @@ class WorkflowSupervisor:
                     recovering_tokens = {(a.get("token") or {}).get("id") for a in run["activations"] if a.get("invocation") or any(t.get("status") in {"reserved", "running", "uncertain"} for t in a["tasks"])}
                     for token in sorted(run["pending"], key=lambda t: t["id"] not in recovering_tokens):
                         from .orchestrator_steering import scheduling_held
-                        if scheduling_held(self.store, run, token):
+                        from .steering_lifecycle import scheduling_blocked
+                        if scheduling_held(self.store, run, token) or scheduling_blocked(self.store, run, token):
                             continue
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
@@ -4309,8 +4357,13 @@ class WorkflowSupervisor:
                     if root_id == run_id:
                         from .orchestrator_steering import run_turn, settle_dismissals
                         settle_dismissals(self)
-                        if pending_turn(conversation_root) or any(t["state"] == "captured" for t in conversation_root["steering"]["turns"]):
-                            await run_turn(self, run_id)
+                        current_turn = pending_turn(conversation_root) or next((t for t in conversation_root["steering"]["turns"] if t["state"] == "captured"), None)
+                        if current_turn:
+                            if current_turn["target"]["role"] == "worker":
+                                from .worker_steering_runner import run_worker_turn
+                                await run_worker_turn(self, run_id)
+                            else:
+                                await run_turn(self, run_id)
                         if not conversation_held(self.run(refresh_atomic=True)):
                             if self.run(refresh_atomic=True)["status"] == "paused":
                                 break

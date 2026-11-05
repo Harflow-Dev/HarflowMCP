@@ -2046,8 +2046,7 @@ version-info capability gate. The addition retains ctl/event wire v1 and the exi
 line; it does not qualify a new release or any Mac/Rust consumer. Only root builder runs with
 qualified steering admission support the operation. Historical runs without that ledger refuse;
 unknown identity does not become an external owner. ST03-A extends the shared operations for
-[orchestrator steering](#orchestrator-conversation-steering). Worker steering and scoped
-cancellation/replanning remain unavailable capabilities.
+[orchestrator steering](#orchestrator-conversation-steering). ST03-B adds [qualified worker steering and bounded windows](#worker-steering-and-bounded-windows); scoped cancellation/replanning remains unavailable.
 
 Public operations are `workflow-steering-status ROOT`, `workflow-steering-history ROOT
 [--cursor CURSOR] [--limit 50]`, and `workflow-steer ROOT --request-file FILE` (all with `--json`).
@@ -2120,14 +2119,9 @@ native consumer qualification. Producer manifest/source identity must be pinned 
 byte-identical Swift vendoring and independent Rust adoption. No sibling build dependency or
 client runtime selection is introduced.
 
-Implementation bounds are 8 issuances/episode, 32 issuances and 32 episodes/root, and 256 retained
-request identities/root. A turn receives at most 8 harness turns (a smaller configured positive
-cap remains smaller); issuance accounting is separate from those harness turns. Episodes accept
-replies for 30 minutes. Caller text is at most 32 KiB and final text at most 64 KiB; admission
-reserves retained-text capacity before dispatch. Pending/unknown identities are never evicted to
-make room; capacity refuses rather than reopening old request IDs. History pages accept limits
-1–100 with a 256 KiB page budget. These are bounded service defaults, not measured provider-cost
-limits or real-backend qualification.
+The ST03-B shared window amendment below supersedes the historical ST02/ST03-A lifetime
+issuance and receipt-count limits. Per-response harness caps remain finite; historical receipts
+retain their original provenance and do not qualify consumer adoption.
 
 The original saved definition remains the editor's Save baseline. If another editor changes or
 deletes that saved source, continuation/proposal is refused and requires a new builder from the
@@ -2192,3 +2186,71 @@ installed-runtime, consumer or release qualification implied. ST03-A adds no nor
 event capability. Pin its complete producer manifest and immutable source before independently
 assigned byte-identical Swift fixture vendoring or Rust implementation. Worker tool policy,
 cancellation/replan and consumer UI/runtime selection remain separate assignments.
+
+## Worker steering and bounded windows
+
+ST03-B adds `workflow-steering-worker.v1` and `workflow-steering-window.v1`. Check both in a
+fresh version-info handshake before epoch-scoped worker mutations. These are producer capabilities;
+no Mac, Rust or Web adoption, installed-runtime qualification or release is implied. Existing
+approval, ownership and publication boundaries remain unchanged.
+
+The owner-approved shared amendment allows unlimited explicit steering-message count for builder,
+orchestrator and worker roles. Each accepted message authorizes one finite response, with separate
+nonrefundable issuance/resource accounting. It neither charges nor resets ordinary execution
+turns, node attempts or decision attempts. It never starts an automatic conversation or repair
+loop. Configured permissions and resources remain effective; observed usage is separate, missing
+cost/turn/usage measurements remain unknown, and no generic hard dollar cap is claimed.
+
+A legacy qualified ledger advertises an explicit upgrade in steering status. Submit a closed
+object containing `schema_version:2`, `ledger_epoch:0`, canonical UUID `request_id`,
+`action:"upgrade"`, `expected_interaction_epoch`, `expected_control_revision` and nonblank bounded
+`reason`, without episode, target or text. Only the original qualified external caller or verified
+native human may upgrade. Qualification preserves old proofs, closes namespace0 and establishes
+ledger epoch 1; the interaction/ownership epoch is unchanged. Refresh status afterward. New v2
+requests use the same action shapes as v1 plus required current `ledger_epoch` and
+`schema_version:2`. An upgraded ledger refuses missing epochs rather than silently interpreting
+v1 as new authority; retained exact v1 receipts may still replay. Worker admission requires v2.
+
+The request identity is `(ledger_epoch, request_id)`. An exact retained request replays its original
+receipt before stale-target checks and cannot create an additional effect. Changed payload or
+principal conflicts. Old namespaces close atomically before receipts are pruned; a missing retired
+request returns `request_expired` and never authorizes spawn. Reusing a UUID with the current epoch
+is explicitly a NEW request, requiring current revisions, target, caller authority and an explicit
+message. It is not recovery of an expired request. Ownership epochs are never reused as storage
+epochs. External application restart enrollment remains unsupported.
+
+Storage targets at most 32 recent positively settled turns and 64 settled request receipts, with
+1 MiB retained conversation text and 4 MiB inline metadata across turns, history, activations,
+receipts and indexes. These are soft retention windows, never cumulative admission quotas; byte
+pressure may retire settled evidence earlier. In-flight/unknown reservations, current managed
+session heads and unresolved effect claims remain protected. Settled command bodies retire only
+with durable authoritative normal-result/decision proof and closed namespaces. Protected evidence
+that cannot fit causes explicit byte backpressure and no new spawn. Absolute sequence cursors,
+`history_incomplete` and `gap` disclose missing history; lifetime raw transcript and lifetime exact
+replay are not promised. Cumulative issuance and retired observed/unknown usage survive compaction.
+Before removing task-bearing activations or steering task entries, durable managed ownership
+prevents surviving raw TaskRecords from becoming independently resumable. Raw task-family expiry
+uses safe retention; unknown claims, current checkpoints/session heads and required effect
+crosslinks are not blanket-deleted. Compaction intents support fail-closed restart reconciliation.
+
+Worker targets bind the original activation, assignment, goal, task and root/nested path. Worker
+responses use their actual configured permissions, tools and resources: their effects remain real
+even when the final is prose. Admission requires explicit `allow_fresh_context:true` and an adapter
+that enforces a fresh finite response cap of at most 8 or the smaller configured positive cap.
+Resume and native modes with unqualified per-response limits refuse, without silent conversion.
+Prose waits for another explicit caller message. A strict current framed worker result passes the
+normal validator and commits once to the SAME original activation, without creating or replenishing
+an execution attempt. Once admitted, independent `worker_result_required` blocks ordinary dispatch
+or acceptance of an old original final until the required result commits; dismissing a conversation
+does not clear this safety condition. Connected worker `asking` uses the actual normal question
+identity and its answer permits only an explicitly requested next response; specialist/on-demand
+`asking` remains unsupported. Steering does not answer approvals or add sibling/root authority.
+
+Raw provider TaskRecords and logs follow the normal live-server retention age policy (30 days
+by default), with its existing settlement, launch, phase, resource, artifact, follow-up, descendant
+and session/task-lock safeguards. Compacted managed tasks can expire without pinning every older
+body solely because a current checkpoint uses the same session. Their qualified ownership receipt
+survives until the raw family is safely gone, and interrupted sidecar cleanup retries on later
+sweeps. Missing roots or malformed bindings never authorize this exemption. Disabling task
+retention deliberately retains raw records/logs; the inline 32/64 windows are not a total raw-disk
+quota. ctl and steering compaction do not start a retention sweep.

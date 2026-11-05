@@ -1311,6 +1311,8 @@ def worker_prompt(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
 def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, activation_id: str, value: dict[str, Any], outcome: dict[str, Any], error: str | None = None) -> None:
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
     token = next(t for t in run["pending"] if t["id"] == token_id)
+    if activation.get("worker_result_required"):
+        return  # Only explicit worker steering may accept the superseded assignment result.
     activation.update(status="completed" if value["status"] == "succeeded" else "failed", node_result=value, raw_output=outcome.get("summary") or "", result=copy.deepcopy(value), finished_at=time.time())
     for key in ("pending_question_id", "resume_question_id", "turn_prompt"):
         activation.pop(key, None)
@@ -1452,6 +1454,19 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         await run_child(supervisor, node, token)
         return
     prior = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
+    if prior and prior.get("worker_result_required"):
+        # A normal-budget orchestrator may answer the actual steering question,
+        # but delivering that answer requires a new explicit bounded response.
+        question_id = prior.get("pending_question_id")
+        if question_id and prior.get("worker_steering_question_id") == question_id:
+            from .workflow_clarification import answer_question
+            answered = await answer_question(supervisor, node, token, prior["id"], question_id)
+            if answered and supervisor.run().get("status") == "running":
+                supervisor.update(lambda r: r.update(status="paused", attention_reason="Conversation is waiting for caller; use steering capability") if r.get("status") == "running" else None, "worker_steering_answer_waiting")
+                return
+        if supervisor.run().get("status", "running") in {"running", "starting", "paused"}:
+            supervisor.attention("Worker steering requires an explicit result; ordinary execution cannot restart")
+        return
     if prior and prior.get("node_result"):
         supervisor.update(lambda r: finish_result(r, node, token["id"], prior["id"], prior["node_result"], {"summary": prior.get("raw_output", "")}), "result_reconnected")
         return
@@ -1517,6 +1532,8 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         else:
             outcome = await supervisor._dispatch(dispatch_node, prompt, "node", activation)
     while outcome:
+        if next(a for a in supervisor.run(refresh_atomic=True)["activations"] if a["id"] == activation["id"]).get("worker_result_required"):
+            return
         error = None
         try:
             value = normalize_result(node, outcome, token.get("assigned_task_ids", []), guided=run.get("runner_policy") == "guided")
@@ -1624,6 +1641,8 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
     """Reconnect proven outcomes; leave every ambiguous reservation uncertain."""
     nodes = {n["id"]: n for n in run["definition"]["nodes"]}
     for activation in run["activations"]:
+        if activation.get("worker_result_required"):
+            continue  # Observe steering tasks in their dedicated runner; never restore ordinary output.
         if activation.get("on_demand_call_id"):
             continue
         if activation.get("invocation") and any(q.get("child_question") for q in activation.get("questions", [])):

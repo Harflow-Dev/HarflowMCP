@@ -155,7 +155,7 @@ def fence(storage, run, event, detail=None):
         if not episode["hold"]:
             continue
         target = episode["target"]
-        if target["role"] != "orchestrator":
+        if target["role"] not in {"orchestrator", "worker"}:
             continue
         path = target["path"]
         # Block new root decisions and the exact target subtree, allowing already
@@ -175,7 +175,7 @@ def scheduling_held(storage, run, token):
     rid = (run.get("parent_link") or {}).get("root_workflow_run_id") or run["workflow_run_id"]
     root = run if rid == run["workflow_run_id"] else storage.get_run(rid, refresh_atomic=True)
     for ep in root.get("steering", {}).get("episodes", []):
-        if not ep["hold"] or ep["target"]["role"] != "orchestrator":
+        if not ep["hold"] or ep["target"]["role"] not in {"orchestrator", "worker"}:
             continue
         if run["workflow_run_id"] == rid or ep["target"]["workflow_run_id"] in records(storage, root)[run["workflow_run_id"]][1]:
             # Existing native/worker/invocation work may be observed. A retained

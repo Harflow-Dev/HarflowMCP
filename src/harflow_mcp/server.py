@@ -3003,7 +3003,7 @@ async def _steering_call(action: str, workflow_run_id: str, **kwargs: Any) -> di
 @mcp.tool()
 @_task_document_errors
 async def get_workflow_steering(workflow_run_id: str) -> dict[str, Any]:
-    """Read exact builder or orchestrator steering targets, revisions, holds and conversation budgets.
+    """Read exact builder, orchestrator or qualified worker targets, revisions, holds and retained history windows.
 
     Only the qualified original external caller or verified native human is eligible. A managed
     worker, builder or orchestrator has no parent/sibling steering authority. Reading issues no turn.
@@ -3017,7 +3017,8 @@ async def get_workflow_steering_history(workflow_run_id: str, cursor: str | None
     """Read a bounded ordered steering history page; cursors never authorize a mutation.
 
     Reconnect by reading the original receipt rather than resending a conversation after response
-    loss. A new external process generation cannot claim an earlier application's ownership.
+    loss while that receipt remains retained. Expired epochs refuse; history exposes gaps rather
+    than promising lifetime replay. A new external generation cannot claim earlier ownership.
     """
     return await _steering_call("history", workflow_run_id, cursor=cursor, limit=limit)
 
@@ -3025,15 +3026,20 @@ async def get_workflow_steering_history(workflow_run_id: str, cursor: str | None
 @mcp.tool()
 @_task_document_errors
 async def steer_workflow(workflow_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Explicitly request one bounded builder or orchestrator turn using the current target and revisions.
+    """Explicitly request one finite builder, orchestrator or qualified worker response with exact revisions.
 
     Open/reply/retarget require exact engine-issued identity, a unique request_id and verbatim text.
     Preserve all spaces, newlines and Unicode. Prose replies wait for another explicit caller
     request; a valid framed builder proposal stays unsaved, while a current orchestrator frame
     commits only configured validated actions. Admission holds new affected scheduling and preserves
     already issued work and active sibling evidence. There is no automatic conversational loop or
-    permission expansion. MCP cannot claim native take_owner/release_owner. Worker steering and
-    cancellation/reselection remain unsupported.
+    automatic permission expansion. Workers retain their actual configured permissions and real
+    effects. Require worker/window capabilities, explicit schema 2 upgrade and current ledger_epoch;
+    expired requests never authorize replacement. A worker needs allow_fresh_context consent and a
+    supported finite cap (at most 8 or the smaller configured cap); unqualified Resume/native refuses.
+    Steering never charges or resets normal execution counters. Dismiss does not clear the worker
+    result requirement. MCP cannot claim native take_owner/release_owner; cancellation/reselection
+    remains unsupported.
     """
     return await _steering_call("steer", workflow_run_id, request=request)
 

@@ -1,0 +1,89 @@
+{
+  "scope": "Audited affected unit profile; temporary owned roots, in-process registries and synthetic process fixtures only. Not real-provider, installed-runtime, CI, consumer or release qualification.",
+  "base_commit": "6b32c331b06752c4b5e89bcff8798772121b1cde",
+  "integration_flags": "HARFLOW_INTEGRATION and HARFLOW_CLI_INTEGRATION unset",
+  "pytest_marker_expression": "not integration and not cli_integration",
+  "selected_files": [
+    "tests/test_orchestrator_steering_core.py",
+    "tests/test_orchestrator_steering_faults.py",
+    "tests/test_orchestrator_steering_transport.py",
+    "tests/test_workflow_delegation.py",
+    "tests/test_workflow_protocol_repair.py",
+    "tests/test_workflow_goals.py",
+    "tests/test_workflow_on_demand_builder_preview.py",
+    "tests/test_workflow_on_demand_contract.py",
+    "tests/test_workflow_on_demand_native.py",
+    "tests/test_workflow_on_demand_recovery.py",
+    "tests/test_workflow_on_demand_sessions.py",
+    "tests/test_workflow_steering_classifier_corpus.py",
+    "tests/test_workflow_steering_faults.py",
+    "tests/test_workflow_steering_finalization.py",
+    "tests/test_workflow_steering_fixtures.py",
+    "tests/test_workflow_steering_handoff.py",
+    "tests/test_workflow_steering_service.py",
+    "tests/test_workflow_steering_transport.py",
+    "tests/test_workflow_supervisor_process_recovery.py",
+    "tests/test_workflow_recovery_supervision_regressions.py",
+    "tests/test_wire_contracts.py",
+    "tests/test_approval_seams.py",
+    "tests/test_workflow_run_documents.py",
+    "tests/test_workflow_receipt_documents.py",
+    "tests/test_workflow_shared_interactions.py",
+    "tests/test_workflow_interactions.py",
+    "tests/test_workflow_attention_checkpoints.py",
+    "tests/test_workflow_attention_cleanup.py",
+    "tests/test_worker_steering_core.py",
+    "tests/test_worker_steering_faults.py",
+    "tests/test_steering_window_core.py",
+    "tests/test_steering_window_faults.py",
+    "tests/test_retention.py",
+    "tests/test_workflow_resources.py",
+    "tests/test_steering_lifecycle_core.py"
+  ],
+  "deliberately_deselected": [
+    "tests/test_wire_contracts.py::test_version_info_uses_the_same_effective_home_as_path_home_without_state",
+    "tests/test_workflow_attention_checkpoints.py::test_public_mcp_workflow_controls_expose_checkpoint_without_changing_question_path"
+  ],
+  "selected_tests": 1022,
+  "forbidden_selected_markers": [],
+  "initial_frozen_run": {
+    "passed": 1016,
+    "failed": 6,
+    "deselected": 2,
+    "seconds": 663.58,
+    "source_unchanged": true
+  },
+  "scoped_unsandboxed_rerun": {
+    "passed": 6,
+    "seconds": 10.16,
+    "reason": "Owned process identity/approval pipes are unavailable in the filesystem/process sandbox; no source or assertion changes.",
+    "tests": [
+      "tests/test_workflow_supervisor_process_recovery.py::test_detached_scheduler_recovery_reuses_live_worker_without_duplicate_execution",
+      "tests/test_approval_seams.py::test_a_control_pipe_approval_round_trip_without_live_input",
+      "tests/test_approval_seams.py::test_cancelling_while_an_approval_is_pending_invalidates_it_and_writes_nothing",
+      "tests/test_approval_seams.py::test_the_pipe_stays_open_while_a_reserved_answer_still_needs_it",
+      "tests/test_approval_seams.py::test_a_turn_frame_failure_never_delivers_a_concurrently_reserved_approval",
+      "tests/test_workflow_interactions.py::test_live_client_survives_dead_server"
+    ]
+  },
+  "frozen_checked_files": 785,
+  "python_source_files": 192,
+  "frozen_file_hash_inventory_sha256": "8cd68c50c28b5517ec586efd22dbc871c3914fbaa5e0ca3c2999f3578d2c5a73",
+  "independent_review": {
+    "rounds": 1,
+    "remaining_actionable_findings": 0
+  },
+  "producer_bundle": {
+    "files": 248,
+    "manifest_sha256": "5c90aeabf0deabeff93fad75e665460575349aee67e14d7e88870d04020c5c43"
+  },
+  "handshake_generator_check": "passed",
+  "steering_generator_check": "passed",
+  "unchanged_nonsteering_mcp_schemas": 55,
+  "private_reference_guard": "passed",
+  "legacy_name_guard": "passed",
+  "whitespace_guard": "passed",
+  "protected_original_files": 5,
+  "protected_original_hashes_unchanged": true,
+  "ui": "Not applicable; producer engine API only, no consumer UI changes."
+}

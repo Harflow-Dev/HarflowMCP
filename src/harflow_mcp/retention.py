@@ -213,6 +213,31 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     protected.update(followups.protected_task_ids(log_dir))
     protected.discard(None)
 
+    # A compacted managed task cannot resume independently. Its closed-namespace
+    # receipt permits age retention without pinning every old resumed-session body.
+    workflow_storage = WorkflowStore(root=log_dir.parent)
+    retired = set()
+    from .bounded_io import read_receipt
+    from .steering_lifecycle import retired_association
+    for record in records:
+        try:
+            receipt = read_receipt(workflow_storage.owners / (record.task_id + '.json'))
+            if receipt.get('steering_binding') and retired_association(workflow_storage, receipt, record.task_id):
+                retired.add(record.task_id)
+        except Exception:
+            pass  # Unavailable proof never weakens ordinary retention pins.
+    from .resources import ResourceLedger
+    try:
+        from .steering_lifecycle import resource_task_pins
+        resource_pins, resource_unknown = resource_task_pins(workflow_storage, ResourceLedger(log_dir.parent).snapshot())
+        protected.update(resource_pins)
+        if resource_unknown:
+            protected.update(retired)
+    except Exception:
+        # Resource uncertainty cannot authorize any managed history deletion.
+        protected.update(retired)
+    protected.discard(None)
+    direct_protected = set(protected)
     protected_sessions: set[str] = set()
     while True:
         before = len(protected), len(protected_sessions)
@@ -220,10 +245,12 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
             if record.task_id in protected:
                 if record.session_id:
                     protected_sessions.add(record.session_id)
-                if record.parent_task_id:
+                if record.parent_task_id and record.parent_task_id not in retired:
                     protected.add(record.parent_task_id)
-                if record.continuation_of_task_id:
+                if record.continuation_of_task_id and record.continuation_of_task_id not in retired:
                     protected.add(record.continuation_of_task_id)
+            if record.task_id in retired and record.task_id not in direct_protected:
+                continue
             if record.parent_task_id in protected or record.session_id and record.session_id in protected_sessions:
                 protected.add(record.task_id)
                 if record.session_id:
@@ -285,10 +312,57 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
             continue
         _delete_task(log_dir, record, stats, now, _family(record.task_id, children), by_id)
 
+    _sweep_retired_owner_receipts(log_dir, stats)
     _sweep_native_events(log_dir, days, now, stats)
     _sweep_shared_scratch(log_dir, stats, now)
     return stats
 
+
+
+def _sweep_retired_owner_receipts(log_dir: Path, stats: dict[str, int]) -> None:
+    """Remove qualified sidecars only AFTER safe raw-family expiry; retry crashes.
+
+    This belongs solely to the normal live-server retention pass, never ctl or
+    inline compaction. A surviving raw record always retains its ownership proof.
+    """
+    from .workflows import WorkflowStore
+    from .bounded_io import read_receipt
+    from .steering_lifecycle import retired_association
+    storage = WorkflowStore(root=log_dir.parent)
+    try:
+        from .resources import ResourceLedger
+        from .steering_lifecycle import resource_task_pins
+        resource_ids, resource_unknown = resource_task_pins(storage, ResourceLedger(log_dir.parent).snapshot())
+        if resource_unknown:
+            return
+        from .task_supervision import scan_launches
+        launches = scan_launches(log_dir)
+        if launches.opaque:
+            return
+        pending_ids = {entry['task_id'] for entry in launches.entries if entry['state'] not in {'settled', 'not_started'} or entry.get('reconciliation_pending')} | {entry['task_id'] for entry in launches.claims} | set(launches.refusals)
+    except Exception:
+        return
+    for path in storage.owners.glob('*.json'):
+        if path.stem in resource_ids or path.stem in pending_ids:
+            continue
+        task_id = path.stem
+        try:
+            store.validate_task_id(task_id)
+            with control._flock_sync(log_dir / (task_id + '.lock'), 0, 'retired ownership cleanup', layout=task_layout(log_dir)):
+                if store.record_path(log_dir, task_id).exists():
+                    continue
+                receipt = read_receipt(path)
+                if not receipt.get('steering_binding') or not retired_association(storage, receipt, task_id):
+                    continue
+                # A late launch or active phase remains protected even without a
+                # record; normal cleanup never drops its reconciliation evidence.
+                from .phase_slots import retained
+                if retained(log_dir, task_id) or _has_active_attempt(log_dir, task_id, datetime.now(timezone.utc)):
+                    continue
+                path.unlink()
+                stats['deleted_retired_owner_receipts'] = stats.get('deleted_retired_owner_receipts', 0) + 1
+        except Exception:
+            continue  # Unknown/locked/replaced proof remains fail closed.
 
 @task_operation
 def sweep_shared_scratch(log_dir: Path, now: datetime) -> dict[str, int]:

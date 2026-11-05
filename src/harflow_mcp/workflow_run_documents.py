@@ -318,9 +318,22 @@ def _resource_attempt(value, path):
         raise ValueError(f"Malformed {path}.state")
 
 
+def _steering_digest(value, path):
+    if type(value) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", value):
+        raise ValueError(f"Malformed {path}: expected SHA256 digest")
+
+
+def _worker_steering_receipts(value, path):
+    if type(value) is not dict:
+        raise ValueError(f"Malformed {path}: expected receipt map")
+    for turn_id, digest in value.items():
+        identifier(turn_id)
+        _steering_digest(digest, f"{path}.{turn_id}")
+
+
 def _attempt(value, path):
     _shape(value, {**_fields("task_id status dispatch_stage freedom repo_path session_mode assignment_prompt execution_kind dispatch_nonce owner_task_id owner_session_id transport_task_id assignment_sha256 activity_level native_owner_execution_id error recovery_reason", numbers="reserved_at finished_at started_at timeout_deadline timeout_requested_at", booleans="usage_recovery_checkpointed native_terminal can_cancel_child can_resume_child context_acknowledged", nullable_strings="resume_task_id execution_fallback_reason native_child_id owner_session_generation"),
-                   "candidate": _candidate, "network": (bool, N), "result": _result, "resource_attempt": _resource_attempt, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
+                   "steering_turn_id": _id, "steering_superseded": bool, "candidate": _candidate, "network": (bool, N), "result": _result, "resource_attempt": _resource_attempt, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
                    "harness_metadata": _object({"requested": _candidate, "effective": _object({**_fields("backend freedom settings_source provider_identity", nullable_strings="model reasoning_effort default_model"), "network": (bool, N)}), "observed": _nullable(_result), "verification_status": str, "provenance": str, "metadata_source": str})}, path)
     missing = {"task_id", "status"} - value.keys()
     if missing:
@@ -365,7 +378,7 @@ def _pending_result(value, path):
 
 def _activation(value, path):
     _shape(value, {**_fields("id node_id role status visit_id decision_id assignment_prompt raw_output result_error pending_question_id resume_question_id turn_prompt retry_of_execution_id resolved_by_execution_id execution_kind on_demand_call_id execution_session_mode owner_task_id activity_level", numbers="created_at finished_at", arrays="resolved_execution_refs input_result_refs authorized_artifact_refs feedback_ids inspection_results", nullable_strings="execution_fallback_reason"),
-                   "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "resource_attempt": _resource_attempt, "resource_wait": dict, "resource_held_waiting_for_slot": bool, "on_demand_node": dict, "context_delivery": _context}, path)
+                   "worker_result_required": bool, "steering_superseded": bool, "steering_turn_id": _id, "worker_steering_assignment_digest": _steering_digest, "worker_steering_question_id": _id, "worker_steering_receipts": _worker_steering_receipts, "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "resource_attempt": _resource_attempt, "resource_wait": dict, "resource_held_waiting_for_slot": bool, "on_demand_node": dict, "context_delivery": _context}, path)
     missing = {"id", "node_id", "role", "status", "created_at", "tasks"} - value.keys()
     if missing:
         raise ValueError(f"Incomplete {path}: missing {', '.join(sorted(missing))}")

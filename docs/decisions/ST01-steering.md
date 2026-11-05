@@ -4,7 +4,7 @@ Date: 2026-11-05 (Asia/Jakarta). Status: proposed normative specification for pr
 Subsequent owner/primary decision, 2026-11-05: grammar/state and authority policy A accepted
 for the separately assigned ST02 builder implementation, including active-turn queueing.
 The owner subsequently authorized ST03-A orchestrator implementation using ST02 evidence as
-bounded entry. Worker policy B and ST04 adapter cancellation decisions remain later gates. Implementation
+bounded entry. The owner subsequently authorized ST03-B policy B and the shared bounded-window amendment below. ST04 adapter cancellation decisions remain a later gate. Implementation
 qualification, consumer adoption and owner acceptance are recorded separately in
 [ST02](../migration-receipts/ST02.md); candidate later-role schemas remain proposed.
 
@@ -290,23 +290,39 @@ not a claim to implement all Markdown rendering:
 
 ## 6. Accounting and side effects
 
-Candidate defaults per episode: at most 8 issued provider turns, 30-minute admission lifetime,
-32 KiB UTF-8 per caller message, at most 16 outstanding messages/root and 256 KiB pending text,
-64 KiB final reply, 1 MiB retained episode text and 32 retained episodes/root. Reject oversize
-admission/output with explicit loss metadata; do not truncate actionable command or silently
-normalize whitespace/Unicode. History retention must never remove unsettled/unknown claims or
-request/commit tombstones while replay is possible. Root limits do not reset on retarget or new
-episode: propose 32 steering issuances/root plus existing run cost/resource caps. Fixed limits
-are ordinary defaults subject to acceptance, not claims about measured safe provider costs.
+The owner-approved ST03-B amendment removes lifetime steering-count quotas for builder,
+orchestrator and worker conversations. Each explicit caller message authorizes one finite
+provider response. It never consumes, refunds, replenishes or resets ordinary execution turns,
+node attempts or decision attempts, and never authorizes an automatic conversation or repair loop.
+The 32 settled-turn and 64 settled-receipt windows are soft retention targets, not admission
+quotas; byte pressure can retire them earlier. Retained conversation text is bounded to 1 MiB
+and inline metadata to 4 MiB across representations. Caller text remains at most 32 KiB and
+final text at most 64 KiB. Each provider response has a separate finite harness cap of at most
+8, honoring a smaller configured positive cap; episode age can require explicit retargeting.
+Unknown/in-flight reservations, current managed session heads and unresolved effect claims
+are never evicted. Backpressure occurs when protected evidence cannot fit, never at a cumulative
+count. Settled effects retire only after their authoritative normal result/decision proof is durable.
+
+Storage epochs are separate from ownership/interaction epochs. Close the old request namespace
+atomically before pruning its receipts. Retained exact requests replay their original receipt;
+a missing retired-epoch request expires and cannot spawn or grant authority. The same UUID in
+a new epoch is an explicitly NEW scoped request, not replay of an old one. History uses absolute
+sequences and explicit gaps; lifetime raw transcript or exact replay is not promised. Permanent
+issuance accounting and observed usage survive compaction; missing cost/usage stays unknown.
+Task-bearing evidence can retire only after durable managed ownership and current session-head
+proof prevent surviving raw tasks from becoming independently resumable. Qualified v1 migration
+requires explicit schema 2 upgrade by the original qualified caller or verified native human;
+no automatic state import, ownership transfer or consumer adoption is implied.
 
 Reserve a separate `conversation_issuance` before dispatch, with immutable request ID, turn ID,
-provider task ID, maximum allowed cost reservation and candidate binding. It never increments
+provider task ID, separate resource reservation and candidate binding. No generic hard dollar cap is claimed. It never increments
 then refunds `decision_attempts` or a worker graph attempt. Issuance count is charged permanently
-even for failed/no-start/unknown turns; the same proven-not-started issuance may retry delivery
-without buying a new turn. Actual provider token/cost/harness-turn usage is recorded independently
+even for failed/no-start/unknown turns. An unresolved delivery cannot be replaced by a new request.
+Actual provider token/cost/harness-turn usage is recorded independently
 with observed/estimated/unavailable provenance and ordinary run statistics. Unknown spend keeps
 the reserved upper bound; never report zero. No automatic repair turn or fallback after uncertain
-launch. Known not-started fallback uses configured candidates only and the same issuance intent.
+launch. A positively never-started response settles its issuance; another response requires a new
+explicit caller message under the configured candidate policy.
 
 A valid orchestrator command consumes one normal decision acceptance allowance atomically at
 commit (also require that allowance remains). A refused steering command consumes its conversation
@@ -314,12 +330,11 @@ issuance/refusal count, not an invisible execution retry. Worker final commits t
 existing node activation; it does not create another attempt. Builder proposal uses its existing
 draft CAS. Budgets for inspect/on-demand actions remain independently effective.
 
-Worker policy (material owner decision B): each worker steering provider launch additionally
-consumes a nonrefundable `worker_tool_turn` unit from a node allowance, proposed default zero
-until explicitly enabled in the saved node policy. Proposed enabled maximum 4 per activation,
-with all launches charged to the same run provider-cost/resource envelope as execution. This is
-additional tool opportunity, so accepting ST03-B requires an explicit policy amendment; graph
-attempt caps alone cannot bound it. Unknown attempts retain tool/cost reservations. Unchanged
+Worker policy B is owner-approved for ST03-B: every explicit authorized message grants one
+finite separately accounted response, without a fixed lifetime node/activation/root count or
+extra `worker_tool_turn` quota. Existing configured resources and permissions remain effective;
+actual issuance and observed usage persist, and unknown reservations are never treated as zero.
+Unchanged
 backend/network/filesystem/tool permissions apply to all role conversations unless independently
 qualified restriction exists. No enforceable per-shell-side-effect count is claimed; reject a
 policy demanding such a count on an adapter without it. Tool calls may write files, spend money
@@ -352,7 +367,7 @@ adapter seams. Backend qualification requires later assigned deterministic evide
 Keep `harflow.ctl` v1 envelopes and independent capability gates. Add capabilities incrementally:
 `workflow-steering-read.v1`, `workflow-steering-builder.v1`,
 `workflow-steering-orchestrator.v1`, `workflow-steering-worker.v1`,
-`workflow-steering-replan.v1`. An engine advertises a role only once implemented/qualified;
+`workflow-steering-window.v1`; `workflow-steering-replan.v1` remains a later candidate. An engine advertises a role only once implemented/qualified;
 version-info is static supported functionality, not per-run caller authorization. Observations
 return current eligible actions with reasons, never a guarantee a later mutation will pass.
 
@@ -568,7 +583,7 @@ normalizer or production reservation state as its expected-result oracle.
 | Stale goal, graph snapshot, branch completion, assignment, draft preview, question/approval, root/source link, owner epoch | Zero command effects; exact stale reason; explicit retarget keeps prior text/evidence and budgets. |
 | Classifier corpus, quoted JSON/IDs, nested/fenced examples, malformed/duplicate/multiple commands, failures with valid-looking command | Reference outcomes from section 5; no substring trigger or invalid-to-prose downgrade. |
 | No-steering plain prose/JSON; ordinary queued context with steering-like text | Existing protocol failures/validators unchanged; queued text never opens episode. |
-| Separate turn/provider cost; not-started/failure/unknown/fallback; exhausted decision/node allowance | Issuance monotonic; no refund; provider cost provenance/unknown reservation; worker tool units charged; no hidden execution retry. |
+| Separate turn/provider cost; not-started/failure/unknown/fallback; exhausted decision/node allowance | Issuance monotonic; no refund; provider cost provenance/unknown reservation; separate finite response reservation; no hidden execution retry. |
 | Disconnect/reconnect same external process; new process generation; managed task masquerading via ctl/MCP; native takeover/revoke during turn | Same identity can read receipt; new/unknown refuses; revoked output cannot commit; no leaked root metadata. |
 | Verified nested target, foreign/cyclic/missing links, partial parallel completion | Only bound source controlled; unavailable remains unknown; already completed branch preserved. |
 | Worker tools/assignment/graph/root-checklist abuse; successive own builder previews, replayed preview response, older commit witness, external draft/source edit, old Apply/Save | Existing privileges enforced; tools may have real effects; proposal CAS and explicit Apply/Save remain; zero root authority from conversation. |
@@ -599,14 +614,14 @@ Concrete failure traces to preserve as regressions:
 | --- | --- | --- |
 | ST02 builder | Owner/primary accepts ST01 proposed authority policy A and grammar/state; explicit implementation assignment | New shared service, qualified persistence/idempotency/budgets/ctl+MCP read+builder capability, no-auto-loop steering route; builder draft-only proposal path and Apply/Save tests; deterministic model and fixtures. Do not alter ordinary create autosave semantics. |
 | ST03-A orchestrator | Accepted ST01 and ST02 evidence | Safe boundary/hold integration through root/nested decision reservations; strict normal protocol unchanged; configured actions only, revision/commit races, no duplicate spawn; canonical producer fixtures and agent MCP semantics. |
-| ST03-B worker | ST03-A evidence and explicit owner policy B | Enabled node tool-turn accounting, backend-qualified caps, immutable assignment/activation validation and real side-effect disclosure; no sibling/root authority. Default-disabled policy cannot be called worker completion. |
+| ST03-B worker | ST03-A evidence and explicit owner policy B | Separate durable response accounting, backend-qualified finite caps, immutable assignment/activation validation and real side-effect disclosure; no sibling/root authority. No lifetime steering-count quota. |
 | ST04 replan | ST03-A/B and accepted scoped settlement/control policy per adapter | Exact prestart withdrawal and postsettlement linked attempts, parallel preservation, unknown nonreplacement, independent process/effect oracles. Unqualified containment blocks only the affected cancellation mode. |
 | ST05 native suffixes | Implemented accepted producer subset + immutable fixture identity for each role/control slice | New typed ctl calls, fresh role gates, optional projections/event mapping, existing transcript/composer/status states, stale draft preservation and concurrent response tests; no MCP/private state fallback. M07/M08/M09/M12 carry acceptance. |
 | ST06 Rust suffixes | Accepted producer subset plus relevant R07/R10/R11 foundations | Independent application/domain state and authority/ctl/MCP mapping, pinned fixtures, same deterministic behavioral model and external effect oracles; R11/R14/I04 gates include it BEFORE O04 transfer. Can consume accepted role subsets incrementally. |
 
 Material decisions requiring adjudication are narrow: A (local process-bound external eligibility,
 shared native responder and explicit monitor-only revocation; restarted external enrollment remains
-unsupported), B (additional worker tool opportunities and limits), and ST04 adapter settlement/
+unsupported), the accepted B/shared-window amendment above, and ST04 adapter settlement/
 cancellation authority before that phase. Hard budget enforcement may exclude an adapter until
 qualified; accepting weaker estimate-only spend limits would be a separate explicit policy change.
 Routine schema names, separate paused/steering projection, strict frame grammar and conservative

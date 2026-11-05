@@ -37,6 +37,10 @@ def _timestamp(value, field):
 
 def _target(value, root_id):
     _require(type(value) is dict and set(value) == TARGET_KEYS, "target fields")
+    if value["role"] == "worker":
+        from .worker_steering import validate_target
+        validate_target(value, root_id)
+        return
     if value["role"] == "orchestrator":
         _require(value["root_workflow_run_id"] == root_id and type(value["path"]) is list and 1 <= len(value["path"]) <= 64 and value["path"][0] == root_id and value["path"][-1] == value["workflow_run_id"] and len(set(value["path"])) == len(value["path"]), "orchestrator target path")
         for item in value["path"]:
@@ -123,14 +127,30 @@ def _observation(turn):
 
 def validate_ledger(value, run):
     required = set("schema_version control_revision checkpoint_revision sequence episodes requests turns commits history owner".split())
-    _require(type(value) is dict and set(value) == required and type(value["schema_version"]) is int and value["schema_version"] == 1, "schema")
+    modern = type(value) is dict and value.get("schema_version") == 2
+    if modern:
+        from .steering_window import WINDOW_FIELDS
+        required |= WINDOW_FIELDS
+        if "compaction_pending" in value:
+            required.add("compaction_pending")
+    _require(type(value) is dict and set(value) == required and type(value["schema_version"]) is int and value["schema_version"] in {1, 2}, "schema")
+    if modern:
+        for key in ("ledger_epoch", "closed_epoch", "history_floor"):
+            _counter(value[key], key)
+        _require(value["closed_epoch"] < value["ledger_epoch"], "closed namespace")
+        cumulative = value["cumulative"]
+        _require(type(cumulative) is dict and set(cumulative) in ({"issuances", "retired_turns", "observed_cost_usd", "observed_num_turns", "unknown_usage", "reserved_harness_turns"}, {"issuances", "retired_turns", "observed_cost_usd", "observed_num_turns", "unknown_usage", "reserved_harness_turns", "unknown_cost", "unknown_num_turns"}), "cumulative fields")
+        for key in set(cumulative) - {"observed_cost_usd"}:
+            _counter(cumulative[key], "cumulative " + key)
+        _require(type(cumulative["observed_cost_usd"]) in {int, float} and math.isfinite(cumulative["observed_cost_usd"]) and cumulative["observed_cost_usd"] >= 0, "cumulative cost")
+        _require(cumulative["issuances"] == cumulative["retired_turns"] + len(value["turns"]), "cumulative issuance")
     _counter(run.get("interaction_epoch"), "interaction_epoch")
     _require(value["owner"] in {"caller", "monitor"}, "owner")
     for key in ("control_revision", "checkpoint_revision", "sequence"):
         _counter(value[key], key)
     for key, limit in (("episodes", 32), ("turns", 32), ("commits", 32), ("history", 512)):
-        _require(type(value[key]) is list and len(value[key]) <= limit and all(type(v) is dict for v in value[key]), key)
-    _require(type(value["requests"]) is dict and len(value["requests"]) <= 256, "requests")
+        _require(type(value[key]) is list and (modern or len(value[key]) <= limit) and all(type(v) is dict for v in value[key]), key)
+    _require(type(value["requests"]) is dict and (modern or len(value["requests"]) <= 256), "requests")
     root_id = run["workflow_run_id"]
     episodes = {}
     for ep in value["episodes"]:
@@ -153,17 +173,21 @@ def validate_ledger(value, run):
     per_episode = {}
     for turn in value["turns"]:
         required_turn = set("turn_id task_id episode_id request_id state target commit_target commit_target_ref candidate text created_at allow_fresh_context usage previous_session steering_revision preview_receipts harness_turn_cap boundary_task_id".split())
-        optional = {"witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id"}
+        optional = {"witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id", "response_deadline"}
         _require(required_turn <= set(turn) and not set(turn) - required_turn - optional, "turn fields")
         _id(turn["turn_id"], "turn_id"); _id(turn["task_id"], "task_id")
         _require(turn["turn_id"] not in turns and turn["task_id"] not in tasks, "duplicate turn/task")
         turns[turn["turn_id"]] = turn; tasks.add(turn["task_id"])
         _require(turn["episode_id"] in episodes and turn["request_id"] in value["requests"], "turn links")
         per_episode[turn["episode_id"]] = per_episode.get(turn["episode_id"], 0) + 1
-        _require(per_episode[turn["episode_id"]] <= 8, "episode turn budget")
+        _require(modern or per_episode[turn["episode_id"]] <= 8, "episode turn budget")
         _require(turn["state"] in {"queued", "reserved", "spawn_intent", "running", "unknown", "captured", "settled"}, "turn state")
         _target(turn["target"], root_id); _target(turn["commit_target"], root_id)
+        worker = turn["target"]["role"] == "worker"
         orchestration = turn["target"]["role"] == "orchestrator"
+        if worker:
+            from .worker_steering import validate_turn
+            validate_turn(turn, run)
         extension = {"boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery"}
         if orchestration:
             _require({"boundary_tasks", "session_owner_run_id", "handoff"} <= set(turn), "orchestrator issuance fields")
@@ -203,7 +227,7 @@ def validate_ledger(value, run):
                     from .workflow_context import acknowledged_receipt
                     _require(acknowledged_receipt(turn["context_delivery"], intent["command"].get("context_ack")) is not None, "action context acknowledgement")
                 _require(intent["state"] != "acknowledged" or turn["state"] == "settled" and turn.get("outcome") == "committed", "action acknowledged outcome")
-        else:
+        elif not worker:
             _require(not set(turn) & extension, "builder orchestrator fields")
         _require(type(turn["commit_target_ref"]) is str and re.fullmatch(r"commit-target:[a-f0-9]{32}", turn["commit_target_ref"]), "commit_target_ref")
         _counter(turn["steering_revision"], "turn revision", True)
@@ -212,6 +236,8 @@ def validate_ledger(value, run):
         _require(turn["harness_turn_cap"] <= 8, "harness_turn_cap budget")
         _require(type(turn["allow_fresh_context"]) is bool and type(turn["text"]) is str and bool(turn["text"].strip()) and len(turn["text"].encode()) <= 32768, "turn input")
         _timestamp(turn["created_at"], "turn created_at")
+        if "response_deadline" in turn:
+            _timestamp(turn["response_deadline"], "response deadline")
         candidate = turn["candidate"]
         allowed_candidate = set("backend model reasoning_effort max_turns background_idle_seconds caller_approvals caller_write_approvals allowed_commands observe_repos git_https_rewrite group_report_output fallbacks instructions".split())
         _require(type(candidate) is dict and type(candidate.get("backend")) is str and bool(candidate["backend"]) and not set(candidate) - allowed_candidate, "candidate")
@@ -263,11 +289,20 @@ def validate_ledger(value, run):
             _require(type(turn.get("outcome")) is str, "settled outcome")
     for key, receipt in value["requests"].items():
         try:
-            valid_uuid = str(uuid.UUID(key)) == key
+            identity_key = key.split(":", 1)[-1] if modern else key
+            valid_uuid = str(uuid.UUID(identity_key)) == identity_key
         except (ValueError, TypeError, AttributeError):
             valid_uuid = False
         required_receipt = set("request_id payload_digest episode_id steering_revision interaction_epoch control_revision sequence state turn_id task_id accepted scheduled replayed next_action principal_binding".split())
-        _require(valid_uuid and type(receipt) is dict and set(receipt) == required_receipt and receipt["request_id"] == key, "request identity/fields")
+        if modern:
+            required_receipt.add("ledger_epoch")
+            _counter(receipt.get("ledger_epoch"), "receipt ledger epoch")
+            _require(receipt["ledger_epoch"] <= value["ledger_epoch"], "receipt future epoch")
+            _require(key == f'{receipt["ledger_epoch"]}:{identity_key}' or receipt["ledger_epoch"] == 0 and key == identity_key, "scoped receipt namespace")
+            if "retired_turn" in receipt:
+                _require(receipt["retired_turn"] is True, "retired turn proof")
+                required_receipt.add("retired_turn")
+        _require(valid_uuid and type(receipt) is dict and set(receipt) == required_receipt and receipt["request_id"] == identity_key, "request identity/fields")
         _digest(receipt["payload_digest"], "payload digest"); _digest(receipt["principal_binding"], "principal binding")
         for name in ("interaction_epoch", "control_revision", "sequence"):
             _counter(receipt[name], "receipt " + name)
@@ -277,18 +312,30 @@ def validate_ledger(value, run):
         if receipt["episode_id"] is not None:
             _require(receipt["episode_id"] in episodes, "receipt episode")
             _counter(receipt["steering_revision"], "receipt revision", True)
-        if receipt["turn_id"] is not None:
+        if receipt["turn_id"] is not None and not receipt.get("retired_turn"):
             _require(receipt["turn_id"] in turns and turns[receipt["turn_id"]]["request_id"] == key and turns[receipt["turn_id"]]["task_id"] == receipt["task_id"], "receipt turn")
+    if modern and "compaction_pending" in value:
+        pending = value["compaction_pending"]
+        _require(type(pending) is dict and set(pending) == {"turn_ids", "effect_turn_ids"}, "compaction intent fields")
+        for key in pending:
+            _require(type(pending[key]) is list and len(pending[key]) <= len(turns) and len(set(pending[key])) == len(pending[key]), "compaction intent ids")
+            for tid in pending[key]:
+                _require(tid in turns and turns[tid]["state"] == "settled", "compaction settled proof")
+                _require(not turns[tid].get("action_commit") or turns[tid]["action_commit"]["state"] == "acknowledged", "compaction unresolved effect")
+                _require(turns[tid]["task_id"] not in {v.get("task_id") for v in run.get("sessions", {}).values() if type(v) is dict}, "compaction current session")
+        _require(set(pending["effect_turn_ids"]) <= set(pending["turn_ids"]), "compaction effect subset")
+        for tid in pending["effect_turn_ids"]:
+            _require(not turns[tid].get("action_commit") or turns[tid]["action_commit"]["state"] == "acknowledged", "compaction acknowledged effect")
     committed = set()
     for commit in value["commits"]:
         _require(set(commit) == {"turn_id", "episode_id", "commit_target_ref", "definition_digest"} and commit["turn_id"] in turns and commit["turn_id"] not in committed, "commit identity")
         turn = turns[commit["turn_id"]]; committed.add(commit["turn_id"])
         _require(turn["episode_id"] == commit["episode_id"] and turn["commit_target_ref"] == commit["commit_target_ref"], "commit witness")
         _digest(commit["definition_digest"], "committed definition digest")
-    sequence = 0
+    sequence = value["history_floor"] if modern else 0
     for entry in value["history"]:
         _counter(entry.get("sequence"), "history sequence", True)
-        _require(entry["sequence"] == sequence + 1 and type(entry.get("kind")) is str, "history order")
+        _require((entry["sequence"] > sequence if modern else entry["sequence"] == sequence + 1) and type(entry.get("kind")) is str, "history order")
         _timestamp(entry.get("timestamp"), "history timestamp")
         sequence = entry["sequence"]
     _require(sequence == value["sequence"], "history tail")

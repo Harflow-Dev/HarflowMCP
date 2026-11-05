@@ -1065,3 +1065,70 @@ def test_late_artifact_registration_and_finish_preserve_snapshot_ancestors(tmp_p
     assert all(store.read(log_dir, identifier) for identifier in ('child', 'parent', 'grandparent'))
     monkeypatch.setattr(artifacts, '_caller', lambda _: None)
     assert artifacts.get(log_dir, 'child')['items'][0]['availability']['state'] == 'available'
+
+
+@pytest.mark.parametrize('guard', [None, 'resource', 'unknown', 'current_head', 'malformed', 'missing_root', 'workflow_resource'])
+def test_compacted_managed_session_history_ages_safely_with_owner_sidecar(tmp_path, monkeypatch, guard):
+    from harflow_mcp.workflows import WorkflowStore, _write
+    from harflow_mcp.workflow_receipt_documents import encode
+    from harflow_mcp.resources import ResourceLedger
+    log_dir = tmp_path / 'tasks'
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    old = make_record(task_id='old-steering', session_id='shared', output_drained=True,
+                      exit_code=None if guard == 'unknown' else 0)
+    head = make_record(task_id='current-head', session_id='shared', output_drained=True,
+                       finished_at=_iso(now - timedelta(days=1)))
+    for record in (old, head):
+        assert store.write_landed(log_dir, record)
+    output = log_dir / 'old-steering.stdout'
+    output.write_text('old provider transcript')
+    storage = WorkflowStore(root=tmp_path)
+    owner = storage.owners / 'old-steering.json'
+    receipt = {'workflow_run_id': 'root', 'root_workflow_run_id': 'root', 'workflow_execution_id': 'original',
+               'workflow_node_id': 'worker', 'workflow_role': 'node', 'steering_binding': {
+                   'v': 1, 'root_workflow_run_id': 'root', 'task_id': 'old-steering', 'turn_id': 'old-turn', 'ledger_epoch': 0, 'role': 'worker'}}
+    document = encode(receipt, 'old-steering')
+    if guard == 'malformed':
+        document['receipt']['steering_binding']['v'] = True
+    _write(owner, document, layout=storage.state_layout)
+    root = {'workflow_run_id': 'root', 'kind': 'builder', 'status': 'running', 'steering': {'schema_version': 2, 'closed_epoch': 0, 'turns': []}}
+    if guard == 'workflow_resource':
+        root['activations'] = [{'id': 'original', 'tasks': [], 'resource_attempt': {'id': 'resource-attempt-one', 'task_id': 'old-steering', 'state': 'granted'}}]
+    def get_root(*a, **k):
+        if guard == 'missing_root':
+            from harflow_mcp.workflows import WorkflowError
+            raise WorkflowError('Root unavailable')
+        return root
+    monkeypatch.setattr(WorkflowStore, 'get_run', get_root)
+    monkeypatch.setattr(WorkflowStore, 'pinned_tasks', lambda _: {'current-head'} | ({'old-steering'} if guard == 'current_head' else set()))
+    reservations = [{'holders': [{'owner': {'task_id': 'old-steering'}}], 'queue': []}] if guard == 'resource' else []
+    if guard == 'workflow_resource':
+        reservations = [{'holders': [{'owner': {'kind': 'workflow_attempt', 'workflow_run_id': 'root', 'activation_id': 'resource-attempt-one'}}], 'queue': []}]
+    monkeypatch.setattr(ResourceLedger, 'snapshot', lambda _: reservations)
+    stats = retention.sweep(log_dir, 30, now)
+    assert store.read(log_dir, 'current-head') is not None
+    if guard is None:
+        assert store.read(log_dir, 'old-steering') is None
+        assert not output.exists() and not owner.exists()
+        assert stats['deleted_retired_owner_receipts'] == 1
+    else:
+        assert store.read(log_dir, 'old-steering') is not None
+        assert output.exists() and owner.exists()
+
+
+def test_retired_owner_sidecar_cleanup_retries_after_raw_family_already_expired(tmp_path, monkeypatch):
+    from harflow_mcp.workflows import WorkflowStore, _write
+    from harflow_mcp.workflow_receipt_documents import encode
+    storage = WorkflowStore(root=tmp_path)
+    log_dir = tmp_path / 'tasks'
+    log_dir.mkdir(exist_ok=True)
+    path = storage.owners / 'old.json'
+    receipt = {'workflow_run_id': 'root', 'root_workflow_run_id': 'root', 'steering_binding': {
+        'v': 1, 'root_workflow_run_id': 'root', 'task_id': 'old', 'turn_id': 'turn', 'ledger_epoch': 0, 'role': 'worker'}}
+    _write(path, encode(receipt, 'old'), layout=storage.state_layout)
+    monkeypatch.setattr(WorkflowStore, 'get_run', lambda *a, **k: {'workflow_run_id': 'root', 'kind': 'builder', 'status': 'running', 'steering': {'schema_version': 2, 'closed_epoch': 0, 'turns': []}})
+    stats = {}
+    retention._sweep_retired_owner_receipts(log_dir, stats)
+    assert not path.exists()
+    assert stats == {'deleted_retired_owner_receipts': 1}

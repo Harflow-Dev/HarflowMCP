@@ -2065,8 +2065,7 @@ unsupported adapters refuse rather than silently dropping a cap. Issuance and ob
 usage are accounted separately from execution attempts. Unknown launch/delivery/capture outcomes
 are retained for observation and never automatically replayed.
 
-Builder/read and the separately gated orchestrator subset are implemented in source. Worker
-steering and scoped cancellation/replanning remain unavailable. See [steering contracts](contracts.md#builder-conversation-steering)
+Builder/read, orchestrator and separately gated qualified worker steering are implemented in source. Scoped cancellation/replanning remains unavailable. See [steering contracts](contracts.md#builder-conversation-steering)
 and the accepted [ST01 specification](decisions/ST01-steering.md) for framing, authority and
 state-model rationale.
 
@@ -2098,3 +2097,42 @@ without scheduling; resumption uses its actual checkpoint. Native ownership take
 in-flight command authority without killing a harness. There is no worker tool-policy expansion,
 external process-restart enrollment or approval-answering endpoint. See the precise
 [orchestrator contract](contracts.md#orchestrator-conversation-steering).
+
+## Explicit worker steering and bounded history
+
+Check fresh `workflow-steering-worker.v1` and `workflow-steering-window.v1` capabilities. Use the
+same root steering status, steer and history operations. Select an engine-issued worker target
+and echo every identity/revision. Worker conversations retain actual configured permissions and
+real tool effects. Every explicit message authorizes one finite response, at most 8 harness turns
+or a smaller configured positive cap; ordinary execution counters are neither charged nor reset.
+Explicit Fresh context consent (`allow_fresh_context:true`) is required. Unqualified Resume/native
+limits refuse. Prose waits; only a current strict framed result can commit once to the original
+activation. Dismiss does not clear `worker_result_required` or authorize another execution attempt.
+Connected worker questions use their normal question identity; after answering, explicitly request
+the next response. Specialist/on-demand asking is unsupported. Existing approvals remain separate.
+
+Qualified legacy roots expose `protocol_upgrade` in status. Send schema 2 `action:"upgrade"` with
+`ledger_epoch:0`, a new canonical UUID, expected interaction/control revisions and bounded reason;
+only the original qualified caller or verified native human can do this. Refresh status and send
+new schema 2 requests with its current `ledger_epoch`. Upgrade preserves proofs and changes the
+storage epoch 0 to 1, without transferring ownership. Retained requests replay exactly; expired
+old-epoch requests refuse without spawn. The same UUID in a current epoch is a deliberately NEW
+request requiring a current target and authority, not replay recovery.
+
+The shared builder/orchestrator/worker service has no lifetime steering-count quota. It retains
+soft windows of32 settled turns and 64 settled receipts, possibly less under 1 MiB text/4 MiB inline
+metadata pressure. In-flight/unknown claims, current sessions and unresolved effects are protected;
+unfittable protected evidence causes byte backpressure. History explicitly reports gaps and does
+not promise lifetime transcript/replay. Cumulative issuance and observed/unknown usage survive
+compaction. Managed task bindings and safe raw-task retention prevent old surviving tasks from
+becoming ordinary resumable work. No consumer adoption or release is implied. See the
+[full contract](contracts.md#worker-steering-and-bounded-windows).
+
+Raw provider TaskRecords and logs follow the normal live-server retention age policy (30 days
+by default), with its existing settlement, launch, phase, resource, artifact, follow-up, descendant
+and session/task-lock safeguards. Compacted managed tasks can expire without pinning every older
+body solely because a current checkpoint uses the same session. Their qualified ownership receipt
+survives until the raw family is safely gone, and interrupted sidecar cleanup retries on later
+sweeps. Missing roots or malformed bindings never authorize this exemption. Disabling task
+retention deliberately retains raw records/logs; the inline 32/64 windows are not a total raw-disk
+quota. ctl and steering compaction do not start a retention sweep.

@@ -14,17 +14,28 @@ def admit(storage, run, principal, monitor, request, digest, binding):
     result = None
     _authorize(run, principal, monitor)
     s = run["steering"]
-    previous = s["requests"].get(request["request_id"])
+    request_key = f'{request["ledger_epoch"]}:{request["request_id"]}' if request.get("schema_version", 1) == 2 else request["request_id"]
+    previous = s["requests"].get(request_key)
     if previous:
         if previous["payload_digest"] != digest or previous.get("principal_binding") != binding:
             raise SteeringError("request_payload_conflict", "Request identity already has a different payload")
         result = {**copy.deepcopy(previous), "replayed": True}
         result.pop("principal_binding", None)
-        old_turn = next((t for t in s["turns"] if t["request_id"] == request["request_id"]), None)
+        result.pop("retired_turn", None)
+        if request.get("schema_version", 1) == 1:
+            result.pop("ledger_epoch", None)
+        old_turn = next((t for t in s["turns"] if t["request_id"] == request_key), None)
         scheduled = bool(old_turn and old_turn["state"] in {"queued", "reserved", "spawn_intent", "running", "captured", "unknown"})
         return result, scheduled
-    if len(s["requests"]) >= REQUESTS or len(s["history"]) >= 500:
-        raise SteeringError("steering_queue_full", "Durable steering receipt capacity reached")
+    from .steering_window import check_namespace
+    if request["action"] != "upgrade":
+        check_namespace(s, request)
+        if s["schema_version"] == 1 and (len(s["requests"]) >= REQUESTS or len(s["history"]) >= 500):
+            raise SteeringError("steering_queue_full", "Legacy receipt storage is full; explicitly upgrade to epoch-scoped steering")
+    elif s["schema_version"] != 1 or request.get("schema_version") != 2 or request.get("ledger_epoch") != 0:
+        raise SteeringError("request_expired", "Only a qualified legacy ledger can explicitly upgrade from epoch0")
+    if request.get("target", {}).get("role") == "worker" and s["schema_version"] != 2:
+        raise SteeringError("steering_source_unavailable", "Worker steering requires explicit schema_version2 upgrade before admission")
     if request["action"] in {"open", "reply", "retarget"}:
         _source_check(storage, run)
     if request["expected_interaction_epoch"] != run["interaction_epoch"]:
@@ -34,7 +45,10 @@ def admit(storage, run, principal, monitor, request, digest, binding):
     action = request["action"]
     ep = None
     turn = None
-    if action in {"take_owner", "release_owner"}:
+    if action == "upgrade":
+        from .steering_window import upgrade
+        upgrade(run)
+    elif action in {"take_owner", "release_owner"}:
         if not monitor:
             raise SteeringError("steering_not_owner", "Ownership changes require a verified native human")
         if action == "release_owner":
@@ -83,7 +97,10 @@ def admit(storage, run, principal, monitor, request, digest, binding):
             orchestration = run.get("kind") != "builder"
             boundary_tasks, owner_id = [], run["workflow_run_id"]
             if orchestration:
-                from .orchestrator_steering import admission
+                if request["target"].get("role") == "worker":
+                    from .worker_steering import admission
+                else:
+                    from .orchestrator_steering import admission
                 candidate, previous_session, boundary_tasks, owner_id = admission(storage, run, request)
                 active_tasks = [{"task_id": b["task_id"], "status": "running"} for b in boundary_tasks]
             else:
@@ -98,13 +115,11 @@ def admit(storage, run, principal, monitor, request, digest, binding):
             retained = sum(len(t.get("text", "").encode()) + len(t.get("final", "").encode()) for t in s["turns"])
             if retained + len(request["text"].encode()) + 64 * 1024 > 1024 * 1024:
                 raise SteeringError("steering_queue_full", "Root retained conversation text capacity reached")
-            if len(s["turns"]) >= ROOT_TURNS:
-                raise SteeringError("steering_budget_exhausted", "Root conversation issuance limit reached")
             if action == "open" and held(run):
                 raise SteeringError("steering_busy", "Reply, retarget or dismiss the existing held episode")
             if action in {"open", "retarget"}:
-                if len(s["episodes"]) >= EPISODES:
-                    raise SteeringError("steering_queue_full", "Episode capacity reached")
+                if s["schema_version"] == 1 and len(s["episodes"]) >= EPISODES:
+                    raise SteeringError("steering_queue_full", "Legacy episode storage is full; explicitly upgrade to epoch-scoped steering")
                 if action == "retarget":
                     if request.get("supersedes_episode_id") != ep["episode_id"]:
                         raise SteeringError("malformed_command", "Retarget must explicitly identify predecessor")
@@ -118,12 +133,12 @@ def admit(storage, run, principal, monitor, request, digest, binding):
                 if ep["state"] not in {"awaiting_caller", "command_refused"} or time.time() - ep["created_at"] > 1800:
                     raise SteeringError("request_expired", "Episode is not open for another turn; explicitly retarget")
                 ep["steering_revision"] += 1
-            if sum(t["episode_id"] == ep["episode_id"] for t in s["turns"]) >= EPISODE_TURNS:
-                raise SteeringError("steering_budget_exhausted", "Episode conversation issuance limit reached")
+            if s["schema_version"] == 1 and (len(s["turns"]) >= ROOT_TURNS or sum(t["episode_id"] == ep["episode_id"] for t in s["turns"]) >= EPISODE_TURNS):
+                raise SteeringError("steering_budget_exhausted", "Legacy ledger requires explicit epoch-scoped upgrade")
             if not orchestration:
                 candidate = copy.deepcopy(run["definition"]["orchestrator"])
             from .tasks import get_backend
-            if candidate.get("caller_approvals") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
+            if (candidate.get("caller_approvals") and request["target"].get("role") != "worker") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
                 raise SteeringError("steering_budget_unsupported", "Selected builder adapter cannot enforce a finite harness-turn cap")
             if not orchestration:
                 previous_session = run.get("sessions", {}).get("builder")
@@ -135,7 +150,7 @@ def admit(storage, run, principal, monitor, request, digest, binding):
             s["control_revision"] += 1
             witness = target(run, storage, request["target"])
             turn = {"turn_id": uuid.uuid4().hex, "task_id": uuid.uuid4().hex, "episode_id": ep["episode_id"],
-                    "request_id": request["request_id"], "state": "queued" if queued else "reserved", "target": copy.deepcopy(witness),
+                    "request_id": request_key, "state": "queued" if queued else "reserved", "target": copy.deepcopy(witness),
                     "commit_target": copy.deepcopy(witness), "commit_target_ref": "commit-target:" + uuid.uuid4().hex,
                     "candidate": candidate, "text": request["text"], "created_at": time.time(),
                     "allow_fresh_context": request.get("allow_fresh_context", False), "usage": {"provenance": "unavailable", "reserved_harness_turns": min(candidate.get("max_turns") or 8, 8)},
@@ -143,10 +158,16 @@ def admit(storage, run, principal, monitor, request, digest, binding):
             if orchestration:
                 turn.update(boundary_tasks=boundary_tasks, session_owner_run_id=owner_id, handoff={"intent_id": turn["turn_id"], "state": "intent", "workflow_run_id": witness["workflow_run_id"]})
             s["turns"].append(turn)
+            if witness["role"] == "worker":
+                from .worker_steering import claim
+                claim(storage, run, turn)
+            if s["schema_version"] == 2:
+                s["cumulative"]["issuances"] += 1
             ep.update(state="queued_boundary" if queued else "turn_reserved", target=witness, hold=True)
             if not queued and not orchestration:
                 run["status"] = "starting"
-            run["attention_reason"] = "Conversation is waiting for caller; use steering capability"
+            if witness["role"] != "worker" or run["status"] in {"running", "starting", "paused"}:
+                run["attention_reason"] = "Conversation is waiting for caller; use steering capability"
             scheduled = True
     if not scheduled:
         s["control_revision"] += 1
@@ -158,5 +179,7 @@ def admit(storage, run, principal, monitor, request, digest, binding):
               "turn_id": turn["turn_id"] if turn else None, "task_id": turn["task_id"] if turn else None,
               "accepted": True, "scheduled": scheduled, "replayed": False,
               "next_action": "Observe the same issuance" if scheduled else "Refresh steering status"}
-    s["requests"][request["request_id"]] = {**copy.deepcopy(result), "principal_binding": binding}
+    if s["schema_version"] == 2:
+        result["ledger_epoch"] = request.get("ledger_epoch", s["ledger_epoch"])
+    s["requests"][request_key] = {**copy.deepcopy(result), "principal_binding": binding}
     return result, scheduled

@@ -48,6 +48,17 @@ def _payload(value: Any) -> None:
                 raise ValueError(f"Invalid receipt.{field}") from None
 
 
+def validate_steering_binding(binding, task_id=None):
+    if type(binding) is not dict or set(binding) != {'v', 'root_workflow_run_id', 'task_id', 'turn_id', 'ledger_epoch', 'role'}:
+        raise ValueError('Invalid steering ownership binding fields')
+    if type(binding['v']) is not int or binding['v'] != 1 or type(binding['ledger_epoch']) is not int or binding['ledger_epoch'] < 0 or binding['role'] not in {'builder', 'orchestrator', 'worker'}:
+        raise ValueError('Invalid steering ownership binding version/epoch/role')
+    for key in ('root_workflow_run_id', 'task_id', 'turn_id'):
+        identifier(binding[key])
+    if task_id is not None and binding['task_id'] != task_id:
+        raise ValueError('Steering binding task does not match receipt filename')
+
+
 def decode(document: Any, task_id: str) -> dict[str, Any]:
     """Return qualified inner ownership without adding optional fields."""
     try:
@@ -61,6 +72,11 @@ def decode(document: Any, task_id: str) -> dict[str, Any]:
         if document.get("task_id") != task_id:
             raise ValueError("Receipt task_id does not match its filename")
         _payload(document.get("receipt"))
+        if "steering_binding" in document["receipt"]:
+            binding = document["receipt"]["steering_binding"]
+            validate_steering_binding(binding, task_id)
+            if document["receipt"].get("root_workflow_run_id", binding["root_workflow_run_id"]) != binding["root_workflow_run_id"]:
+                raise ValueError("Steering binding root contradicts ownership receipt")
         _json(document)
         return copy.deepcopy(document["receipt"])
     except (ValueError, RecursionError) as exc:

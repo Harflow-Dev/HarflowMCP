@@ -326,6 +326,9 @@ async def call(supervisor: Any, node: dict[str, Any], token: dict[str, Any], che
         executor.update(activate, "on_demand_activation_reserved", cid)
         prompt = "Execute the specialist assignment. Return ONLY JSON {\"status\":\"succeeded|failed|blocked\",\"result\":{\"summary\":\"findings\"},\"evidence\":[]}. Do not route the workflow or change its checklist.\nWorker instructions:\n" + worker["instructions"] + "\nAssignment:\n" + action["assignment"]
         outcome = await executor._dispatch(worker, prompt, "node", activation)
+        current_activation = next(a for a in executor.run(refresh_atomic=True)["activations"] if a["id"] == execution_id)
+        if current_activation.get("worker_result_required"):
+            return False  # Explicit steering owns settlement; no next automatic decision.
         if outcome is not None and outcome.get("outcome_unknown"):
             executor.store.update_run(owner, lambda r: next(c for c in r["on_demand_calls"] if c["id"] == cid).update(status="uncertain", failure="Specialist outcome is unknown"), "on_demand_uncertain", cid)
             supervisor.attention("On-demand specialist outcome is unknown; reconcile before another call")
@@ -349,7 +352,7 @@ def settle(storage: Any, owner: str, call_id: str, outcome: dict[str, Any]) -> N
     def record(r: dict[str, Any]) -> None:
         item = next(c for c in r["on_demand_calls"] if c["id"] == call_id)
         activation = next(a for a in r["activations"] if a["id"] == item["execution_id"])
-        if item["status"] not in ACTIVE:
+        if item["status"] not in ACTIVE or activation.get("worker_result_required"):
             return
         try:
             value = normalize_result(activation["on_demand_node"], outcome, []) if outcome.get("status") == "completed" else {"status": "failed", "result": {"summary": outcome.get("summary") or outcome.get("execution_failure") or "Specialist failed"}, "evidence": []}
@@ -361,6 +364,8 @@ def settle(storage: Any, owner: str, call_id: str, outcome: dict[str, Any]) -> N
         activation.update(status="completed" if status == "succeeded" else status, node_result=copy.deepcopy(value), raw_output=outcome.get("summary", ""))
     storage.update_run(owner, record, "on_demand_settled", call_id)
     item = next(c for c in storage.get_run(owner)["on_demand_calls"] if c["id"] == call_id)
+    if item["status"] in ACTIVE:
+        return
     storage.update_run(item["checkpoint"]["workflow_run_id"], lambda r: reflect_result(r, item), "on_demand_result_delivered", call_id)
     storage.update_run(owner, lambda r: next(c for c in r["on_demand_calls"] if c["id"] == call_id).update(result_delivered=True), "on_demand_result_acknowledged", call_id)
 

@@ -24,17 +24,21 @@ def record_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
     w, _ = _modules()
     run = supervisor.run()
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
-    origin = next((t for t in reversed(activation["tasks"]) if t.get("status") == "completed"), None)
+    origin = next((t for t in reversed(activation["tasks"]) if t.get("status") == "completed" and (not outcome.get("task_id") or t["task_id"] == outcome["task_id"])), None)
     if origin is None:
         supervisor.attention("Asking worker has no positively observed completed turn")
         return None
+    if activation.get("worker_result_required") and not origin.get("steering_turn_id"):
+        return None  # Steering admission superseded this ordinary asking output.
     existing = next((q for q in activation.get("questions", []) if q["origin_task_id"] == origin["task_id"]), None)
     if existing:
         return existing["question_id"]
     if len(activation.get("questions", [])) >= node.get("max_context_questions", 10):
         def exhausted(r: dict[str, Any]) -> None:
-            r.update(status="failed", failure_reason=f"Context question limit reached for {node['id']}")
             a = next(a for a in r["activations"] if a["id"] == activation_id)
+            if a.get("worker_result_required") and not origin.get("steering_turn_id"):
+                return
+            r.update(status="failed", failure_reason=f"Context question limit reached for {node['id']}")
             a.update(status="failed", raw_output=outcome.get("summary", ""), node_result={"status": "failed", "result": {"failure_kind": "question_limit", "reason": r["failure_reason"]}, "evidence": value["evidence"]})
             next(t for t in r["pending"] if t["id"] == token["id"]).update(execution_complete=True, result=copy.deepcopy(a["node_result"]))
         supervisor.update(exhausted, "question_limit_reached")
@@ -43,6 +47,8 @@ def record_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
     question = {"question_id": question_id, "question": value["result"]["question"], "context": copy.deepcopy(value["result"].get("context", "")), "progress": copy.deepcopy(value["result"]), "evidence": copy.deepcopy(value["evidence"]), "origin_task_id": origin["task_id"], "origin_candidate": copy.deepcopy(origin["candidate"]), "status": "waiting", "decision_id": uuid.uuid4().hex, "decision_attempts": 0, "inspection_count": 0, "answer_delivery_state": "waiting", "created_at": time.time(), "raw_output": outcome.get("summary", "")}
     def record(r: dict[str, Any]) -> None:
         a = next(a for a in r["activations"] if a["id"] == activation_id)
+        if a.get("worker_result_required") and not origin.get("steering_turn_id"):
+            return
         a.setdefault("questions", []).append(question)
         a.update(status="waiting_for_answer", pending_question_id=question_id)
         current = next(t for t in r["pending"] if t["id"] == token["id"])
@@ -50,7 +56,8 @@ def record_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         current.pop("recovered_result", None)
         current.pop("recovered_failed_result", None)
     supervisor.update(record, "worker_question", {"execution_id": activation_id, "question_id": question_id})
-    return question_id
+    accepted = next(a for a in supervisor.run()["activations"] if a["id"] == activation_id)
+    return question_id if any(q["question_id"] == question_id for q in accepted.get("questions", [])) else None
 
 
 def compatible_origin(run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], question: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
