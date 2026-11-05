@@ -1,0 +1,23 @@
+{
+  "binding": {
+    "attempt": "44444444444444444444444444444444",
+    "configuration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "generation": "55555555555555555555555555555555",
+    "operation": "11111111111111111111111111111111",
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reservation": "33333333333333333333333333333333",
+    "root": {
+      "device": 0,
+      "inode": 1,
+      "protocol": 6
+    },
+    "session": "22222222222222222222222222222222",
+    "steering": null
+  },
+  "data": {
+    "profile_version": 1
+  },
+  "format": "harflow.owner-runtime.profile",
+  "kind": "policy",
+  "v": 1
+}

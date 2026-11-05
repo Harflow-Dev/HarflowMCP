@@ -1,5 +1,10 @@
 # Architecture
 
+The separately reviewed [owner-runtime candidate profile](decisions/owner-runtime-v1.md)
+defines approved policy for Rust migration with an independent synthetic fixture
+component. It adds no supported Python runtime capability or change to the current
+public contract bundle. Rust implementation and runtime qualification remain separate.
+
 Maintainer-facing detail behind the rules in `AGENTS.md`: the backend and client seams, recovery and
 live-input behavior, takeover and ctl, enforcement claims, and how state changes are reported to the
 caller. The CLI measurements these rules rest on are in [backend-cli-facts.md](backend-cli-facts.md).

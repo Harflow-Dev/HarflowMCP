@@ -1,0 +1,66 @@
+{
+  "binding": {
+    "attempt": "44444444444444444444444444444444",
+    "configuration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "generation": "55555555555555555555555555555555",
+    "operation": "11111111111111111111111111111111",
+    "owner": {
+      "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+      "pid": 42,
+      "start_microseconds": 0,
+      "start_seconds": 1
+    },
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reservation": "33333333333333333333333333333333",
+    "root": {
+      "device": 0,
+      "inode": 1,
+      "protocol": 5
+    },
+    "session": "22222222222222222222222222222222",
+    "steering": null
+  },
+  "data": {
+    "ack": {
+      "attempt": "44444444444444444444444444444444",
+      "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "channel_nonce": "66666666666666666666666666666666",
+      "command_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "generation": "55555555555555555555555555555555",
+      "operation": "11111111111111111111111111111111",
+      "revision": 8,
+      "sequence": 1,
+      "state": "committed",
+      "writer": {
+        "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+        "pid": 42,
+        "start_microseconds": 0,
+        "start_seconds": 1
+      }
+    },
+    "deadline": "expired",
+    "pending": {
+      "attempt": "44444444444444444444444444444444",
+      "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "channel_nonce": "66666666666666666666666666666666",
+      "command": "append",
+      "command_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "expected_revision": 7,
+      "generation": "55555555555555555555555555555555",
+      "operation": "11111111111111111111111111111111",
+      "payload_bytes": 16384,
+      "sequence": 1,
+      "writer": {
+        "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+        "pid": 42,
+        "start_microseconds": 0,
+        "start_seconds": 1
+      }
+    },
+    "poisoned": false,
+    "send_state": "complete"
+  },
+  "format": "harflow.owner-runtime.profile",
+  "kind": "storage",
+  "v": 1
+}

@@ -1,0 +1,36 @@
+{
+  "binding": {
+    "attempt": "44444444444444444444444444444444",
+    "configuration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "generation": "55555555555555555555555555555555",
+    "operation": "11111111111111111111111111111111",
+    "owner": {
+      "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+      "pid": 42,
+      "start_microseconds": 0,
+      "start_seconds": 1
+    },
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reservation": "33333333333333333333333333333333",
+    "root": {
+      "device": 0,
+      "inode": 1,
+      "protocol": 5
+    },
+    "session": "22222222222222222222222222222222",
+    "steering": null
+  },
+  "data": {
+    "binary_match": "proven",
+    "configuration_match": "proven",
+    "established_mode": "tool_level",
+    "grants_match": "proven",
+    "protected_paths_match": "proven",
+    "qualification": "passed",
+    "requested_mode": "tool_level",
+    "tool_level_opt_in": true
+  },
+  "format": "harflow.owner-runtime.profile",
+  "kind": "permission",
+  "v": 1
+}

@@ -1,0 +1,681 @@
+{
+  "files": [
+    {
+      "bytes": 845,
+      "expected": {
+        "parse": "invalid",
+        "reason": "binding"
+      },
+      "filename": "binding-boolean-pid.json",
+      "sha256": "ab13782806f51de938aaca58d8a3822ee8daa8a1504e2bb1de6d3efc924441ec"
+    },
+    {
+      "bytes": 843,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "binding"
+      },
+      "filename": "binding-future.json",
+      "sha256": "759fe06ea29494f36e2943648a678c65605808dd5f1cd9cd155e8c0e217a92dd"
+    },
+    {
+      "bytes": 689,
+      "expected": {
+        "parse": "invalid",
+        "reason": "binding"
+      },
+      "filename": "binding-missing-before-future.json",
+      "sha256": "6c001948e2a2fdf195534ad2dabe6198e5d8320535469ce60c7bce549d586c9e"
+    },
+    {
+      "bytes": 1449,
+      "expected": {
+        "parse": "invalid",
+        "reason": "budget"
+      },
+      "filename": "budget-array.json",
+      "sha256": "7d8d010bcf15e4210b3916a2105c558a2d33a65673c8f73204a94746a9cf4ee7"
+    },
+    {
+      "bytes": 24577,
+      "expected": {
+        "parse": "invalid",
+        "reason": "budget"
+      },
+      "filename": "budget-bytes.json",
+      "sha256": "e142e420f18b462a67c2a8dec8fbdd07536e65838c1fc412534cd863e65f7d02"
+    },
+    {
+      "bytes": 1419,
+      "expected": {
+        "background_idle_seconds": 600,
+        "background_requirement": "required",
+        "decision": "accept",
+        "parse": "valid",
+        "permission_mode": "os_enforced",
+        "tool_level_opt_in": false
+      },
+      "filename": "budget-depth-boundary.json",
+      "sha256": "05bde6d08f876cca89ce3a147d67b8fdaceb669955d556e88d97f868c6cdb4ba"
+    },
+    {
+      "bytes": 1489,
+      "expected": {
+        "parse": "invalid",
+        "reason": "budget"
+      },
+      "filename": "budget-depth-exceeded.json",
+      "sha256": "75bbbd53bab7070600ee50c86c72fec54142fd335736c205ec711443582a8e72"
+    },
+    {
+      "bytes": 4957,
+      "expected": {
+        "parse": "invalid",
+        "reason": "budget"
+      },
+      "filename": "budget-string.json",
+      "sha256": "3d2ee69809f05ce1263070f8d0b74922593bcfc0337c67aa35993cfd99713218"
+    },
+    {
+      "bytes": 13,
+      "expected": {
+        "parse": "invalid",
+        "reason": "encoding"
+      },
+      "filename": "encoding-duplicate.json",
+      "sha256": "8e088c0ec4a3bbe867bf4c363560ba878c4b2c38437b27ecc3363fd0b8b9a0dc"
+    },
+    {
+      "bytes": 9,
+      "expected": {
+        "parse": "invalid",
+        "reason": "encoding"
+      },
+      "filename": "encoding-nonfinite.json",
+      "sha256": "c238cb6e9ac5407491b0988102620ab9445290d2ed7713c516a2b28bd2388968"
+    },
+    {
+      "bytes": 14,
+      "expected": {
+        "parse": "invalid",
+        "reason": "encoding"
+      },
+      "filename": "encoding-surrogate.json",
+      "sha256": "7f3c6b6b4a88409efe4d2fba1cb3cf2b79b682fe4387678cba2e6b9645b58221"
+    },
+    {
+      "bytes": 1,
+      "expected": {
+        "parse": "invalid",
+        "reason": "encoding"
+      },
+      "filename": "encoding-utf8.json",
+      "sha256": "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89"
+    },
+    {
+      "bytes": 843,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "envelope"
+      },
+      "filename": "envelope-future.json",
+      "sha256": "2fba01f45bea2e8981c46c734f05597647d3b49e2642c4ed1bdd8163f42e5bd0"
+    },
+    {
+      "bytes": 843,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "envelope"
+      },
+      "filename": "envelope-kind-future.json",
+      "sha256": "48c04182818d19e646da16b15d7eccfd555330d240b8d45786478479f26e7085"
+    },
+    {
+      "bytes": 815,
+      "expected": {
+        "parse": "invalid",
+        "reason": "envelope"
+      },
+      "filename": "envelope-structure-before-future.json",
+      "sha256": "1039dfbfea52dcd7566831c72c0e93b14acc7cb9e9012b9be538bb12500fee85"
+    },
+    {
+      "bytes": 1292,
+      "expected": {
+        "parse": "valid",
+        "reason": "cancelled",
+        "release": "evidence_complete",
+        "result": "succeeded",
+        "workflow": "cancelled"
+      },
+      "filename": "observation-cancelled.json",
+      "sha256": "e04e95bc8942da0103269ded8a0a4fca2f75a77b309eaaaa41d260738c47fb15"
+    },
+    {
+      "bytes": 1292,
+      "expected": {
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "blocked"
+      },
+      "filename": "observation-capture-gap.json",
+      "sha256": "bf91289654f5e07841f97e7adf77c12f0ce0647e6e087b659f7d8d5294ef5b11"
+    },
+    {
+      "bytes": 1289,
+      "expected": {
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "succeeded"
+      },
+      "filename": "observation-containment-unknown.json",
+      "sha256": "a392523a06d12dd4448260af8a4a4559c9fa4457f76485c2b8d4c0b5d4a65d5c"
+    },
+    {
+      "bytes": 1293,
+      "expected": {
+        "parse": "valid",
+        "reason": "execution_failed",
+        "release": "evidence_complete",
+        "result": "succeeded",
+        "workflow": "failed"
+      },
+      "filename": "observation-execution-failed.json",
+      "sha256": "93cae83aaac9cf252d023eed8ff42a610b95adda84cea951f374bda91f88faac"
+    },
+    {
+      "bytes": 1290,
+      "expected": {
+        "parse": "valid",
+        "reason": "execution_unknown",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "blocked"
+      },
+      "filename": "observation-execution-unknown.json",
+      "sha256": "afbf1e1a3eba2ce600d1cc8359363f02e8167be8ec74161dc18cdded312549ca"
+    },
+    {
+      "bytes": 1289,
+      "expected": {
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "evidence_complete",
+        "result": "succeeded",
+        "workflow": "succeeded"
+      },
+      "filename": "observation-incidental-failed.json",
+      "sha256": "8067899b38959d82a210a1c990df5bafc246d40751ba33de10245f5815d0bcd8"
+    },
+    {
+      "bytes": 1290,
+      "expected": {
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "succeeded"
+      },
+      "filename": "observation-incidental-pending.json",
+      "sha256": "b4e8da1f16bc0def8c3e036fdd11eaf0a50eb4b97a38f283b6045890113910a3"
+    },
+    {
+      "bytes": 1286,
+      "expected": {
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "result": "failed",
+        "workflow": "blocked"
+      },
+      "filename": "observation-open-failed.json",
+      "sha256": "8588f9f93ebd04b7b56901b5a7e42edd29aa7c6b36a281b7c6451c3693abc763"
+    },
+    {
+      "bytes": 1289,
+      "expected": {
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "result": "unknown",
+        "workflow": "blocked"
+      },
+      "filename": "observation-open-turn.json",
+      "sha256": "93813399b03b57a631941281ac3c6cb46d3bcc0608f21bc3e25040800a1e7243"
+    },
+    {
+      "bytes": 1289,
+      "expected": {
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "blocked"
+      },
+      "filename": "observation-partial.json",
+      "sha256": "9f5668255cba1aa15697e4f55c3e1b571f97dfbf41623b659886e07700d30e04"
+    },
+    {
+      "bytes": 1287,
+      "expected": {
+        "parse": "valid",
+        "reason": "required_obligation_failed",
+        "release": "evidence_complete",
+        "result": "succeeded",
+        "workflow": "failed"
+      },
+      "filename": "observation-required-failed.json",
+      "sha256": "8a79203730d4153998b4b67aaf528f790c35624fbdabc6175ea3bfab374b8ac2"
+    },
+    {
+      "bytes": 1290,
+      "expected": {
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "evidence_complete",
+        "result": "succeeded",
+        "workflow": "succeeded"
+      },
+      "filename": "observation-settled.json",
+      "sha256": "74f449d5127f356ac505dfe086d9e736a2ea25e583e83a143d20469ff51bf2d1"
+    },
+    {
+      "bytes": 1293,
+      "expected": {
+        "parse": "valid",
+        "reason": "result_unknown",
+        "release": "blocked",
+        "result": "unknown",
+        "workflow": "blocked"
+      },
+      "filename": "observation-stale-result.json",
+      "sha256": "9e72086c57746bca764a699a5b4377536e532ac08a87ce62d8472909f4469fc3"
+    },
+    {
+      "bytes": 1289,
+      "expected": {
+        "parse": "valid",
+        "reason": "result_failed",
+        "release": "evidence_complete",
+        "result": "failed",
+        "workflow": "failed"
+      },
+      "filename": "observation-sticky-failure.json",
+      "sha256": "b03b41c90cabd0d82df33415952d20183e998e6e6128c2bf0e5958b839e0903f"
+    },
+    {
+      "bytes": 1287,
+      "expected": {
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "blocked"
+      },
+      "filename": "observation-unknown-required.json",
+      "sha256": "169cf0ba9bba7939fe4d9dec1a6eeb5333a6a53b8eb56fcfac94e6cde29ce408"
+    },
+    {
+      "bytes": 1288,
+      "expected": {
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "result": "succeeded",
+        "workflow": "blocked"
+      },
+      "filename": "observation-unknown.json",
+      "sha256": "6663ac764040b34a05c3f0eb4b83e40c7fea25a5c225aa0a87ce9d3c8578f125"
+    },
+    {
+      "bytes": 1096,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "unqualified"
+      },
+      "filename": "permission-failed.json",
+      "sha256": "4bc7ef3a3c42681c037c7831028a417f2911506ccf18dee417a487bb3b7bb7ce"
+    },
+    {
+      "bytes": 1096,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "enum"
+      },
+      "filename": "permission-future.json",
+      "sha256": "cbd56c7c960cda77f3786e9c06c62d552b44e177d3a93766fad0cfdb8deb94a2"
+    },
+    {
+      "bytes": 1098,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "qualification_mismatch"
+      },
+      "filename": "permission-mismatch.json",
+      "sha256": "15c19e4622497219b8e0ec88aa37f385c5217ae51aa99dbbee679a962eb2a386"
+    },
+    {
+      "bytes": 1092,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "mode_mismatch"
+      },
+      "filename": "permission-mode.json",
+      "sha256": "6e99f064f6191fb2a477e99326340ebe44521b546d5c3d4879fa75dfd1dcfd38"
+    },
+    {
+      "bytes": 1095,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "opt_in_required"
+      },
+      "filename": "permission-opt-in.json",
+      "sha256": "7d628d947d3b433b72946cbfd24aaca27c73e291d5693d97f2c83850ca15cad9"
+    },
+    {
+      "bytes": 1096,
+      "expected": {
+        "decision": "admit",
+        "parse": "valid",
+        "reason": "qualified"
+      },
+      "filename": "permission-qualified.json",
+      "sha256": "d9c88d9c862b8cdabbc899df673bbe41c7a0f535dbfcf6b5a924900eb11be783"
+    },
+    {
+      "bytes": 1092,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "permission-structure-before-enum.json",
+      "sha256": "860ec2ded9db2ed892d80d3d13be1ce5ef0c4d88e999977d1cf2f82979164e55"
+    },
+    {
+      "bytes": 1093,
+      "expected": {
+        "decision": "admit",
+        "parse": "valid",
+        "reason": "qualified"
+      },
+      "filename": "permission-tool-qualified.json",
+      "sha256": "b4b65621352cd2ad337efdf03719002199d8d0eaedd50b8af8018a316f516804"
+    },
+    {
+      "bytes": 1097,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "unqualified"
+      },
+      "filename": "permission-unknown.json",
+      "sha256": "203f90a6d99825c9e11f7ba737314f5d05a5b74492b618669751e9dd8603f2f3"
+    },
+    {
+      "bytes": 880,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "policy-bool.json",
+      "sha256": "962a2d0f3feb7807bf3a859af33c05753eae58e24f884c257dc8e6a726e93b3f"
+    },
+    {
+      "bytes": 843,
+      "expected": {
+        "background_idle_seconds": 600,
+        "background_requirement": "required",
+        "decision": "accept",
+        "parse": "valid",
+        "permission_mode": "os_enforced",
+        "tool_level_opt_in": false
+      },
+      "filename": "policy-default.json",
+      "sha256": "5e58534a6d8352c9f36666486ee02425807450f6c155190f4cc6eda4c61e8262"
+    },
+    {
+      "bytes": 962,
+      "expected": {
+        "background_idle_seconds": 21600,
+        "background_requirement": "incidental",
+        "decision": "accept",
+        "parse": "valid",
+        "permission_mode": "tool_level",
+        "tool_level_opt_in": true
+      },
+      "filename": "policy-explicit-boundary.json",
+      "sha256": "0ec5f6be8e94bc2c0e206a63e87295c2b85930640c9e1dd0b0656b75f9085f05"
+    },
+    {
+      "bytes": 881,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "policy-future-and-bad.json",
+      "sha256": "d1b2070543d5c8be04a62d65a5d5dbca9bb288a45f0a30b920bbe59424180d0c"
+    },
+    {
+      "bytes": 843,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "enum"
+      },
+      "filename": "policy-future.json",
+      "sha256": "7b1ef264a3b04ccb062b5b2d707575a4f96a2cb985aaf671bcea410cbb8060bc"
+    },
+    {
+      "bytes": 815,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "policy-missing.json",
+      "sha256": "6126bad5fc416ce335c3fbebebdc1a72c4f1d99632fdba69010ac00d9dd05fda"
+    },
+    {
+      "bytes": 881,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "policy-over.json",
+      "sha256": "aafd05aa4e9a1f10a49d0a340afa6e8777c2b4f8315515055b055f161d7caf5a"
+    },
+    {
+      "bytes": 874,
+      "expected": {
+        "background_idle_seconds": 600,
+        "background_requirement": "required",
+        "decision": "accept",
+        "parse": "valid",
+        "permission_mode": "os_enforced",
+        "tool_level_opt_in": false
+      },
+      "filename": "policy-unknown-flag.json",
+      "sha256": "b7b68e4412d237cf6edcdbf72cac76946d718649d510dd70312771fd6ddfac46"
+    },
+    {
+      "bytes": 877,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "policy-zero.json",
+      "sha256": "7ad4e4cb0a9927c44b9232e6396672ae49bc82ffb9ce47972a040aae2b116925"
+    },
+    {
+      "bytes": 898,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "not_steering_authority"
+      },
+      "filename": "steering-agent_result.json",
+      "sha256": "18e2628bed645b6c058159c812f0c2178769f1b53665a2a5e63de98f88a4f423"
+    },
+    {
+      "bytes": 904,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "not_steering_authority"
+      },
+      "filename": "steering-observer_attachment.json",
+      "sha256": "b4a8e1bcba86ba28d90bff9a687340c9d50ac1d862a7fcab17f94caed678b476"
+    },
+    {
+      "bytes": 896,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "not_steering_authority"
+      },
+      "filename": "steering-storage_ack.json",
+      "sha256": "c2a834294c28855433cfad56a0f844bf03f6c901e9ec5b5caf2b97659d46eb1f"
+    },
+    {
+      "bytes": 2311,
+      "expected": {
+        "decision": "advance",
+        "parse": "valid",
+        "reason": "acknowledged"
+      },
+      "filename": "storage-acknowledged.json",
+      "sha256": "d6d9b33239ffd6aa9e0be249aff08d27ec99f09c454467d8fe733ffa81ada802"
+    },
+    {
+      "bytes": 2261,
+      "expected": {
+        "decision": "advance",
+        "parse": "valid",
+        "reason": "acknowledged"
+      },
+      "filename": "storage-close-same-revision.json",
+      "sha256": "6bd7996bb544fc1d8990600ab06b31ba09bf61a97d41cf35a4f8823ba4c57189"
+    },
+    {
+      "bytes": 2269,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "storage-committed-null.json",
+      "sha256": "f5491c92d5a6fc9a380e1efc0ef7c772ed7c955af2f510b1e188b49ffcbcf2c1"
+    },
+    {
+      "bytes": 2266,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "late_ack"
+      },
+      "filename": "storage-late.json",
+      "sha256": "614e9652af3cfb429f00515a402bf7133024c408dfbc1eb3ac1e5d53bb9a9196"
+    },
+    {
+      "bytes": 2285,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "revision_mismatch"
+      },
+      "filename": "storage-overflow.json",
+      "sha256": "f51b777882b1370934c8e8dc7f4fa0d577f1e22b8aa4fef469162a3f205c7171"
+    },
+    {
+      "bytes": 2266,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "storage-oversize-payload.json",
+      "sha256": "0b49897cd8ef001318058683b60200d898f97517b497a400275a68ba3ca83b25"
+    },
+    {
+      "bytes": 2265,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "uncertain_send"
+      },
+      "filename": "storage-partial.json",
+      "sha256": "ca8c75fc26d2931d135f60efada2f37b68efcc878b4eb725365f66f0091904ba"
+    },
+    {
+      "bytes": 2265,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "poisoned"
+      },
+      "filename": "storage-poisoned.json",
+      "sha256": "382c2ad21b94f65869e0f62ca0b3daa3192e2058ab384d18d950bb49d5b81e11"
+    },
+    {
+      "bytes": 2264,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "storage_refusal"
+      },
+      "filename": "storage-refused-old-revision.json",
+      "sha256": "ee21bb8ce61ab057c7bfd8ca1b477b8024a46cfbc7e6d01acb9014d82aa1bd0d"
+    },
+    {
+      "bytes": 2266,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "revision_mismatch"
+      },
+      "filename": "storage-revision.json",
+      "sha256": "b3b4081c3f672c730da17db181bc98e9422a88ff552266066cf8157d0bf302f7"
+    },
+    {
+      "bytes": 2264,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "identity_mismatch"
+      },
+      "filename": "storage-stale-attempt.json",
+      "sha256": "786dff2adc20de44e4ee10c138b5b887028415c1ff801551cffe52522cee6412"
+    },
+    {
+      "bytes": 2267,
+      "expected": {
+        "decision": "retain",
+        "parse": "valid",
+        "reason": "commit_unknown"
+      },
+      "filename": "storage-unknown-null-revision.json",
+      "sha256": "0154844faf3d5f17bcf857aed070850f0f04f17cab8a327dff4c435d04e12cd6"
+    }
+  ],
+  "format": "harflow.owner-runtime.profile.component",
+  "profile": "owner-runtime-v1",
+  "profile_version": 1,
+  "provenance": "synthetic_specification",
+  "python_runtime_support": false,
+  "specifications": [
+    {
+      "path": "docs/decisions/owner-runtime-v1.md",
+      "sha256": "448c74da6acf5955de5114bdfee2ec149e20e43656c287f44b3c6300c3a53897"
+    },
+    {
+      "path": "docs/decisions/owner-runtime-v1-schema.md",
+      "sha256": "92ecc534085ccc27550a1377bbce4273906366792a3f4c313384bf2d808847de"
+    }
+  ],
+  "status": "specified_unimplemented",
+  "v": 1
+}
