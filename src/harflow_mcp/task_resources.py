@@ -226,14 +226,39 @@ def pending_descendants(log_dir: Path, root_id: str, seeds: Iterable[str] = ()) 
     return PendingDescendants(sorted(found), {key: error.as_dict() for key, error in launch_scan.refusals.items()})
 
 
-def settle_cancelled(log_dir: Path, receipt: dict[str, Any]) -> None:
-    """Settle a launch whose owner is gone: it provably never started, so nothing waits to hear it."""
-    from .task_supervision import mark
-    held = receipt.get("resources") or {}
-    release_quietly(log_dir, held.get("reservation_id"))
-    mark(log_dir, receipt["task_id"], receipt["generation"], state="not_started", not_started_reason="cancelled",
-         error="cancelled before the task started", resources={**held, "state": "not_started"})
-    clear_cancel(log_dir, receipt["task_id"])
+def settle_cancelled(log_dir: Path, receipt: dict[str, Any]) -> bool:
+    """Settle a proven prestart launch without overwriting an accepted withdrawal."""
+    from .task_supervision import mark, read_launch, read_task_record
+    from .task_withdrawal import _lock, reconcile_withdrawal
+    task_id, generation = receipt["task_id"], receipt["generation"]
+    # Serialize the ordinary terminal mark with creation of a new owner promise.
+    # No process probe, await or provider runs while this bounded leaf lock is held.
+    with _lock(log_dir, task_id, generation):
+        current = read_launch(log_dir, task_id)
+        if current is None or any(current.get(key) != receipt.get(key) for key in ("task_id", "generation", "request_sha256", "configuration_sha256", "owner")):
+            return False
+        if read_task_record(log_dir, task_id, include_prompt=False) is not None:
+            return False
+        claimed = "withdrawal_claim" in current
+        if not claimed:
+            if current["state"] != "waiting_for_resources" or receipt.get("state") != "waiting_for_resources":
+                return False
+            held = current.get("resources") or {}
+            release_quietly(log_dir, held.get("reservation_id"))
+            mark(log_dir, task_id, generation, state="not_started", not_started_reason="cancelled",
+                 error="cancelled before the task started", resources={**held, "state": "not_started"})
+            clear_cancel(log_dir, task_id)
+            return True
+    # An accepted no-spawn promise is irrevocable. Complete its exact journal
+    # outside the lock, rather than rewriting it as an unrelated cancelled state.
+    try:
+        ack = reconcile_withdrawal(log_dir, task_id, generation)
+    except (ValueError, OSError):
+        return False
+    if ack is None or ack["outcome"] != "withdrawn":
+        return False
+    clear_cancel(log_dir, task_id)
+    return True
 
 
 def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> dict[str, Any]:
@@ -252,7 +277,7 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
         raise PermissionError("cancel_launch requires an authorized caller; use TaskRegistry.cancel_pending")
     descendants = pending_descendants(log_dir, task_id)
     targets = [task_id, *descendants]
-    requested, settled = [], []
+    requested, settled, withdrawal_unsettled = [], [], []
     for target in targets:
         receipt = pending_receipt(log_dir, target)
         # A request is only worth writing for a launch an owner can still read it for; a settled
@@ -261,13 +286,18 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
             continue
         request_cancel(log_dir, target)
         requested.append(target)
-        if receipt["state"] == "waiting_for_resources":
+        if "withdrawal_claim" in receipt:
+            if settle_cancelled(log_dir, receipt):
+                settled.append(target)
+            else:
+                withdrawal_unsettled.append(target)
+        elif receipt["state"] == "waiting_for_resources":
             fresh = owner_confirmed_gone(log_dir, receipt)
-            if fresh is not None:
-                settle_cancelled(log_dir, fresh)
+            if fresh is not None and settle_cancelled(log_dir, fresh):
                 settled.append(target)
     spawned = read_task_record(log_dir, task_id, include_prompt=False) is not None
     return {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled,
+            **({"withdrawal_unsettled": withdrawal_unsettled, "cascade_incomplete": True} if withdrawal_unsettled else {}),
             **({"launch_refusals": list(descendants.refusals.values()), "history_incomplete": True, "cascade_incomplete": True} if descendants.refusals else {})}}
 
 

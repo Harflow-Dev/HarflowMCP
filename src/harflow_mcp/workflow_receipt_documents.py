@@ -77,6 +77,14 @@ def decode(document: Any, task_id: str) -> dict[str, Any]:
             validate_steering_binding(binding, task_id)
             if document["receipt"].get("root_workflow_run_id", binding["root_workflow_run_id"]) != binding["root_workflow_run_id"]:
                 raise ValueError("Steering binding root contradicts ownership receipt")
+        if 'replan_lineage' in document['receipt']:
+            edge = document['receipt']['replan_lineage']
+            import re
+            if type(edge) is not dict or set(edge) != {'v','replan_id','certificate_digest'} or type(edge['v']) is not int or edge['v'] != 1:
+                raise ValueError('Malformed compact replan ownership binding')
+            identifier(edge['replan_id'])
+            if type(edge['certificate_digest']) is not str or re.fullmatch('sha256:[a-f0-9]{64}', edge['certificate_digest']) is None:
+                raise ValueError('Malformed compact replan ownership digest')
         _json(document)
         return copy.deepcopy(document["receipt"])
     except (ValueError, RecursionError) as exc:

@@ -2991,8 +2991,11 @@ async def _steering_call(action: str, workflow_run_id: str, **kwargs: Any) -> di
     """One application/authority service for agent MCP and native ctl steering."""
     from . import workflow_steering
     try:
-        if action == "steer":
+        if action in {"steer", "replan"}:
             await _guard_mutation()
+            if action == "replan":
+                from .workflow_replan import replan_workflow_steering
+                return await replan_workflow_steering(workflow_run_id, kwargs["request"], root=_reg().log_dir.parent)
             return await workflow_steering.steer_workflow(workflow_run_id, kwargs["request"], root=_reg().log_dir.parent)
         function = workflow_steering.get_workflow_steering if action == "status" else workflow_steering.get_workflow_steering_history
         return await asyncio.to_thread(function, workflow_run_id, root=_reg().log_dir.parent, **kwargs)
@@ -3042,6 +3045,25 @@ async def steer_workflow(workflow_run_id: str, request: dict[str, Any]) -> dict[
     remains unsupported.
     """
     return await _steering_call("steer", workflow_run_id, request=request)
+
+
+@mcp.tool()
+@_task_document_errors
+async def replan_workflow_steering(workflow_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Withdraw one exact never-started root headless Fresh worker and link a same-assignment retry.
+
+    Requires workflow-steering-replan.v1, schema 2/current ledger_epoch, the engine-issued
+    replan target and withdrawal witness, and the existing interaction/cancellation authority.
+    A managed worker cannot invoke this control. The source must be configured headless and fixed Fresh.
+    The original launch must acknowledge the exact
+    generation as never started, and matching releases must finish before replacement. The queued
+    conversation issuance remains charged. Preserve assignment, configured candidate, permissions,
+    finite cap, node/visit, accepted decisions and sibling evidence. Already issued work refuses;
+    a spawn race remains unknown and cannot authorize replacement or a late cancellation signal.
+    No graph edit, alternate candidate, automatic repair, allowance grant or poststart containment
+    authority is added. Replay the same request after response loss; an expired epoch never dispatches.
+    """
+    return await _steering_call("replan", workflow_run_id, request=request)
 
 
 @mcp.tool()

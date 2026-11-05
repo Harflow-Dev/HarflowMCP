@@ -794,6 +794,20 @@ class ResourceLedger:
 
         return self._transact(action)
 
+    def release_owned_workflow_attempt(self, reservation_id: str, workflow_run_id: str, resource_attempt_id: str) -> str:
+        """Withdraw only one exact workflow-attempt reservation under the leaf lock."""
+        validate_reservation_id(reservation_id)
+        expected = {'kind': 'workflow_attempt', 'workflow_run_id': workflow_run_id, 'activation_id': resource_attempt_id}
+        _owner_from(expected)
+        def action(transaction: _Transaction) -> str:
+            raw = transaction.find(reservation_id)
+            if raw is not None and raw['owner'] != expected:
+                raise ResourceOwnerMismatch('Workflow attempt reservation ownership changed; keep settlement unknown')
+            result = transaction.release(reservation_id)
+            transaction.grant_pass()
+            return result
+        return self._transact(action)
+
     def get(self, reservation_id: str) -> Entry | None:
         for raw in self._read_only():
             if raw["reservation_id"] == reservation_id:

@@ -2254,3 +2254,72 @@ survives until the raw family is safely gone, and interrupted sidecar cleanup re
 sweeps. Missing roots or malformed bindings never authorize this exemption. Disabling task
 retention deliberately retains raw records/logs; the inline 32/64 windows are not a total raw-disk
 quota. ctl and steering compaction do not start a retention sweep.
+
+
+## Prestart worker withdrawal and linked retry
+
+`workflow-steering-replan.v1` adds `harflow-ctl workflow-steering-replan` and agent-facing
+`replan_workflow_steering`. It requires worker/window capabilities and a qualified schema 2 root.
+This v1 capability supports only root delegation connected workers explicitly configured headless
+and fixed Fresh, with a positive finite original turn cap and a supporting adapter. Actual Fresh
+session UUID allocation does not imply Resume. An actual fallback from `prefer_subagent` or
+`agent_decides` is insufficient: configuration must keep the retry in this supported mode.
+
+The request is a closed object: `schema_version:2`, `action:"replan"`, canonical UUID `request_id`,
+current `ledger_epoch`, queued `episode_id`, `expected_steering_revision`,
+`expected_control_revision`, `expected_interaction_epoch`, bounded nonblank `reason`, and the
+complete engine-issued `target`/`withdrawal_witness` from `replan_targets`. The witness binds one
+original activation/task, token/visit and assignment, exact launch generation/request/configuration
+fingerprints, resolved source configuration and the queued response identity. There is no caller
+supplied replacement destination, assignment, candidate or descendant selection. Reason text is
+preserved verbatim in paged steering history. Status replan entries expose a 512-character
+`reason_preview`, explicit `reason_truncated` and `reason_ref` to that history. Authority composes
+steering's original process/native-human policy with the
+actual normal control route; these are independent checks.
+
+Persisted intent precedes withdrawal. The queued response is revoked under the same root issuance
+lock only with positive unissued evidence; its issuance remains charged. Engine-written revocation provenance binds the exact queued turn to the
+retained replan or permanent certificate; ordinary request expiry never implies withdrawal. A distinct generation-bound
+withdraw-only owner protocol is used, never the legacy task-ID cancellation marker. Only a qualified
+owner prestart exclusion claim or the accepted exact dead-waiting-owner proof can establish no
+provider start. Missing records, cancellation delivery, `spawned:false`, owner death in another
+phase, a manual release or an empty cascade error list do not establish readiness. The accepted
+no-spawn claim is distinct from the final release-complete acknowledgement and supports recovery
+of partial resource/follow-up cleanup. A request arriving after the last check never authorizes a
+late signal. Ordinary cancellation preserves its independent behavior.
+
+Readiness requires the same generation/fingerprints, positive never-started acknowledgment, no
+contradictory TaskRecord, ownership-checked resource/message releases and the exact source authority.
+The new activation, supersedes linkage and planned provider identity publish atomically before
+dispatch. It reuses the immutable assignment, selected configured candidate, controls and visit;
+normal attempt calculations/grants remain unchanged. Preparing identity recovery requires positive
+no-issuance proof. Requested/unknown spawns never receive another identity. Later normal question
+continuations retain their ordinary distinct turn identities, session selection and budgets.
+
+Phases are `cancel_requested`, `settling`, `settlement_unknown`, `ready_to_replan` and
+`replan_committed`; admission is not successful settlement or successful worker execution.
+The old execution's acceptance fence survives linkage. Delayed old callbacks cannot finish the
+replacement token, overwrite certified no-start state, alter accounting or publish stale attention
+or sessions. A withdrawn original task ID remains retired in every execution mode. Accepted
+normal outcomes, checklist decisions, sibling progress, worktrees and other effects remain real.
+An unknown earlier target stays protected without permanently blocking unrelated later targets
+once its exact normal ownership is legitimately discharged; that never authorizes replacement of
+the earlier issued target.
+
+The separately owner-approved replan-history amendment permits settled detail and certified
+never-started predecessors to use the shared rolling 32-entry/64-receipt, 1 MiB text and 4 MiB inline
+metadata windows. Before pruning, self-contained permanent compact lineage certificates and direct
+indexes preserve the exact edge/provenance. Full old dispatcher-job completion or positively dead
+captured dispatcher generation is required before predecessor removal. Unknown identity, active
+callbacks, effects and current required references protect evidence. Namespace closure and an exact
+durable compaction plan precede removal; counters, retired receipt markers and explicit gap
+checkpoints commit together. Sparse protected records remain readable; the floor does not imply a
+contiguous retained prefix, so clients must also honor the explicit history-incomplete flags. Old retained receipts replay
+without another effect; missing retired-epoch requests expire. Current dispatch still needs exact
+live authority and normal budgets: a compact historical certificate is not a redispatch permit.
+Permanent task-ID/lineage proofs are outside the verbose detail window, so no total disk quota is
+claimed. Actual accepted execution effects are not expired under the never-started policy.
+
+Poststart containment/replacement, alternate routes, other runtime/session/invocation modes,
+consumer adoption and selected-runtime qualification remain unsupported or separately assigned.
+No unsupported case falls back to legacy cancellation, a fresh provider or another graph path.

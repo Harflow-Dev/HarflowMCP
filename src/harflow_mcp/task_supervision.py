@@ -148,6 +148,18 @@ def _read_launch(log_dir: Path, task_id: str, *, allow_terminal_device_drift=Fal
     else:
         matches = directory[1] == current[1]
     require(matches or allow_binding_mismatch, 'identity_mismatch', 'Task launch directory binding differs from selected tasks directory')
+    if 'withdrawal_claim' in value:
+        from .task_withdrawal import validate_nospawn_claim
+        try:
+            validate_nospawn_claim(log_dir, task_id, value, value['withdrawal_claim'])
+        except (ValueError, OSError) as exc:
+            raise LaunchDocumentError(log_dir, task_id, 'withdrawal_claim', 'Withdrawal no-spawn claim cannot be qualified') from exc
+    if 'withdrawal_proof' in value:
+        from .task_withdrawal import validate_retirement_proof
+        try:
+            validate_retirement_proof(log_dir, task_id, value, value['withdrawal_proof'])
+        except (ValueError, OSError) as exc:
+            raise LaunchDocumentError(log_dir, task_id, 'withdrawal_proof', 'Withdrawal terminal proof cannot be qualified') from exc
     return value
 
 
@@ -377,6 +389,8 @@ async def launch(registry, invocation, kwargs):
         # Nonblocking: a competing owner is never joined by executing the same request again.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         existing = read_launch(log_dir, task_id)
+        from .task_withdrawal import refuse_retired_task_id
+        refuse_retired_task_id(log_dir, task_id, existing)
         if store.read(log_dir, task_id) is not None or existing is not None and (existing['state'] != 'not_started' or existing.get('configuration_sha256') != configuration_hash):
             raise ValueError(f'task_id already reserved: {task_id}')
         value = {'format': FORMAT, 'product': PRODUCT, 'product_version': PRODUCT_VERSION, 'v': 1,
@@ -462,6 +476,14 @@ async def launch(registry, invocation, kwargs):
         if value is None:
             raise store.TaskDocumentError(task_id, 'Reserved launch source disappeared', code='task_unavailable')
         if value['state'] == 'not_started':
+            if value.get('not_started_reason') == 'withdrawn':
+                from .task_withdrawal import reconcile_withdrawal, read_withdrawal, LaunchWithdrawn, WithdrawalError
+                if value['generation'] != generation:
+                    raise WithdrawalError('Withdrawn launch generation changed before acknowledgement')
+                ack = reconcile_withdrawal(log_dir, task_id, generation)
+                if ack is None or ack['outcome'] != 'withdrawn':
+                    raise WithdrawalError('Withdrawal acknowledgement is not positively qualified')
+                raise LaunchWithdrawn(read_withdrawal(log_dir, task_id, generation), acknowledgement=ack)
             # A launch that asked for resources and was refused (nothing free right now, or a borrow
             # that was no longer covered) is a request error, not an owner fault.
             error = (ValueError if value.get('resources') is not None or value.get('worktree') is not None or value.get('not_started_reason') == 'request' else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))

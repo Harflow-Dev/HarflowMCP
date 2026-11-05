@@ -131,6 +131,11 @@ def validate_ledger(value, run):
     if modern:
         from .steering_window import WINDOW_FIELDS
         required |= WINDOW_FIELDS
+        for extension in ("replan_accounting", "replan_history_incomplete", "normal_execution_history_incomplete", "replan_history_floor", "replan_compaction_pending"):
+            if extension in value:
+                required.add(extension)
+        if "replans" in value:
+            required.add("replans")
         if "compaction_pending" in value:
             required.add("compaction_pending")
     _require(type(value) is dict and set(value) == required and type(value["schema_version"]) is int and value["schema_version"] in {1, 2}, "schema")
@@ -173,7 +178,7 @@ def validate_ledger(value, run):
     per_episode = {}
     for turn in value["turns"]:
         required_turn = set("turn_id task_id episode_id request_id state target commit_target commit_target_ref candidate text created_at allow_fresh_context usage previous_session steering_revision preview_receipts harness_turn_cap boundary_task_id".split())
-        optional = {"witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id", "response_deadline"}
+        optional = {"revoked_by_replan_id", "witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id", "response_deadline"}
         _require(required_turn <= set(turn) and not set(turn) - required_turn - optional, "turn fields")
         _id(turn["turn_id"], "turn_id"); _id(turn["task_id"], "task_id")
         _require(turn["turn_id"] not in turns and turn["task_id"] not in tasks, "duplicate turn/task")
@@ -274,6 +279,14 @@ def validate_ledger(value, run):
             _require(turn["outcome"] is None or type(turn["outcome"]) is str and 0 < len(turn["outcome"]) <= 100, "outcome")
         if "dispatch_error" in turn:
             _require(type(turn["dispatch_error"]) is str and len(turn["dispatch_error"]) <= 2000, "dispatch error")
+        if "revoked_by_replan_id" in turn:
+            _id(turn["revoked_by_replan_id"], "revoking replan")
+            _require(modern and turn["state"] == "settled" and turn.get("outcome") == "request_expired" and turn.get("not_started") is True, "replan revocation shape")
+            _require(turn["target"].get("workflow_run_id") == root_id and turn["target"].get("root_workflow_run_id") == root_id and turn["target"].get("path") == [root_id], "root replan revocation")
+            record = next((r for r in value.get("replans", []) if r["replan_id"] == turn["revoked_by_replan_id"]), None)
+            if record is not None:
+                witness = record["withdrawal_witness"]
+                _require(witness["queued_turn_id"] == turn["turn_id"] and witness["queued_task_id"] == turn["task_id"] and witness["activation_id"] == turn["target"].get("activation_id") and record["target"] == turn["target"], "exact replan revocation provenance")
         if "not_started" in turn:
             _require(turn["not_started"] is True, "positive not-started proof")
         if "observed_task_id" in turn:
@@ -294,6 +307,12 @@ def validate_ledger(value, run):
         except (ValueError, TypeError, AttributeError):
             valid_uuid = False
         required_receipt = set("request_id payload_digest episode_id steering_revision interaction_epoch control_revision sequence state turn_id task_id accepted scheduled replayed next_action principal_binding".split())
+        if "retired_replan" in receipt:
+            _require(receipt["retired_replan"] is True and "replan_id" in receipt, "retired replan receipt")
+            required_receipt.add("retired_replan")
+        if "replan_id" in receipt:
+            _id(receipt["replan_id"], "request replan")
+            required_receipt.add("replan_id")
         if modern:
             required_receipt.add("ledger_epoch")
             _counter(receipt.get("ledger_epoch"), "receipt ledger epoch")
@@ -326,6 +345,41 @@ def validate_ledger(value, run):
         _require(set(pending["effect_turn_ids"]) <= set(pending["turn_ids"]), "compaction effect subset")
         for tid in pending["effect_turn_ids"]:
             _require(not turns[tid].get("action_commit") or turns[tid]["action_commit"]["state"] == "acknowledged", "compaction acknowledged effect")
+    if "replan_accounting" in value:
+        account = value["replan_accounting"]
+        _require(type(account) is dict and set(account) == {"accepted", "retired_details", "retired_never_started", "provenance"} and account["provenance"] == "durable_explicit_replan_and_positive_no_start", "replan accounting")
+        for key in ("accepted", "retired_details", "retired_never_started"):
+            _counter(account[key], "replan " + key)
+        _require(account["accepted"] == account["retired_details"] + len(value.get("replans", [])) and account["retired_never_started"] <= account["retired_details"], "replan cumulative binding")
+        for key in ("replan_history_incomplete", "normal_execution_history_incomplete"):
+            _require(type(value.get(key)) is bool, "normal history gaps")
+        _counter(value.get("replan_history_floor"), "replan history floor")
+    if "replan_compaction_pending" in value:
+        pending = value["replan_compaction_pending"]
+        _require(type(pending) is dict and set(pending) == {"replan_ids", "predecessor_ids", "certificates"} and all(type(pending[k]) is list and len(pending[k]) == len(set(pending[k])) for k in ("replan_ids", "predecessor_ids")) and type(pending["certificates"]) is list, "replan compaction intent")
+        certificate_ids = set()
+        certificate_predecessors = set()
+        for ref in pending["certificates"]:
+            _require(type(ref) is dict and set(ref) == {"replan_id", "predecessor_execution_id", "certificate_digest"}, "pending certificate reference")
+            _id(ref["replan_id"], "pending replan certificate")
+            _id(ref["predecessor_execution_id"], "pending predecessor certificate")
+            _digest(ref["certificate_digest"], "pending certificate digest")
+            _require(ref["replan_id"] not in certificate_ids, "duplicate pending certificate")
+            certificate_ids.add(ref["replan_id"])
+            certificate_predecessors.add(ref["predecessor_execution_id"])
+        _require(set(pending["replan_ids"]) <= certificate_ids and set(pending["predecessor_ids"]) <= certificate_predecessors, "complete planned permanent certificate references")
+        planned = [r for r in value.get("replans", []) if r["replan_id"] in pending["replan_ids"]]
+        _require(len(planned) == len(pending["replan_ids"]) and all(r["phase"] == "replan_committed" and r.get("quiescence") for r in planned) and all(any(a["id"] == aid and a.get("status") == "not_started" and a.get("worker_result_required") is True for a in run["activations"]) for aid in pending["predecessor_ids"]), "exact replan prune intent")
+    for receipt in value["requests"].values():
+        if receipt.get("replan_id"):
+            retained = any(r["replan_id"] == receipt["replan_id"] for r in value.get("replans", []))
+            _require(retained != bool(receipt.get("retired_replan")), "explicit retained or retired replan receipt")
+    if "replans" in value:
+        from .replan_schema import records
+        records(value["replans"], run)
+        for record in value["replans"]:
+            revoked = turns.get(record["withdrawal_witness"]["queued_turn_id"])
+            _require(revoked is not None and revoked.get("revoked_by_replan_id") == record["replan_id"], "retained replan response revocation marker")
     committed = set()
     for commit in value["commits"]:
         _require(set(commit) == {"turn_id", "episode_id", "commit_target_ref", "definition_digest"} and commit["turn_id"] in turns and commit["turn_id"] not in committed, "commit identity")

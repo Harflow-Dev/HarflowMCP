@@ -1055,7 +1055,10 @@ class WorkflowStore:
                 document = json.loads(content)
             except (ValueError, UnicodeError, RecursionError) as exc:
                 raise WorkflowRunDocumentError(run_id, str(exc)) from exc
-            return decode(document, run_id), source
+            run = decode(document, run_id)
+            from .replan_retention import qualify_references
+            qualify_references(self, run)
+            return run, source
 
     def _replace_run(self, run_id, document, source):
         landed = []
@@ -1347,6 +1350,11 @@ class WorkflowStore:
                 runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
                 if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
                     raise DispatchNotStarted("Scheduling stopped before reservation")
+            if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "node_assignment_reserved"}:
+                from .workflow_replan import retired_execution
+                aid = detail.get("activation_id") if isinstance(detail, dict) else None
+                if aid and retired_execution(run, aid, storage=self):
+                    raise DispatchNotStarted("Prestart replan permanently fences this original execution")
             from .workflow_attention import semantic_identity
             attention_before = semantic_identity(run)
             checkpoint_before = run.get("attention_checkpoint")
@@ -1364,7 +1372,8 @@ class WorkflowStore:
                 if held(run):
                     raise SteeringError("steering_active", "Conversation hold blocks ordinary recovery")
             mutator(run)
-            semantic_changed(steering_before, run)
+            if event != "steering_replan_history_compacted":
+                semantic_changed(steering_before, run)
             if event.startswith("control:") and "steering" in run and run.get("kind") != "builder":
                 run["steering"]["control_revision"] += 1
                 run["steering"]["checkpoint_revision"] += 1
@@ -1408,6 +1417,8 @@ class WorkflowStore:
             run.pop("monitor_cancel_reason", None)
             from .workflow_run_documents import encode
             try:
+                from .replan_retention import qualify_references
+                qualify_references(self, run)
                 document = encode(run)
             except (WorkflowRunDocumentError, ValueError, TypeError) as exc:
                 raise WorkflowRunCandidateError(run_id, str(exc)) from exc
@@ -1436,6 +1447,8 @@ class WorkflowStore:
                                 or previous_receipt.get("workflow_execution_id") != receipt["workflow_execution_id"]):
                             raise WorkflowError("Steering ownership changed before receipt replacement")
                         receipt["steering_binding"] = previous_receipt["steering_binding"]
+                    if previous_receipt and previous_receipt.get("replan_lineage"):
+                        receipt["replan_lineage"] = previous_receipt["replan_lineage"]
                     receipt_document = encode_receipt(receipt, task_id)
                     from .bounded_io import RECEIPT_BYTES
                     if len(json.dumps(receipt_document, ensure_ascii=False).encode("utf-8")) > RECEIPT_BYTES:
@@ -3228,6 +3241,19 @@ class WorkflowSupervisor:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
+        from .workflow_replan import retired_execution
+        if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+            return None
+        if not any(a["id"] == activation["id"] for a in self.run(refresh_atomic=True)["activations"]):
+            from .replan_certificates import read
+            certificate = read(self.store, predecessor_execution_id=activation["id"])
+            if certificate["root_workflow_run_id"] == self.run_id:
+                return None
+            raise WorkflowError("Expired execution has no qualified predecessor certificate")
+        if activation.get("supersedes_execution_id"):
+            from .workflow_replan import validate_replacement
+            validate_replacement(self.store, self.run(refresh_atomic=True), activation)
+        existing_attempt = None
         decision_context = activation.get("_decision_context")
         if any(t.get("execution_kind") == "native_subagent" and t.get("status") in {"reserved", "running", "uncertain"} for t in activation.get("tasks", [])):
             from .workflow_native_observations import recover
@@ -3237,6 +3263,8 @@ class WorkflowSupervisor:
         candidates = [config] + config.get("fallbacks", [])
         key = node["id"] if role == "node" else role
         selected_candidate = activation.get("execution_candidate") or (activation.get("token") or {}).get("execution_candidate") if role == "node" else run.get("orchestrator_recovery_candidate")
+        if activation.get("supersedes_execution_id") and activation.get("resume_question_id"):
+            selected_candidate = None  # Ordinary accepted question continuity has its own controls.
         previous = run["sessions"].get(key, {})
         orchestrator_override = getattr(self, "orchestrator_override", None)
         if role == "orchestrator" and orchestrator_override is not None:
@@ -3248,6 +3276,12 @@ class WorkflowSupervisor:
             try:
                 previous = self.store.get_run(owner_id).get("sessions", {}).get("orchestrator", {})
             except (OSError, ValueError, KeyError):
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 previous = {}
         if selected_candidate:
             selected = next((c for c in candidates if _candidate_key(c) == _candidate_key(selected_candidate)), None)
@@ -3255,6 +3289,9 @@ class WorkflowSupervisor:
                 if self._retry_usage_recovery_choice(node, role, activation, selected_candidate, "Recovery candidate is no longer configured"):
                     return None
                 self.attention("Recovery candidate is no longer configured")
+                return None
+            if activation.get("supersedes_execution_id") and selected != selected_candidate:
+                self.attention("Linked replan configured candidate changed")
                 return None
             candidates = [selected]
         if role == "node" and activation.get("resume_task_id"):
@@ -3288,6 +3325,12 @@ class WorkflowSupervisor:
                 if not recovered_inherited_turn:
                     await asyncio.to_thread(validate_inherited, self.store, run)
             except (WorkflowError, OSError, ValueError, KeyError, TypeError) as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 child_resume_refused("Child Resume refused: " + str(exc))
                 return None
             previous = copy.deepcopy(inherited["binding"])
@@ -3342,6 +3385,12 @@ class WorkflowSupervisor:
             outage = recovered_resume_outage(run, current_activation) if not activation.get("on_demand_call_id") else None
             if outage:
                 self.update(lambda r: require_fresh_checkpoint(r, activation["id"], *outage), "recovered_resume_requires_fresh")
+                return None
+        preparing_replan = next((t for t in activation.get("tasks", []) if activation.get("supersedes_execution_id") and t.get("task_id") == activation.get("planned_task_id") and t.get("status") in {"reserved", "not_started"} and t.get("dispatch_stage") == "preparing"), None)
+        if preparing_replan:
+            from .task_supervision import read_launch, read_task_record
+            if read_launch(self.registry.log_dir, preparing_replan["task_id"]) is not None or read_task_record(self.registry.log_dir, preparing_replan["task_id"], include_prompt=False) is not None:
+                self.attention("Planned replan preparing row has unresolved issuance evidence")
                 return None
         existing_attempt = next((t for t in reversed(activation.get("tasks", [])) if t.get("status") in {"reserved", "running", "uncertain"} and t.get("dispatch_stage") != "preparing"), None)
         if existing_attempt:
@@ -3421,12 +3470,20 @@ class WorkflowSupervisor:
                     owner_contract = orchestrator_contract(owner_run, candidate)
                     freedom = owner_contract["freedom"]
             except WorkflowError as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             network = False if run["network"] is False else node.get("network", run["network"])
             if role == "orchestrator":
                 network = owner_contract["network"]
-            task_id = existing_attempt["task_id"] if existing_attempt else uuid.uuid4().hex
+            task_id = existing_attempt["task_id"] if existing_attempt else (activation.get("planned_task_id") if not activation.get("resume_question_id") else None) or uuid.uuid4().hex
+            from .replan_retention import dispatcher_context
+            dispatcher = dispatcher_context(self, activation["id"], task_id)
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
             if role == "orchestrator" and run.get("runner_policy") == "guided" and any(t.get("status") != "not_started" for a in run["activations"] if a["role"] == "orchestrator" for t in a["tasks"]):
                 stage = next((n for n in run["definition"]["nodes"] if n["id"] == activation["node_id"]), {})
@@ -3477,26 +3534,45 @@ class WorkflowSupervisor:
             resource_attempt = None
             try:
                 if role == "node":
-                    if existing_attempt:
-                        resource_attempt = copy.deepcopy(existing_attempt.get("resource_attempt"))
+                    if existing_attempt or preparing_replan and not (preparing_replan.get("resource_attempt") or {}).get("released"):
+                        resource_attempt = copy.deepcopy((existing_attempt or preparing_replan).get("resource_attempt"))
                     else:
                         resource_attempt = await workflow_resources.acquire_attempt(self, activation, node, candidate_position)
                 held_key = (self.run_id, task_id)
-                if existing_attempt and held_key in self.tree.held:
+                if (existing_attempt or preparing_replan) and held_key in self.tree.held:
                     self.tree.held.pop(held_key)
                 else:
                     await workflow_resources.acquire_slot(self, activation, lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), control=role != "node")
             except DispatchNotStarted:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
                 return None
             except resources.ResourceError as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
                 self.attention("Resource acquisition stopped before dispatch: " + str(exc))
                 return None
             except BaseException:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
                 raise
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None, "execution_kind": "headless", "execution_fallback_reason": activation.get("execution_fallback_reason")}
+            reservation.update(dispatcher)
             reservation["context_delivery"] = context_delivery
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             if existing_attempt:
@@ -3507,7 +3583,13 @@ class WorkflowSupervisor:
                 if resource_attempt is not None:
                     workflow_resources.attach_attempt(self, activation["id"], resource_attempt, reservation)
                     a["resource_attempt"] = copy.deepcopy(resource_attempt)
-                a["tasks"].append(reservation)
+                if preparing_replan:
+                    prior = next(t for t in a["tasks"] if t["task_id"] == task_id)
+                    if prior["dispatch_stage"] != "preparing" or prior["status"] not in {"reserved", "not_started"}:
+                        raise DispatchNotStarted("Planned replan task was already issued")
+                    a["tasks"][a["tasks"].index(prior)] = reservation
+                else:
+                    a["tasks"].append(reservation)
                 from .workflow_messages import claim
                 claimed_messages.extend(claim(r, a, task_id))
                 if role == "node" and a.get("continue_previous"):
@@ -3522,6 +3604,12 @@ class WorkflowSupervisor:
                 if not existing_attempt:
                     self.update(reserve, "dispatch_reserved", {**reservation, "steering_role": role, "activation_id": activation["id"]})
             except BaseException:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 # No spawn was requested; failed persistence must not strand a permit.
                 self.tree.release_slot(control=role != "node")
                 workflow_resources.cleanup(lambda: workflow_resources.abandon_attempt(self, activation["id"], resource_attempt))
@@ -3550,6 +3638,10 @@ class WorkflowSupervisor:
                         return None
                     if existing_attempt:
                         task = self.registry.attach(task_id)
+                        if activation.get("supersedes_execution_id") and task is None:
+                            slot_uncertain = True
+                            self.attention("Linked replan issuance requires exact task reconciliation; no replacement identity is authorized")
+                            return None
                     else:
                         capability_stage = "spawn"
                         timeout_deadline = time.time() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
@@ -3587,13 +3679,19 @@ class WorkflowSupervisor:
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
                             task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"observe_repos": list(candidate["observe_repos"])} if "observe_repos" in candidate else {}), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}", **git_launch)
+                        if retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store):
+                            return None
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                         self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
+                    if retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store):
+                        return None
                     snapshot = await self._observe_attempt(task, node, role, activation, reservation)
                     if snapshot is None:
                         slot_uncertain = True
                         return None
                     existing_attempt = None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store):
+                    return None
                 self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"]), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
                 if strict_child_resume and snapshot.get("session_id") != inherited["source_session_id"]:
                     child_resume_refused("Child Resume did not confirm the selected conversation identity; explicit Fresh selection required")
@@ -3657,6 +3755,12 @@ class WorkflowSupervisor:
                     self.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
                 return snapshot
             except DispatchNotStarted as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
                 def not_started(r: dict[str, Any]) -> None:
                     current = next(a for a in r["activations"] if a["id"] == activation["id"])
@@ -3669,12 +3773,24 @@ class WorkflowSupervisor:
                     self.attention(str(exc))
                 return None
             except backends.NestedDispatchRefused as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
                 if self._retry_usage_recovery_choice(node, role, activation, candidate, str(exc)):
                     return None
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except backends.UnsupportedCapability as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 capability_refused = capability_refused or capability_stage != "settings"
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
                 if strict_child_resume:
@@ -3689,6 +3805,12 @@ class WorkflowSupervisor:
                 candidate_position += 1
                 continue
             except (SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
                 if isinstance(exc, SessionUnknownError) and activation.get("continue_previous") and node.get("session_mode") == "resume" and not activation.get("resume_question_id"):
                     # Positive no-spawn refusal permits a Fresh bootstrap on the same
@@ -3707,8 +3829,20 @@ class WorkflowSupervisor:
                     self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 raise
             except Exception as exc:
+                if activation.get("supersedes_execution_id") and existing_attempt:
+                    slot_uncertain = True
+                    self.attention("Linked replan existing issuance remains unknown; observe its exact task identity")
+                    return None
+                if retired_execution(self.run(refresh_atomic=True), activation["id"], storage=self.store):
+                    return None
                 if getattr(exc, "_receipt_refusal_run_ids", ()):
                     raise
                 # Once a dispatch was reserved, only positive evidence that no spawn happened
@@ -3729,11 +3863,17 @@ class WorkflowSupervisor:
             finally:
                 # Every exit from the attempt releases its slot; an uncertain attempt
                 # keeps the slot until reconciliation frees it explicitly.
+                replan = retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store)
+                from .replan_retention import bind_current
+                bind_current(self, replan)
+                if replan and not replan["journal"]["original_withdrawn"]:
+                    slot_uncertain = True
                 if slot_uncertain:
                     self.tree.hold_slot(self.run_id, task_id, control=role != "node")
                 else:
                     self.tree.release_slot(control=role != "node")
-                workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
+                if not replan:
+                    workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
         reason = f"All agents unavailable for {key}"
         if selected_candidate and self._retry_usage_recovery_choice(node, role, activation, selected_candidate, reason):
             return None
@@ -3832,7 +3972,16 @@ class WorkflowSupervisor:
 
     def _task_update(self, aid: str, tid: str, values: dict[str, Any]) -> None:
         def update(r: dict[str, Any]) -> None:
-            a = next(a for a in r["activations"] if a["id"] == aid)
+            from .workflow_replan import retired_execution
+            if retired_execution(r, aid, tid, storage=self.store):
+                return
+            a = next((a for a in r["activations"] if a["id"] == aid), None)
+            if a is None:
+                from .replan_certificates import read
+                cert = read(self.store, predecessor_execution_id=aid)
+                if cert["predecessor_task_id"] == tid and cert["root_workflow_run_id"] == r["workflow_run_id"]:
+                    return
+                raise WorkflowError("Missing activation has no exact compact predecessor proof")
             task = next(t for t in a["tasks"] if t["task_id"] == tid)
             update_task_state(a, task, values)
             from .workflow_messages import task_state
@@ -3959,6 +4108,9 @@ class WorkflowSupervisor:
                 token = next((t for t in self.run()["pending"] if t["id"] == token["id"]), token)
                 if token["node_id"] != node["id"]:
                     return  # An isolated recovery returned to its saved checkpoint.
+                from .replan_retention import owns_current_execution
+                if not owns_current_execution(token):
+                    return
                 result = token.get("result", {})
             if not result:
                 return
@@ -4041,6 +4193,11 @@ class WorkflowSupervisor:
                                         "connections": [edge["id"] for edge in selected],
                                         "selected_join_id": selected_join, "token_id": token["id"],
                                         "transition_sequence": rr.get("sequence", 0) + 1})
+            if rr.get("execution_contract") == "delegation" and token.get("execution_activation_id"):
+                from .replan_schema import record_normal_progress
+                decision = rr["decisions"][-1] if automatic is not None else next((d for d in reversed(rr["decisions"]) if d.get("decision_id") == token.get("accepted_decision_id")), None)
+                if decision:
+                    record_normal_progress(rr, token, decision)
             rr["transitions"] += len(selected)
             rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
             stack = copy.deepcopy(token.get("stack", []))
@@ -4280,6 +4437,10 @@ class WorkflowSupervisor:
         active: dict[str, asyncio.Task[Any]] = {}
         try:
             while True:
+                from .workflow_replan import active_replan, run_replan, release_retired_permits
+                release_retired_permits(self)
+                if active_replan(self.run(refresh_atomic=True)):
+                    await run_replan(self, run_id)
                 run = self.run(refresh_atomic=True)
                 link = run.get("parent_link") or {}
                 if link and run["status"] not in TERMINAL and run["status"] != "cancelling":
@@ -4320,7 +4481,8 @@ class WorkflowSupervisor:
                                 from .workflow_on_demand import cancel_reservations
                                 cancel_reservations(r)
                                 for activation in r["activations"]:
-                                    if activation.get("worker_result_required") and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
+                                    certified_no_start = any(p["withdrawal_witness"]["activation_id"] == activation["id"] and p["journal"]["original_withdrawn"] for p in r.get("steering", {}).get("replans", []))
+                                    if activation.get("worker_result_required") and not certified_no_start and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                                         activation["status"] = "cancelled"
                                     if activation["role"] == "node" and activation.get("pending_question_id") and not activation.get("node_result"):
                                         activation["status"] = "cancelled"
@@ -4338,7 +4500,12 @@ class WorkflowSupervisor:
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
                         if not self._arrive_join(token):
-                            active[token["id"]] = owned_job(self.state_layout, self._node(token), name=f"harflow-workflow-node-{token['id']}")
+                            from .replan_retention import new_outer_job
+                            coroutine, acknowledge = new_outer_job(self, token, identity.own_identity())
+                            job = owned_job(self.state_layout, coroutine, name=f"harflow-workflow-node-{token['id']}")
+                            acknowledge.bind(job)
+                            job.add_done_callback(acknowledge)
+                            active[token["id"]] = job
                             busy += 1
                     if not self.run(refresh_atomic=True)["pending"] and not active:
                         if self.run(refresh_atomic=True)["joins"]:

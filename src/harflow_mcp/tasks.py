@@ -1389,6 +1389,9 @@ class TaskRegistry:
         carries them."""
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
+        if task_id is not None:
+            from .task_withdrawal import check_execution_identity
+            check_execution_identity(self, store.validate_task_id(task_id))
         from .background_idle import resolve
         background_idle_seconds = resolve(background_idle_seconds)
         with _before_spawn():
@@ -2136,6 +2139,8 @@ class TaskRegistry:
                     raise ValueError(problem)
 
             task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
+            from .task_withdrawal import check_execution_identity
+            check_execution_identity(self, task_id)
             if caller_approvals:
                 approval_context = await asyncio.to_thread(approval_runtime.context, self._log_dir, task_id, interaction_owner)
                 interaction_owner = approval_context["interaction_owner"]
@@ -2338,8 +2343,34 @@ class TaskRegistry:
                         except OSError:
                             log.exception("task %s: could not clean scratch after a cancel", task_id)
                     raise task_resources.LaunchCancelled("cancelled before the task started")
+                from . import task_withdrawal
+                try:
+                    task_withdrawal.check_prestart(self, task_id)
+                except task_withdrawal.LaunchWithdrawn:
+                    shared_hold.release()
+                    if task_scratch is not None:
+                        try:
+                            scratch.remove(self._log_dir, task_id)
+                        except OSError:
+                            log.exception("task %s: could not clean scratch after withdrawal", task_id)
+                    raise
 
+        # A withdrawal arriving across this asynchronous verification/spawn boundary
+        # is acknowledged as issued/unknown by the owner, never converted to a signal.
         await asyncio.to_thread(backend.verify_launch_identity)
+        try:
+            # In-process callers must not bypass a managed reservation or a
+            # retirement published while asynchronous verification was running.
+            from .task_withdrawal import check_execution_identity
+            check_execution_identity(self, task_id)
+        except (ValueError, OSError):
+            shared_hold.release()
+            if task_scratch is not None:
+                try:
+                    scratch.remove(self._log_dir, task_id)
+                except OSError:
+                    log.exception("task %s: could not clean scratch after task identity refusal", task_id)
+            raise
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,

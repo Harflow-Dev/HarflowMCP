@@ -2136,3 +2136,48 @@ survives until the raw family is safely gone, and interrupted sidecar cleanup re
 sweeps. Missing roots or malformed bindings never authorize this exemption. Disabling task
 retention deliberately retains raw records/logs; the inline 32/64 windows are not a total raw-disk
 quota. ctl and steering compaction do not start a retention sweep.
+
+
+## Prestart worker withdrawal and linked retry
+
+Check `workflow-steering-replan.v1`, `workflow-steering-worker.v1` and
+`workflow-steering-window.v1` in a fresh handshake. The run must use schema 2 steering.
+`workflow-steering-status` exposes `replan_targets` only for the supported scope: one root
+connected worker explicitly configured `execution_mode: headless` and `session_mode: fresh`,
+with one pending launch, a positive finite configured cap, and one queued unissued response.
+An actual headless/Fresh fallback from another configured mode does not qualify. Native,
+Resume, specialist, nested and already-issued work refuse; no silent conversion occurs.
+
+Use `workflow-steering-replan RUN --request-file request.json --json`, or MCP
+`replan_workflow_steering`. Copy the exact engine-issued `target` and `withdrawal_witness`.
+The closed request has `schema_version:2`, `action:"replan"`, current `ledger_epoch`, a canonical
+UUID `request_id`, the queued `episode_id`/`expected_steering_revision`, current
+`expected_control_revision`/`expected_interaction_epoch`, and a bounded nonblank `reason`.
+There is no input for an alternate graph, assignment, candidate or permission. The Monitor
+channel still needs its existing cancellation eligibility; a human-channel flag alone grants
+nothing. Original-caller control also retains the normal interaction-owner checks.
+
+Admission records an intent and revokes only the demonstrably unissued queued response; its
+issuance charge remains. The exact launch owner must acknowledge that the original provider never
+started. Resource/message releases finish before one new activation/task is linked to the same
+assignment, node, selected candidate, Fresh mode and visit. Existing attempt calculations and caps
+apply. The old execution cannot finish the new token or reuse its retired task ID.
+
+The phases are `cancel_requested` (withdraw-only), `settling`, `settlement_unknown`,
+`ready_to_replan` and `replan_committed`. Accepted means the request was recorded, not that
+settlement or execution succeeded. A race across the last prestart check remains unknown and
+cannot authorize a replacement or cancellation signal. Ordinary cancellation remains separate.
+Probes, worktrees, artifacts, completed siblings and other prior effects are not rolled back.
+Replay the same request after response loss; inspect status/history rather than inventing an ID.
+
+Settled replan detail and certified never-started predecessor detail use the approved rolling
+32-entry/64-receipt and byte windows. Unknown claims and required current ownership/lineage remain
+protected. A predecessor also needs proof that its entire old dispatcher job has finished, or that
+its captured dispatcher generation is dead. Cumulative counts/provenance and explicit history gaps
+survive expiry. Permanent compact lineage and task-ID retirement certificates outlive the detail
+window; this is not a total disk quota. Actual accepted decisions, results, effects and required
+session/resource claims are not pruned as never-started history.
+
+This is producer support for a restricted prestart operation. It does not establish poststart
+containment/replacement, alternate route selection, consumer adoption, installation or release.
+See the [full contract](contracts.md#prestart-worker-withdrawal-and-linked-retry).

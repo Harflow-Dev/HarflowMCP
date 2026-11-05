@@ -9,7 +9,7 @@ from .workflow_steering import (SteeringError, _authorize, _source_check, _histo
                                REQUESTS, EPISODES, EPISODE_TURNS, ROOT_TURNS, UNSETTLED)
 
 
-def admit(storage, run, principal, monitor, request, digest, binding):
+def admit(storage, run, principal, monitor, request, digest, binding, *, admitted_epoch=None):
     scheduled = False
     result = None
     _authorize(run, principal, monitor)
@@ -29,7 +29,8 @@ def admit(storage, run, principal, monitor, request, digest, binding):
         return result, scheduled
     from .steering_window import check_namespace
     if request["action"] != "upgrade":
-        check_namespace(s, request)
+        if admitted_epoch is None or admitted_epoch != request.get('ledger_epoch'):
+            check_namespace(s, request)
         if s["schema_version"] == 1 and (len(s["requests"]) >= REQUESTS or len(s["history"]) >= 500):
             raise SteeringError("steering_queue_full", "Legacy receipt storage is full; explicitly upgrade to epoch-scoped steering")
     elif s["schema_version"] != 1 or request.get("schema_version") != 2 or request.get("ledger_epoch") != 0:
@@ -112,8 +113,9 @@ def admit(storage, run, principal, monitor, request, digest, binding):
                 raise SteeringError("workflow_terminal", "Cancelled builders cannot be reopened")
             if run.get("input_question") or run.get("pending_inputs") or run.get("orchestrator_usage_recovery"):
                 raise SteeringError("steering_question_pending", "Resolve the existing interaction first")
-            retained = sum(len(t.get("text", "").encode()) + len(t.get("final", "").encode()) for t in s["turns"])
-            if retained + len(request["text"].encode()) + 64 * 1024 > 1024 * 1024:
+            from .steering_window import retained_text_bytes
+            retained = retained_text_bytes(run)
+            if retained + 2 * len(request["text"].encode()) + 64 * 1024 > 1024 * 1024:
                 raise SteeringError("steering_queue_full", "Root retained conversation text capacity reached")
             if action == "open" and held(run):
                 raise SteeringError("steering_busy", "Reply, retarget or dismiss the existing held episode")

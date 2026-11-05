@@ -15,7 +15,51 @@ def _turn(supervisor, turn_id):
     return next(t for t in supervisor.run(refresh_atomic=True)["steering"]["turns"] if t["turn_id"] == turn_id)
 
 
-def _capture(supervisor, turn_id, snapshot=None, failure=None, unknown=False, error_message=None):
+def _replan_revoked(supervisor, turn_id, origin=None):
+    root = supervisor.run(refresh_atomic=True)
+    durable = next((t for t in root.get('steering', {}).get('turns', []) if t['turn_id'] == turn_id), None)
+    claim = durable or origin
+    if claim is None:
+        return False
+    if origin and durable and any(durable.get(k) != origin.get(k) for k in ('task_id', 'target')):
+        raise SteeringError('replan_source_unavailable', 'Response origin contradicts its durable turn')
+    marker = claim.get('revoked_by_replan_id')
+    retained_claim = next((r for r in root.get('steering', {}).get('replans', []) if r['withdrawal_witness']['queued_turn_id'] == turn_id), None)
+    if retained_claim and marker != retained_claim['replan_id']:
+        raise SteeringError('replan_source_unavailable', 'Retained replan response lacks its exact revocation marker')
+    if marker and (claim.get('state') != 'settled' or claim.get('outcome') != 'request_expired' or claim.get('not_started') is not True):
+        raise SteeringError('replan_source_unavailable', 'Response revocation lacks positive no-issuance shape')
+    target = claim.get('target') or {}
+    if target.get('workflow_run_id') == root['workflow_run_id'] and target.get('path') == [root['workflow_run_id']] and target.get('root_workflow_run_id') != root['workflow_run_id']:
+        raise SteeringError('replan_source_unavailable', 'Response origin contradicts root ownership')
+    root_scope = target.get('workflow_run_id') == root['workflow_run_id'] and target.get('root_workflow_run_id') == root['workflow_run_id'] and target.get('path') == [root['workflow_run_id']]
+    if not root_scope:
+        if marker:
+            raise SteeringError('replan_source_unavailable', 'Replan revocation is not root scoped')
+        return False
+    if durable is not None and not marker:
+        return False
+    if not marker and any(a['id'] == target.get('activation_id') for a in root['activations']):
+        return False
+    record = next((r for r in root.get('steering', {}).get('replans', []) if r['replan_id'] == marker), None)
+    if record:
+        witness = record['withdrawal_witness']
+        valid = (witness['queued_turn_id'] == turn_id and witness['queued_task_id'] == claim['task_id']
+                 and witness['activation_id'] == target.get('activation_id') and record['target'] == target)
+    else:
+        from .replan_certificates import read
+        certificate = read(supervisor.store, **({'replan_id': marker} if marker else {'predecessor_execution_id': target['activation_id']}))
+        valid = (certificate['queued_turn_id'] == turn_id and certificate['queued_task_id'] == claim['task_id']
+                 and certificate['predecessor_execution_id'] == target.get('activation_id')
+                 and certificate['root_workflow_run_id'] == root['workflow_run_id'])
+    if not valid:
+        raise SteeringError('replan_source_unavailable', 'Response revocation lacks exact replan provenance')
+    return True
+
+
+def _capture(supervisor, turn_id, snapshot=None, failure=None, unknown=False, error_message=None, origin=None):
+    if _replan_revoked(supervisor, turn_id, origin):
+        return
     from .orchestrator_steering import capture
     turn = _turn(supervisor, turn_id)
     if unknown and turn["state"] == "unknown" and turn.get("outcome") == failure:
@@ -44,6 +88,8 @@ def _capture(supervisor, turn_id, snapshot=None, failure=None, unknown=False, er
                     q["answer_delivery_state"] = "pending"
                     q.pop("reply_task_id", None)
     with supervisor.store.tree_mutation(supervisor.run_id):
+        if _replan_revoked(supervisor, turn_id):
+            return
         if not (snapshot is None and not unknown and turn["state"] in {"queued", "reserved"}):
             supervisor.store.update_run(target["workflow_run_id"], update, "worker_steering_task_captured")
         capture(supervisor, turn_id, snapshot, failure=failure, unknown=unknown)
@@ -53,6 +99,8 @@ def _capture(supervisor, turn_id, snapshot=None, failure=None, unknown=False, er
 
 async def _observe_boundary(supervisor, turn):
     from .steering_runner import _wait_observed
+    if _replan_revoked(supervisor, turn.get("turn_id"), turn):
+        return False
     for boundary in turn.get("boundary_tasks", []):
         child = supervisor.store.get_run(boundary["workflow_run_id"], refresh_atomic=True)
         a = next(a for a in child["activations"] if a["id"] == boundary["activation_id"])
@@ -64,6 +112,8 @@ async def _observe_boundary(supervisor, turn):
                 return False
             deadline = attempt.get("timeout_deadline")
             while not task.done.is_set():
+                if _replan_revoked(supervisor, turn.get("turn_id"), turn):
+                    return False
                 if supervisor.run(refresh_atomic=True).get("status") == "cancelling" or deadline and time.time() >= deadline:
                     await asyncio.wait_for(supervisor.registry.cancel_cascade(task.task_id, workflow_control=True), timeout=20)
                     break
@@ -75,11 +125,18 @@ async def _observe_boundary(supervisor, turn):
             snapshot = task.snapshot()
         if not snapshot or snapshot.get("task_id") != boundary["task_id"] or type(snapshot.get("exit_code")) is not int or snapshot.get("output_drained") is not True or snapshot.get("outcome_unknown") or snapshot.get("status") not in {"completed", "failed", "cancelled"}:
             return False
+        if _replan_revoked(supervisor, turn.get("turn_id"), turn):
+            return False
         def observed(run):
+            from .workflow_replan import retired_execution
+            if retired_execution(run, boundary["activation_id"], boundary["task_id"]):
+                return
             activation = next(a for a in run["activations"] if a["id"] == boundary["activation_id"])
             next(t for t in activation["tasks"] if t["task_id"] == boundary["task_id"]).update(status=snapshot["status"], result=copy.deepcopy(snapshot))
             activation.update(worker_result_required=True, steering_superseded=True)
         supervisor.store.update_run(boundary["workflow_run_id"], observed, "worker_steering_boundary_observed")
+        if _replan_revoked(supervisor, turn.get("turn_id"), turn):
+            return False
         # A restarted ordinary dispatcher no longer owns its finally block.
         # Release only this positively settled execution's existing resource proof
         # through the normal coordinator before requesting a new response's slot.
@@ -109,15 +166,30 @@ async def _run_owned(supervisor, run_id):
     tid = turn["turn_id"]
     if turn["state"] == "queued":
         if not await _observe_boundary(supervisor, turn):
-            _capture(supervisor, tid, failure="steering_delivery_unknown", unknown=True)
+            _capture(supervisor, tid, origin=turn, failure="steering_delivery_unknown", unknown=True)
             return
-        supervisor.update(lambda r: next(t for t in r["steering"]["turns"] if t["turn_id"] == tid).update(state="reserved"), "worker_steering_boundary_ready")
+        claimed = False
+        def ready(root):
+            nonlocal claimed
+            current = next((t for t in root['steering']['turns'] if t['turn_id'] == tid), None)
+            if current is None:
+                return
+            episode = _episode(root, current)
+            if current['state'] != 'queued' or not episode['hold'] or episode['steering_revision'] != current['steering_revision'] or root['interaction_epoch'] != current['commit_target']['interaction_epoch']:
+                return
+            if any(p['withdrawal_witness']['queued_turn_id'] == tid for p in root['steering'].get('replans', [])):
+                return
+            current['state'] = 'reserved'
+            claimed = True
+        supervisor.update(ready, "worker_steering_boundary_ready")
+        if not claimed:
+            return
         turn = _turn(supervisor, tid)
     task = None
     if turn["state"] != "reserved":
         task = supervisor.registry.attach(turn["task_id"])
         if task is None or task.task_id != turn["task_id"]:
-            _capture(supervisor, tid, failure="steering_delivery_unknown", unknown=True)
+            _capture(supervisor, tid, origin=turn, failure="steering_delivery_unknown", unknown=True)
             return
     else:
         with supervisor.store.tree_mutation(run_id):
@@ -125,24 +197,24 @@ async def _run_owned(supervisor, run_id):
             turn = _turn(supervisor, tid)
             ep = _episode(root, turn)
             if not ep["hold"] or ep.get("dismiss_requested") or root.get("status") in {"cancelled", "cancelling"}:
-                _capture(supervisor, tid, failure="interaction_revoked")
+                _capture(supervisor, tid, origin=turn, failure="interaction_revoked")
                 commit_worker_result(supervisor, tid)
                 return
             try:
                 current = current_target(supervisor.store, root, turn["commit_target"])
             except SteeringError as exc:
-                _capture(supervisor, tid, failure=exc.code)
+                _capture(supervisor, tid, origin=turn, failure=exc.code)
                 commit_worker_result(supervisor, tid)
                 return
             if current != turn["commit_target"]:
-                _capture(supervisor, tid, failure="steering_target_stale")
+                _capture(supervisor, tid, origin=turn, failure="steering_target_stale")
                 commit_worker_result(supervisor, tid)
                 return
             run, _, activation, node, token = _parts(supervisor.store, root, turn["commit_target"])
             candidate = turn["candidate"]
             backend = get_backend(candidate["backend"])
             if not turn["allow_fresh_context"] or not backend.capabilities.supports_turn_cap:
-                _capture(supervisor, tid, failure="steering_budget_unsupported")
+                _capture(supervisor, tid, origin=turn, failure="steering_budget_unsupported")
                 commit_worker_result(supervisor, tid)
                 return
             def reserve(r):
@@ -179,7 +251,7 @@ async def _run_owned(supervisor, run_id):
         from .task_supervision import read_task_record
         source = read_task_record(supervisor.registry.log_dir, turn["target"]["task_id"])
         if source is None or source.backend != candidate["backend"] or source.model != candidate.get("model") or source.reasoning_effort != candidate.get("reasoning_effort") or source.repo_path != original.get("repo_path", run["repo_path"]):
-            _capture(supervisor, tid, failure="steering_source_unavailable")
+            _capture(supervisor, tid, origin=turn, failure="steering_source_unavailable")
             commit_worker_result(supervisor, tid)
             return
         kwargs.update({k: copy.deepcopy(getattr(source, k)) for k in ("model", "reasoning_effort", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "observe_repos", "freedom", "network", "interaction_owner")})
@@ -212,7 +284,7 @@ async def _run_owned(supervisor, run_id):
             raise
         except Exception as exc:
             positive = not start_called or getattr(exc, "harflow_not_started", False) is True
-            _capture(supervisor, tid, failure=getattr(exc, "code", "provider_not_started") if positive else "steering_delivery_unknown", unknown=not positive, error_message=str(exc))
+            _capture(supervisor, tid, origin=turn, failure=getattr(exc, "code", "provider_not_started") if positive else "steering_delivery_unknown", unknown=not positive, error_message=str(exc))
             if positive:
                 commit_worker_result(supervisor, tid)
             return
@@ -222,7 +294,7 @@ async def _run_owned(supervisor, run_id):
     except asyncio.CancelledError:
         raise
     except Exception:
-        _capture(supervisor, tid, failure="capture_unknown", unknown=True)
+        _capture(supervisor, tid, origin=turn, failure="capture_unknown", unknown=True)
         return
 
 
@@ -249,10 +321,10 @@ def _finish_response(supervisor, tid, snapshot):
     snapshot = {**snapshot, **{flag: snapshot.get(flag, False) for flag in ("output_drained", "timed_out", "outcome_unknown", "is_error")}}
     turn = _turn(supervisor, tid)
     if snapshot.get("task_id") != turn["task_id"]:
-        _capture(supervisor, tid, failure="capture_unknown", unknown=True)
+        _capture(supervisor, tid, origin=turn, failure="capture_unknown", unknown=True)
         return
     failure = captured_failure(snapshot, turn["task_id"])
-    _capture(supervisor, tid, snapshot, failure=failure, unknown=failure == "capture_unknown")
+    _capture(supervisor, tid, snapshot, origin=turn, failure=failure, unknown=failure == "capture_unknown")
     if failure == "capture_unknown":
         return
     target = turn["target"]

@@ -235,6 +235,11 @@ def maintain(storage, run_id):
             compact(run, managed_task_ids=managed, settled_effect_turn_ids=effects, protected_task_ids=heads, retirement_turn_ids=removed)
             run['steering'].pop('compaction_pending', None)
         storage.update_run(run_id, reclaim, 'steering_history_compacted')
+    current = storage.get_run(run_id, refresh_atomic=True)
+    ledger = current.get('steering', {})
+    if ledger.get('replans') or ledger.get('replan_compaction_pending') or any(a.get('withdrawing_replan_id') for a in current.get('activations', [])):
+        from .replan_retention import maintain as maintain_replans
+        maintain_replans(storage, run_id)
 
 
 def worker_sources(storage, run):
@@ -243,7 +248,8 @@ def worker_sources(storage, run):
     root = run if root_id == run['workflow_run_id'] else storage.get_run(root_id, refresh_atomic=True)
     if root.get('steering', {}).get('schema_version') != 2:
         return []
-    return [(value, a) for value, _ in _tree(storage, root).values() for a in value['activations'] if a.get('worker_result_required')]
+    from .workflow_replan import superseded_execution
+    return [(value, a) for value, _ in _tree(storage, root).values() for a in value['activations'] if a.get('worker_result_required') and not superseded_execution(root, a, storage)]
 
 
 def scheduling_blocked(storage, run, token):

@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Add explicit bounded builder conversational steering through ctl and agent MCP, with original-caller process binding, native human ownership recovery, exact revision/witness checks, durable idempotency and queued active-turn handling. Prose waits for another caller request; framed proposals stay unsaved and preserve Apply/Save. Ordinary builder behavior remains unchanged. Worker/orchestrator steering, cancellation/replanning, consumer adoption and real-backend qualification remain separate work.
+- Add explicit builder, orchestrator and qualified worker conversational steering through ctl and agent MCP. Prose waits for the caller; strict current role frames commit only configured actions. Each explicit message grants one finite response, preserving actual permissions and normal execution allowances. Epoch-scoped rolling history can expire with explicit gaps and retained ownership proofs.
+- Add exact prestart withdrawal and a same-assignment linked retry for root workers configured headless with fixed Fresh sessions and a finite original cap. Generation-bound withdrawal never authorizes a late signal; issued work and uncertain spawn remain ineligible for replacement. Consumer adoption, real-backend qualification and release remain separate gates.
 
 ## 0.0.10
 

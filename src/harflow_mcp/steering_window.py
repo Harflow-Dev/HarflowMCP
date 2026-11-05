@@ -44,7 +44,7 @@ def close_namespace(run):
 def protected_turn_ids(run, settled_effect_turn_ids=frozenset(), protected_task_ids=frozenset()):
     ledger = run["steering"]
     sessions = {v.get("task_id") for v in run.get("sessions", {}).values() if isinstance(v, dict)} | set(protected_task_ids)
-    protected = set()
+    protected = {r["withdrawal_witness"]["queued_turn_id"] for r in ledger.get("replans", [])}
     for turn in ledger["turns"]:
         # Effect claims and crosslinks outlive conversation retention. Never infer
         # settlement from a terminal-looking TaskRecord or a missing task.
@@ -67,7 +67,14 @@ def _size(value):
     return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
 
 
-def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozenset(), protected_task_ids=frozenset(), retirement_turn_ids=None):
+def retained_text_bytes(run):
+    ledger = run['steering']
+    return (sum(len(t.get('text', '').encode()) + len(t.get('final', '').encode()) for t in ledger['turns'])
+            + sum(len(h[key].encode()) for h in ledger['history'] for key in ('text','reason') if isinstance(h.get(key), str))
+            + sum(len(r['reason'].encode()) for r in ledger.get('replans', [])))
+
+
+def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozenset(), protected_task_ids=frozenset(), retirement_turn_ids=None, reserve_text_bytes=96 * 1024):
     """Prune positively settled closed namespaces, retaining all live proofs.
 
     ``managed_task_ids`` is positive evidence of separately persisted ownership,
@@ -85,8 +92,7 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
                       or t["task_id"] in managed_task_ids)]
     remove = set()
     def text_size():
-        return (sum(len(t.get("text", "").encode()) + len(t.get("final", "").encode()) for t in ledger["turns"])
-                + sum(len(h.get("text", "").encode()) for h in ledger["history"] if isinstance(h.get("text"), str)))
+        return retained_text_bytes(run)
     def retire(turn):
         remove.add(turn["turn_id"])
         ledger["turns"].remove(turn)
@@ -106,15 +112,15 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
         if usage.get("num_turns") is not None:
             cumulative["observed_num_turns"] += usage["num_turns"]
     # Retain at most 32 unprotected settled turns; protected evidence is additional.
-    unprotected = [t for t in ledger["turns"] if t["turn_id"] not in protected]
-    excess = max(0, len(unprotected) - TURN_WINDOW)
-    for turn in removable[:excess]:
-        retire(turn)
+    recent_settled = {t['turn_id'] for t in [t for t in ledger['turns'] if t['state'] == 'settled'][-TURN_WINDOW:]}
+    for turn in removable:
+        if turn['turn_id'] not in recent_settled:
+            retire(turn)
     # Raw history duplicates captures and request prose. Preserve history for all
     # retained turns and latest episode reply; absolute sequence holes expose gaps.
     def trim(*, byte_pressure=False):
         linked = {t["turn_id"] for t in ledger["turns"]}
-        used_requests = {t["request_id"] for t in ledger["turns"]}
+        used_requests = {t["request_id"] for t in ledger["turns"]} | {r["request_key"] for r in ledger.get("replans", [])}
         receipts = ledger["requests"]
         candidates = [k for k, r in receipts.items() if k not in used_requests and r["ledger_epoch"] <= ledger["closed_epoch"]]
         for key in candidates[:len(candidates) if byte_pressure else max(0, len(receipts) - RECEIPT_WINDOW)]:
@@ -129,8 +135,10 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
         for ep in ledger["episodes"]:
             if ep.get("supersedes_episode_id") not in {e["episode_id"] for e in ledger["episodes"]}:
                 ep.pop("supersedes_episode_id", None)
+        replan_ids = {r["replan_id"] for r in ledger.get("replans", [])}
+        retained_request_ids = {receipts[key]["request_id"] for key in used_requests if key in receipts}
         reply_sequences = {int(ep["latest_reply_ref"].split(":")[1]) for ep in ledger["episodes"] if ep.get("latest_reply_ref")}
-        ledger["history"][:] = [h for h in ledger["history"] if h.get("turn_id") in linked or h["sequence"] in reply_sequences or (h["sequence"] > ledger["sequence"] - 64 and not isinstance(h.get("text"), str))]
+        ledger["history"][:] = [h for h in ledger["history"] if h.get("turn_id") in linked or h.get("request_id") in retained_request_ids or h.get("replan_id") in replan_ids or h["sequence"] in reply_sequences or (h["sequence"] > ledger["sequence"] - 64 and not isinstance(h.get("text"), str) and not isinstance(h.get("reason"), str))]
         if ledger["history"] and ledger["history"][-1]["sequence"] < ledger["sequence"]:
             ledger["history"].append({"sequence": ledger["sequence"], "kind": "history_gap", "timestamp": __import__("time").time()})
         floor = ledger["history"][0]["sequence"] - 1 if ledger["history"] else ledger["sequence"]
@@ -139,18 +147,18 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
         for activation in run.get("activations", []):
             activation["tasks"] = [t for t in activation.get("tasks", []) if not (t.get("steering_turn_id") in remove and t["task_id"] in managed_task_ids)]
     trim()
-    if text_size() > TEXT_LIMIT - 96 * 1024 or _size(run) > METADATA_LIMIT - 128 * 1024:
+    if text_size() > TEXT_LIMIT - reserve_text_bytes or _size(run) > METADATA_LIMIT - 128 * 1024:
         trim(byte_pressure=True)
     for turn in removable:
-        if text_size() <= TEXT_LIMIT - 96 * 1024 and _size(run) <= METADATA_LIMIT - 128 * 1024:
+        if text_size() <= TEXT_LIMIT - reserve_text_bytes and _size(run) <= METADATA_LIMIT - 128 * 1024:
             break
         trim(byte_pressure=True)
-        if text_size() <= TEXT_LIMIT - 96 * 1024 and _size(run) <= METADATA_LIMIT - 128 * 1024:
+        if text_size() <= TEXT_LIMIT - reserve_text_bytes and _size(run) <= METADATA_LIMIT - 128 * 1024:
             break
         if turn in ledger["turns"]:
             retire(turn)
             trim(byte_pressure=True)
-    if text_size() > TEXT_LIMIT - 96 * 1024 or _size(run) > METADATA_LIMIT - 128 * 1024:
+    if text_size() > TEXT_LIMIT - reserve_text_bytes or _size(run) > METADATA_LIMIT - 128 * 1024:
         from .workflow_steering import SteeringError
         raise SteeringError("steering_queue_full", "Protected steering evidence cannot fit bounded storage; observe unresolved issuances")
     return remove

@@ -333,7 +333,7 @@ def _worker_steering_receipts(value, path):
 
 def _attempt(value, path):
     _shape(value, {**_fields("task_id status dispatch_stage freedom repo_path session_mode assignment_prompt execution_kind dispatch_nonce owner_task_id owner_session_id transport_task_id assignment_sha256 activity_level native_owner_execution_id error recovery_reason", numbers="reserved_at finished_at started_at timeout_deadline timeout_requested_at", booleans="usage_recovery_checkpointed native_terminal can_cancel_child can_resume_child context_acknowledged", nullable_strings="resume_task_id execution_fallback_reason native_child_id owner_session_generation"),
-                   "steering_turn_id": _id, "steering_superseded": bool, "candidate": _candidate, "network": (bool, N), "result": _result, "resource_attempt": _resource_attempt, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
+                   "dispatcher_identity": _identity, "dispatcher_job_id": _id, "steering_turn_id": _id, "replan_withdrawn": bool, "steering_superseded": bool, "candidate": _candidate, "network": (bool, N), "result": _result, "resource_attempt": _resource_attempt, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
                    "harness_metadata": _object({"requested": _candidate, "effective": _object({**_fields("backend freedom settings_source provider_identity", nullable_strings="model reasoning_effort default_model"), "network": (bool, N)}), "observed": _nullable(_result), "verification_status": str, "provenance": str, "metadata_source": str})}, path)
     missing = {"task_id", "status"} - value.keys()
     if missing:
@@ -376,9 +376,20 @@ def _pending_result(value, path):
     _shape(value, {"optional_failure": str, "failure_evidence": _result}, path)
 
 
+def _normal_progress(value, path):
+    fields = {"v": int, "kind": str, "execution_id": _id, "origin_token_id": _id, "routed_token_id": _id, "visit_id": _id, "result_digest": _steering_digest, "decision_id": str, "decision_activation_id": _nullable(_id), "decision_digest": _steering_digest, "transition_sequence": _nullable(_counter)}
+    _shape(value, fields, path)
+    if set(value) != set(fields) or value['v'] != 1 or value['kind'] not in {'normal_transition','normal_decision'}:
+        raise ValueError('Malformed exact normal progress receipt')
+    if value['kind'] == 'normal_transition' and (value['decision_activation_id'] is not None or type(value['transition_sequence']) is not int or value['transition_sequence'] < 1):
+        raise ValueError('Normal transition lacks exact runner sequence')
+    if value['kind'] == 'normal_decision' and (value['decision_activation_id'] is None or value['transition_sequence'] is not None):
+        raise ValueError('Normal decision lacks its exact control activation')
+
+
 def _activation(value, path):
     _shape(value, {**_fields("id node_id role status visit_id decision_id assignment_prompt raw_output result_error pending_question_id resume_question_id turn_prompt retry_of_execution_id resolved_by_execution_id execution_kind on_demand_call_id execution_session_mode owner_task_id activity_level", numbers="created_at finished_at", arrays="resolved_execution_refs input_result_refs authorized_artifact_refs feedback_ids inspection_results", nullable_strings="execution_fallback_reason"),
-                   "worker_result_required": bool, "steering_superseded": bool, "steering_turn_id": _id, "worker_steering_assignment_digest": _steering_digest, "worker_steering_question_id": _id, "worker_steering_receipts": _worker_steering_receipts, "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "resource_attempt": _resource_attempt, "resource_wait": dict, "resource_held_waiting_for_slot": bool, "on_demand_node": dict, "context_delivery": _context}, path)
+                   "replan_id": _id, "withdrawing_replan_id": _id, "supersedes_execution_id": _id, "superseded_by_execution_id": _id, "planned_task_id": _id, "attempt_in_visit": _counter, "execution_candidate": _candidate, "normal_progress_receipt": _normal_progress, "worker_result_required": bool, "steering_superseded": bool, "steering_turn_id": _id, "worker_steering_assignment_digest": _steering_digest, "worker_steering_question_id": _id, "worker_steering_receipts": _worker_steering_receipts, "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "resource_attempt": _resource_attempt, "resource_wait": dict, "resource_held_waiting_for_slot": bool, "on_demand_node": dict, "context_delivery": _context}, path)
     missing = {"id", "node_id", "role", "status", "created_at", "tasks"} - value.keys()
     if missing:
         raise ValueError(f"Incomplete {path}: missing {', '.join(sorted(missing))}")
@@ -476,6 +487,10 @@ def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
             raise ValueError("Workflow run id does not match source id")
         _shape(value, {**CORE, **OPTIONAL}, "run")
         validate_steering_receipts(value, run_id)
+        from .replan_schema import normal_progress_valid
+        for activation in value["activations"]:
+            if activation.get("normal_progress_receipt") and not normal_progress_valid(value, activation):
+                raise ValueError("Normal progress receipt contradicts its exact result/control/visit provenance")
         if "steering" in value:
             from .workflow_steering import validate_ledger
             validate_ledger(value["steering"], value)

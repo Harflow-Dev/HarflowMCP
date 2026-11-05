@@ -433,7 +433,7 @@ def generate():
     version.update(product_version=PRODUCT_VERSION, capabilities=list(CAPABILITIES))
     output[BUNDLE / 'version-info.json'] = canonical(version)
     manifest['files']['version-info.json'] = hashlib.sha256(output[BUNDLE / 'version-info.json']).hexdigest()
-    for capability in ('workflow-steering-read.v1', 'workflow-steering-builder.v1', 'workflow-steering-orchestrator.v1', 'workflow-steering-worker.v1', 'workflow-steering-window.v1'):
+    for capability in ('workflow-steering-read.v1', 'workflow-steering-builder.v1', 'workflow-steering-orchestrator.v1', 'workflow-steering-worker.v1', 'workflow-steering-window.v1', 'workflow-steering-replan.v1'):
         assert capability in CAPABILITIES
         name = 'invalid-steering-missing-' + capability.rsplit('.', 1)[0] + '.json'
         doc = {**version, 'capabilities': [item for item in version['capabilities'] if item != capability]}

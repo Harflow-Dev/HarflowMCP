@@ -22,6 +22,7 @@ from .tasks import TaskRegistry, _before_spawn
 from .task_supervision import MAX_REQUEST, mark, read_launch
 from . import resources as resource_ledger
 from . import task_resources
+from . import task_withdrawal
 from . import task_changes_capture
 from datetime import datetime, timedelta, timezone
 
@@ -70,6 +71,7 @@ async def _create_worktree(registry, task_id: str, generation: str, plan: dict, 
              worktree=info)
         task_resources.clear_cancel(log_dir, task_id)
 
+    task_withdrawal.check_prestart(registry, task_id)
     if task_resources.cancel_requested(log_dir, task_id):
         await settle(RuntimeError('cancelled before the worktree was created'), None)
         mark(log_dir, task_id, generation, not_started_reason='cancelled')
@@ -115,6 +117,7 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
              resources=held | {'state': 'not_started'})
         task_resources.clear_cancel(log_dir, task_id)
 
+    task_withdrawal.check_prestart(registry, task_id)
     mark(log_dir, task_id, generation, state='waiting_for_resources', resources=held)
     last_reap = [0.0]
 
@@ -128,6 +131,7 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
                 raise
             except Exception:
                 pass
+        task_withdrawal.check_prestart(registry, task_id)
         return not task_resources.cancel_requested(log_dir, task_id)
 
     deadline = started + timedelta(seconds=wait)
@@ -151,6 +155,9 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
         granted = held | {'state': 'granted', 'granted_at': entry.granted_at}
         if entry.borrows_from is not None:
             granted['borrowed_from'] = entry.borrows_from
+        # The just-granted entry is already named by the waiting receipt, so strict
+        # withdrawal cleanup can release it even before grant publication.
+        task_withdrawal.check_prestart(registry, task_id)
         if task_resources.cancel_requested(log_dir, task_id):
             held = granted
             await settle('cancelled', 'cancelled before the task started')
@@ -237,9 +244,17 @@ async def run(descriptor: int, task_id: str, generation: str):
                     or hashlib.sha256(raw).hexdigest() != saved['request_sha256']):
                 raise ValueError('Private authorization does not match task reservation')
             mark(registry.log_dir, task_id, generation, state='claimed', owner=registry._owner)
+            registry._launch_generations = {task_id: generation}
+            configuration = dict(request)
+            configuration.pop('generation')
+            configuration['kwargs'] = {key: value for key, value in request['kwargs'].items() if key != 'dispatch_origin'}
+            registry._launch_withdrawal_fingerprints = {task_id: {'request_sha256': hashlib.sha256(raw).hexdigest(),
+                'configuration_sha256': hashlib.sha256(json.dumps(configuration, ensure_ascii=False, allow_nan=False).encode()).hexdigest()}}
             started = False
             grant = None
+            worktree_request = None
             try:
+                task_withdrawal.check_prestart(registry, task_id)
                 worktree_request = request['kwargs'].pop('worktree_request', None)
                 rebuild = request['kwargs'].pop('rebuild', None)
                 if request['kwargs'].get('resource_request') is not None:
@@ -283,6 +298,11 @@ async def run(descriptor: int, task_id: str, generation: str):
                     registry._launch_generations = {task_id: generation}
                 task = await registry._execute_prepared(invocation, **kwargs, **({'resource_grant': grant} if grant is not None else {}))
                 started = True
+                # A late withdraw-only intent never enters the legacy signal path.
+                try:
+                    task_withdrawal.acknowledge_issued(registry, task_id)
+                except (ValueError, OSError):
+                    log.warning('late withdrawal acknowledgement unavailable for %s; provider remains supervised', task_id, exc_info=True)
                 # The spawn is the consumption point for follow-ups that were handed to a launch that
                 # may have waited; `finish` is idempotent with the caller-side consumption.
                 _release_followups(registry.log_dir, task_id, request, 'consumed')
@@ -312,6 +332,9 @@ async def run(descriptor: int, task_id: str, generation: str):
                 # Stored diffs are captured only after settlement, so neither the receipt nor `outcome` waits for them.
                 if task.exit_code is not None and task.latest_record_landed:
                     await _capture_changes(registry.log_dir, task)
+            except task_withdrawal.LaunchWithdrawn as exc:
+                task_withdrawal.settle_withdrawn(registry, task_id, exc, request, grant)
+                return
             except BaseException as exc:
                 # A record or ambiguous process creation means execution can never safely retry.
                 if not started and store.read(registry.log_dir, task_id) is None and getattr(exc, 'harflow_not_started', False):

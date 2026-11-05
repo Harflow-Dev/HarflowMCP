@@ -538,6 +538,17 @@ No old consumer compatibility or release qualification claim is made by this doc
 
 ## 9. ST04 control boundary
 
+The implemented restricted producer contract is [prestart worker withdrawal and linked retry](../contracts.md#prestart-worker-withdrawal-and-linked-retry).
+It uses a generation-bound withdraw-only protocol for root configured-headless fixed-Fresh workers,
+with no late signalling or poststart replacement authority. Exact owner proof, completed release
+journal, same-assignment/candidate normal-budget linkage and permanent old execution fences apply.
+The owner additionally approved bounded settled replan-detail and certified never-started
+predecessor expiry, preserving accepted decisions/effects, unknown/current proofs, cumulative
+counts/provenance and explicit gaps. Full dispatcher quiescence and permanent compact lineage/task-ID
+proofs precede detail retirement. Neither detail expiry nor a compact certificate grants dispatch.
+
+### Broader cancellation and route reselection remains a later gate
+
 ST02/ST03 refuse cancellation/reselection via prose or steering action. ST04 candidate separate
 `workflow-steering-replan` / `replan_workflow_steering` requires exact episode, expected epochs/
 checkpoint/goal, attempt IDs and descendant scope, reason, proposed configured continuation refs

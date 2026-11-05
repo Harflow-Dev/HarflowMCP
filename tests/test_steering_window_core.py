@@ -14,7 +14,7 @@ def ledger(count=600):
     return {"workflow_run_id": "root", "activations": [], "sessions": {}, "steering": {
         "schema_version": 2, "ledger_epoch": 1, "closed_epoch": 0, "history_floor": 0,
         "sequence": count, "turns": turns, "commits": [], "episodes": [{"episode_id": "episode", "hold": True, "latest_reply_ref": f"history:{count}"}],
-        "requests": {t["request_id"]: {"ledger_epoch": 0, "turn_id": t["turn_id"], "episode_id": "episode"} for t in turns},
+        "requests": {t["request_id"]: {"request_id": t["request_id"], "ledger_epoch": 0, "turn_id": t["turn_id"], "episode_id": "episode"} for t in turns},
         "history": [{"sequence": i + 1, "kind": "reply", "turn_id": f"t{i}"} for i in range(count)],
         "cumulative": {"issuances": count, "retired_turns": 0, "observed_cost_usd": 0., "observed_num_turns": 0, "unknown_usage": 0, "reserved_harness_turns": 0}}}
 

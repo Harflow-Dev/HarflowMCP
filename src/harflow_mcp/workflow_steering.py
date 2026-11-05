@@ -225,12 +225,15 @@ def get_workflow_steering(workflow_run_id, *, root=None, monitor=False):
         if not eligible:
             actions = [a for a in actions if a not in {"open", "reply", "retarget"}]
             refusals.extend(target_refusals or [{"code": "steering_target_stale", "message": "No current orchestration decision checkpoint"}])
+    from .workflow_replan import targets as replan_targets, projection as replan_projection
     return {"steering_version": 1, "root_workflow_run_id": workflow_run_id, "owner": s["owner"],
             "interaction_epoch": run["interaction_epoch"], "control_revision": s["control_revision"],
             "targets": issued_targets, "episodes": copy.deepcopy(s["episodes"]), "sequence": s["sequence"],
             "pending_steering_count": sum(ep["hold"] for ep in s["episodes"]),
             "budgets": {"root_issuances": s.get("cumulative", {}).get("issuances", len(s["turns"])), "root_limit": ROOT_TURNS if s["schema_version"] == 1 else None, "episode_limit": EPISODE_TURNS if s["schema_version"] == 1 else None,
                         "provenance": "durable_nonrefundable_issuance", "harness_turn_cap_maximum": 8},
+            "replan_targets": replan_targets(storage, run), "replans": [replan_projection(record) for record in s.get("replans", [])],
+            "replan_accounting": copy.deepcopy(s.get("replan_accounting")), "replan_history_incomplete": s.get("replan_history_incomplete", False), "normal_execution_history_incomplete": s.get("normal_execution_history_incomplete", False), "replan_history_floor": s.get("replan_history_floor", 0),
             "eligible_actions": actions + (["upgrade"] if s["schema_version"] == 1 else []), "refusals": refusals,
             "request_schema_version": 2 if s["schema_version"] == 2 else 1,
             "protocol_upgrade": {"schema_version": 2, "ledger_epoch": 0, "action": "upgrade"} if s["schema_version"] == 1 else None,
@@ -328,6 +331,16 @@ async def steer_workflow(workflow_run_id, request, *, root=None, monitor=False):
     storage = _storage(root)
     principal = await asyncio.to_thread(_transport, storage, monitor)
     request = _request(request)
+    initial = storage.get_run(workflow_run_id, refresh_atomic=True)
+    _authorize(initial, principal, monitor)
+    key = f'{request["ledger_epoch"]}:{request["request_id"]}' if request["schema_version"] == 2 else request["request_id"]
+    admitted_epoch = None
+    if initial.get("steering", {}).get("replan_accounting") and key not in initial["steering"]["requests"]:
+        from .steering_window import check_namespace
+        check_namespace(initial["steering"], request)
+        admitted_epoch = request.get("ledger_epoch")
+        from .replan_retention import maintain as reserve_history
+        reserve_history(storage, workflow_run_id, reserve_text=2 * len(request.get("text", "").encode()) + (64 * 1024 if request["action"] in {"open", "reply", "retarget"} else 0))
     digest = _digest({k: v for k, v in request.items() if k != "request_id"})
     scheduled = False
     result = None
@@ -335,7 +348,7 @@ async def steer_workflow(workflow_run_id, request, *, root=None, monitor=False):
     def mutate(run):
         nonlocal result, scheduled
         from .steering_admission import admit
-        result, scheduled = admit(storage, run, principal, monitor, request, digest, binding)
+        result, scheduled = admit(storage, run, principal, monitor, request, digest, binding, admitted_epoch=admitted_epoch)
     storage.update_run(workflow_run_id, mutate, "steering_requested")
     from .steering_lifecycle import maintain
     maintain(storage, workflow_run_id)
@@ -406,7 +419,7 @@ def summary(run):
              "interaction_epoch": run["interaction_epoch"], "control_revision": ledger["control_revision"],
              "sequence": ledger["sequence"], "episode_id": latest["episode_id"] if latest else None,
              "state": latest["state"] if latest else "idle", "steering_revision": latest["steering_revision"] if latest else None,
-             "hold": held(run), "latest_reply_ref": latest["latest_reply_ref"] if latest else None},
+             "hold": held(run), "latest_reply_ref": latest["latest_reply_ref"] if latest else None, "replan_history_incomplete": ledger.get("replan_history_incomplete", False), "normal_execution_history_incomplete": ledger.get("normal_execution_history_incomplete", False)},
             "pending_steering_count": sum(ep["hold"] for ep in episodes)}
 
 

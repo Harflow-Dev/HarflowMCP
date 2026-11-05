@@ -1000,6 +1000,8 @@ def accept_decision_locked(supervisor, r, node, token, activation, decision, exe
     action = decision["action"]
     t["on_demand_count"] = 0
     source = next((item for item in r["activations"] if item["id"] == t.get("execution_activation_id")), None)
+    from .replan_schema import record_normal_progress
+    record_normal_progress(r, t, r["decisions"][-1])
     explicit_retry = any(key.startswith(("retry:", "recover:", "recover_child:")) for key in assignments)
     if action == "continue" and not explicit_retry and node.get("role") == "planning" and source and source.get("node_result", {}).get("status") == "succeeded":
         planned = source["node_result"]["result"]
@@ -1453,12 +1455,22 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         from .workflow_invocation import run_child
         await run_child(supervisor, node, token)
         return
+    if "pending" in run:
+        current_token = next((t for t in run["pending"] if t["id"] == token["id"]), None)
+        if current_token is None or current_token.get("execution_activation_id") != token.get("execution_activation_id"):
+            return
+    from .workflow_replan import retired_execution
+    if retired_execution(run, token.get("execution_activation_id"), storage=getattr(supervisor, "store", None)):
+        return
     prior = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
     if prior and prior.get("worker_result_required"):
         # A normal-budget orchestrator may answer the actual steering question,
         # but delivering that answer requires a new explicit bounded response.
         question_id = prior.get("pending_question_id")
         if question_id and prior.get("worker_steering_question_id") == question_id:
+            current_token = next((t for t in run.get("pending", []) if t["id"] == token["id"]), None)
+            if current_token is None or current_token.get("execution_activation_id") != prior["id"]:
+                return
             from .workflow_clarification import answer_question
             answered = await answer_question(supervisor, node, token, prior["id"], question_id)
             if answered and supervisor.run().get("status") == "running":
@@ -1466,6 +1478,9 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
                 return
         if supervisor.run().get("status", "running") in {"running", "starting", "paused"}:
             supervisor.attention("Worker steering requires an explicit result; ordinary execution cannot restart")
+        return
+    current_token = next((t for t in run["pending"] if t["id"] == token["id"]), None)
+    if current_token is None or current_token.get("execution_activation_id") != token.get("execution_activation_id"):
         return
     if prior and prior.get("node_result"):
         supervisor.update(lambda r: finish_result(r, node, token["id"], prior["id"], prior["node_result"], {"summary": prior.get("raw_output", "")}), "result_reconnected")
@@ -1482,7 +1497,19 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         current = next(t for t in r["pending"] if t["id"] == token["id"])
         current["execution_activation_id"] = activation["id"]
         execution = next(a for a in r["activations"] if a["id"] == activation["id"])
-        execution.update(visit_id=visit_id(r, token), attempt_in_visit=count + (0 if prior else 1), status="running", assignment_prompt=token["assignment_prompt"], assigned_task_ids=token.get("assigned_task_ids", []), input_result_refs=list(dict.fromkeys(token.get("input_result_refs", []) + token.get("additional_result_refs", []))), execution_session_mode=token.get("execution_session_mode", "fresh"))
+        attempt_number = count + (0 if prior else 1)
+        if execution.get('supersedes_execution_id'):
+            from .workflow_replan import retired_execution
+            record = next((p for p in r.get('steering', {}).get('replans', []) if p['replan_id'] == execution.get('replan_id')), None)
+            if record is None:
+                from .workflow_replan import validate_replacement
+                validate_replacement(supervisor.store, r, execution)
+            elif record['phase'] != 'replan_committed' or execution['id'] != record['planned_activation_id'] or execution.get('planned_task_id') != record['planned_task_id'] or execution.get('attempt_in_visit') != record['attempt_in_visit']:
+                raise w.WorkflowError('Linked replan identity or attempt provenance changed')
+            attempt_number = execution['attempt_in_visit']
+            if attempt_number < 1:
+                raise w.WorkflowError('Linked replan attempt number must remain positive')
+        execution.update(visit_id=visit_id(r, token), attempt_in_visit=attempt_number, status="running", assignment_prompt=token["assignment_prompt"], assigned_task_ids=token.get("assigned_task_ids", []), input_result_refs=list(dict.fromkeys(token.get("input_result_refs", []) + token.get("additional_result_refs", []))), execution_session_mode=token.get("execution_session_mode", "fresh"))
         if token.get("protocol_repair_of"):
             execution["protocol_repair_of"] = token["protocol_repair_of"]
         execution["continue_previous"] = token.get("continue_previous", False)
