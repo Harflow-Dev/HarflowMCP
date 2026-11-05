@@ -85,5 +85,8 @@
   "whitespace_guard": "passed",
   "protected_original_files": 5,
   "protected_original_hashes_unchanged": true,
-  "ui": "Not applicable; producer engine API only, no consumer UI changes."
+  "ui": "Not applicable; producer engine API only, no consumer UI changes.",
+  "implementation_commit": "5d36cfa4c6cab0a689c74b678c830eed3e9d76d5",
+  "source_tree": "21240f1a5d709b09b8d913ac8f123a6c8e2f0d60",
+  "implementation_tree": "41cbca81a88731ca5c8931389d72d5110349ded0"
 }

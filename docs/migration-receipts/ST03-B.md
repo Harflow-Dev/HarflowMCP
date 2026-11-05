@@ -98,8 +98,10 @@ The final steering and handshake generator checks pass. The complete canonical b
 All 55 non-steering MCP tool schemas are identical to the input; the inventory remains 58 tools.
 Private-reference, legacy-name and whitespace guards pass. Five protected original files retain
 their captured hashes. Early implementer checks remain diagnostic; the primary post-fix evidence
-above qualifies the frozen source. Immutable implementation/source-tree identities follow in the
-receipt metadata commit.
+above qualifies the frozen source. Producer implementation commit: `5d36cfa4c6cab0a689c74b678c830eed3e9d76d5`.
+Producer source tree: `21240f1a5d709b09b8d913ac8f123a6c8e2f0d60`; implementation tree:
+`41cbca81a88731ca5c8931389d72d5110349ded0`. The receipt metadata follow-up changes no
+production source or contract bytes. Product metadata remains unreleased source 0.0.10.
 
 All pytest invocations must have both `HARFLOW_INTEGRATION` and `HARFLOW_CLI_INTEGRATION`
 unset and explicitly select `-m 'not integration and not cli_integration'`. A fail-closed collection
