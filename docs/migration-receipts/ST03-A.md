@@ -119,8 +119,9 @@ env -u HARFLOW_INTEGRATION -u HARFLOW_CLI_INTEGRATION -u HARFLOW_NOTIFY_DESTINAT
 
 Both handshake and steering fixture generator `--check` runs pass. The latter checks the complete
 synthetic producer output twice in the selected tests. Private-reference, legacy-name and whitespace
-guards pass. Original 55 MCP tool schemas remain exactly equal to the input after excluding the
-three existing steering tools whose maintained descriptions changed; the total inventory stays 58.
+guards pass. The original 55 non-steering MCP tool schemas remain exactly equal to the input. The three existing
+steering tools retain their signatures; maintained steering descriptions were updated. Total
+inventory stays 58.
 Five protected original files retain their captured hashes; added local documentation links resolve.
 
 Earlier primary checks are diagnostic: 680 passed / two deselected before the final corrections;
@@ -131,12 +132,12 @@ qualifies the frozen final source.
 
 ## Producer output identity and remaining gates
 
+Producer implementation commit: `7c527d8fe060ed00272d6207a4cecfc8bf5b2aef`.
 Producer source tree: `95a81192756f2caa4642d1e46ebd25b9144bc4a3`.
 Complete canonical bundle: **235 files**, manifest SHA256
 `66e06af29b195472e42215676e8feb1028265c280a7aa08e5f54f39a55e36cd5`.
 These immutable identities cover source and synthetic contracts, not a published engine artifact.
-Product metadata remains 0.0.10; the released tag does not contain this capability. The source
-implementation commit is recorded in the final delivery metadata.
+Product metadata remains 0.0.10; the released tag does not contain this capability. The receipt metadata follow-up changes no production source or contract bytes.
 
 Swift adoption requires independently assigned byte-identical complete fixture vendoring and typed
 ctl integration. Rust independently implements the same pinned accepted contract before consumer
