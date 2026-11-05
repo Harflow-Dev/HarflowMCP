@@ -54,7 +54,8 @@ No production route is admitted by the first measurement harness.
 The fixed profile denies writes by default, allows only exact requested workspace
 and separate runtime scratch roots, protects state/configuration/registration/Git
 control trees, and denies parent signaling and unqualified delegation (Mach lookup,
-Apple events, external/local network except the exact scripted fixture endpoint).
+Apple events, external/local network except the measured scripted-fixture
+loopback-port scope).
 Read/data confidentiality is separately declared: actual probes must not read
 user credentials/state; isolated HOME/config alone is not a read sandbox. Kernel,
 SQLite/library and startup OS calls are not given a universal wall-time guarantee.
@@ -113,15 +114,21 @@ argument into a different pinned launch path.
 
 The installed Claude check uses explicit isolated HOME/config/runtime paths,
 no inherited credentials/proxies/startup variables, disabled user/project settings,
-hooks/plugins/MCP and exact fake credentials/loopback provider. The local fixture listener owns an ephemeral 127.0.0.1 port exclusively and
-uses one-use nonce-bound routes. Before the provider phase it permits exactly one
+hooks/plugins/MCP and exact fake credentials/loopback provider. The local fixture owns an ephemeral port on both `127.0.0.1` and `::1`
+exclusively before creating the OS policy. On the measured macOS build, numeric
+IP policy expressions are rejected; `localhost:<port>` permits both loopback
+families at that port. This is a dual-stack loopback-port claim, not an IPv4-only
+destination claim. HTTP uses the fixed IPv4 URL; the IPv6 endpoint stays reserved
+and unexpected connections fail the observation. No wildcard listener or port
+sharing is allowed. The fixture uses one-use nonce-bound routes. Before the provider phase it permits exactly one
 `GET /<nonce>/preflight` positive-control exchange. The provider phase permits only
 the expected `POST /<nonce>/v1/messages`, bounded bodies/request count, and fixed
 bounded SSE script; redirects, unexpected requests and alternate endpoint fallback
 fail. Preflight must actually observe denied fork/posix_spawn and outside-read
 operations, an allowed inside-read control, and allowed-versus-denied listener
-destinations under the exact same profile before any vendor process starts. Measure exact destination admission
-against an independently owned denied loopback endpoint before vendor startup.
+destinations under the exact same profile before any vendor process starts. Measure allowed-port admission against an independently owned denied-port
+loopback endpoint before vendor startup. Do not relabel the observed address class
+as stronger destination isolation. Other network topologies remain unqualified.
 Only the no-tools message/result protocol is in the initial vendor scope; actual
 native tool permission and full production backend features remain unqualified.
 Outer OS syscall results are reported independently. Start it only after OS probe safety
