@@ -2335,3 +2335,9 @@ specification assets, not supported ctl/MCP responses or control authority.
 prestart capability never escalates into poststart control. Accepting-runtime
 implementation, Rust adoption, actual profile qualification, consumer integration
 and release remain separate gates.
+
+The [durable synthetic producer](decisions/ST04-poststart-producer.md) implements
+private application transactions and restart/replay conformance separately from
+that immutable candidate bundle. Its production facade refuses before effects;
+real workflow admission, result acceptance and scheduler integration remain
+undelivered. It adds no supported command, envelope or advertised capability.

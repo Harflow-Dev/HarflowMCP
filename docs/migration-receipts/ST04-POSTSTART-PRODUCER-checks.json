@@ -1,0 +1,50 @@
+{
+  "base_commit": "9843f9197e00cfdd25bd36625f65a4273681dcb6",
+  "date": "2026-11-06",
+  "validation": "offline explicit unittest allowlist; integration flags unset; no pytest/conftest collection",
+  "collected_modules": {
+    "test_poststart_control": 45,
+    "test_poststart_profile_fixtures": 29
+  },
+  "tests_run": 74,
+  "tests_passed": true,
+  "source_review": {
+    "rounds": 2,
+    "round1_findings": 4,
+    "all_fixed": true,
+    "round2_remaining_findings": 0
+  },
+  "runtime_authorized": false,
+  "production_workflow_integration": false,
+  "runtime_qualified": false,
+  "rust_adoption": false,
+  "candidate_manifest_sha256": "b5e0949dec6cb5d3d20bf989ea2171a245ef008b77e9b7b8019c8b9eff2e180b",
+  "supported_manifest_sha256": "1c63905bf9303bf9dce2b5b5160da33fdac6aeeaf6cf125cd82324dd2f3e948c",
+  "preserved_files": {
+    "docs/migration-plan.md": "c4ee4406138c5fc86c995ef1af9bdbe671307e52990fd253fe7d800e11a3dcae",
+    "docs/migration-sessions.md": "0a469086ab55d92ce2af7f6c48d970bf12964bde83caeeb0dede7687d3ed234d",
+    "dist-rc/harflow_mcp-0.0.9.tar.gz": "691761e6a3bdde0512296a555a44abce86c9e7855fd6512b83cd13dce73b3b6b",
+    "dist-rc/harflow_mcp-0.0.9-py3-none-any.whl": "1578057546830e03510c03e4a4559143bcbfc3b15617162328b435df34f5fb64",
+    "dist-rc/SHA256SUMS": "43fd805c88f75759174b8d5ffe3a145c2453ef7ae83a3d6257485613c2b78782"
+  },
+  "inputs": {
+    "docs/contracts.md": "e8db61e23b00ba4ba6ccc21121fc515353fe7c48caf85ec0c1a50cd68e5190e7",
+    "docs/decisions/ST04-poststart-producer.md": "3a1356a952ecaca1c7c67292c5faa3d693b0da967ae53cbd873e81576e4d05ab",
+    "src/harflow_mcp/poststart_control.py": "f333c2f44550a7bf921dc881f7e26a4ba4c431b261962bf2e349ea3d448e27a8",
+    "src/harflow_mcp/poststart_schema.py": "635528e93d9ae6f9810ed71f04863f8fd27354d5d9a39242fe430ef21cc11d50",
+    "src/harflow_mcp/poststart_store.py": "e30bbfae8c1c4ff38a375b2ef680371e633ba114001d88be8f3775770a54edcb",
+    "tests/poststart_control_fixtures.py": "b326a3181d22940fd096699fda882d092d698aa40a18778c778e382d72f8cd1e",
+    "tests/test_poststart_control.py": "d986991d510353dd27724fad311c5cab9819f8d1610ded21acf9f3fddf9ec3a0"
+  },
+  "checks": [
+    "explicit offline unittest collection allowlist:74 passed",
+    "exact candidate generator check passed",
+    "owned Python AST checks passed",
+    "original tracked source and both fixture bundles unchanged",
+    "five preexisting dirty files unchanged",
+    "private-reference guard passed",
+    "legacy-name guard passed",
+    "local maintained links resolve",
+    "staged whitespace check passed"
+  ]
+}
