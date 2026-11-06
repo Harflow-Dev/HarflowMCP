@@ -13,8 +13,13 @@
     "confirm_unsettled": false,
     "human_release": false,
     "inventory": "partial",
+    "settlement_evidence": {
+      "claims": "reconciled",
+      "containment": "complete",
+      "writer": "settled"
+    },
     "slot": "cleanup",
-    "survivors": "none_observed"
+    "survivors": "unknown"
   },
   "kind": "retention",
   "v": 1

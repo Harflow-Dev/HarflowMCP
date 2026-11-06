@@ -1,7 +1,9 @@
 # C1 candidate: task result separated from background obligations
 
-Candidate `task-result-v1`, reserved capability `task-result-separation.v1`. Addresses MCP #110: a
-leftover background command abandoned at the idle bound makes a successful task show as failed.
+Candidate `task-result-v1`, reserved capability `task-result-separation.v1`. Models MCP #110, where a
+leftover background command abandoned at the idle bound makes a successful task show as failed. **It does not
+fix #110**: it gives the separation a name and pins it, and the shapes that most often cause #110 still fail
+or block under it unless a caller declares the requirement (see "Where #110 still bites").
 Specified, unimplemented and **not advertised**: Python 0.0.11 does not implement it and its
 `version-info` capability list, `contracts/v1` and every consumer gate are unchanged. Assets:
 `contracts/candidates/task-result-v1/` (manifest, digest and specimens), generated and checked by
@@ -32,7 +34,7 @@ The decision rules are exactly the observation rules of the owner-runtime schema
 unsettled, obligations, execution unknown, cancelled, execution failed, result failed, required
 obligation failed, succeeded, otherwise result unknown). The consequences for #110:
 
-- An **incidental** obligation that fails (or is pending) leaves `agent_result: succeeded` and
+- Only when the caller has declared the obligation **incidental**: an incidental obligation that fails (or is pending) leaves `agent_result: succeeded` and
   `settlement.workflow: succeeded`. A pending incidental obligation keeps `settlement.release: blocked`
   (its resource claims stay held); a failed one with complete evidence does not.
 - A **required** failed obligation settles as `failed` with `required_obligation_failed`.
@@ -53,13 +55,30 @@ including a document that lets an incidental failure rewrite a succeeded result.
 `unsupported`, a missing or mistyped field is `invalid`, a future `v` or `kind` is `unsupported`.
 Documents are at most 24576 bytes, depth 16, strings 4096 bytes, arrays 64.
 
-## Not decided here (see the morning questions file)
+## Where #110 still bites
 
-- The legacy `status` value for a settled task is not defined. The owner decision says an incidental failure
-  cannot rewrite a valid result into failure and that terminal status is not renamed into a result field.
-  A mapping (`succeeded` to `completed`, `failed` to `failed`, `cancelled` to `cancelled`, `blocked` to
-  unchanged non-terminal with retained attention) is the obvious reading but is **not** specified.
-- Per-obligation items are not part of the projection (decision 2 permits only one aggregate).
+- **A held pipe.** A background command that keeps stdout or stderr open leaves the stream not at EOF, which the
+  model treats as `unsettled` whatever the requirement (`held-pipe-blocks-settlement.json`). The task stays
+  blocked; the candidate does not abandon it.
+- **An undeclared caller.** With no declaration the requirement is `unknown`, which the model treats as
+  required: a failed leftover obligation fails the task (`undeclared-requirement-failed-obligation-fails.json`).
+  Existing callers declare nothing, so for them the #110 symptom is unchanged.
+- **Abandonment at the idle bound** is not mapped to any input. Whether it becomes `obligations: failed`, an
+  `execution: failed` or an unobserved exit is undefined, and the answer decides which rule above applies.
+
+## Not decided here (open owner questions)
+
+- The **default requirement** for a caller that declares nothing. The design text says missing or unknown
+  remains required for settlement; keeping that leaves #110 for every existing caller.
+- The legacy `status` value for a settled task is not defined. The design text says the existing terminal
+  status is not renamed into a result field and that an incidental failure cannot rewrite a valid result into
+  failure; it does not say what `status` shows. A mapping (`succeeded` to `completed`, `failed` to `failed`,
+  `cancelled` to `cancelled`, `blocked` to unchanged non-terminal with retained attention) is the obvious
+  reading but is **not** specified.
+- **How abandonment at the idle bound maps to the observation inputs** (see above).
+- Per-obligation items are not part of the projection: the design text ("Immutable policy and binding") lets
+  the initial policy classify the operation's background work as one aggregate and says finer per-obligation
+  authority is not invented.
 - How a caller declares the requirement (ctl option, MCP parameter, saved-workflow field) and how each
   backend reports an agent result witness are not defined.
 - Python behaviour is unchanged until the owner assigns an exception.

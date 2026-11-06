@@ -1,5 +1,4 @@
 """Shared envelope grammar, canonical bytes and deterministic generation/verification for C1 candidates."""
-import copy
 import hashlib
 import json
 import os
@@ -7,12 +6,12 @@ from pathlib import Path
 import re
 import tempfile
 
-from owner_runtime_profile.validation import Rejected, decode, integer, require, supported, token, process
+from owner_runtime_profile.validation import Rejected, decode, require, supported
 
 FORMAT = 'harflow.c1.candidate'
 COMPONENT = 'harflow.c1.candidate.component'
 MANIFEST_LIMIT = 131072
-SPECIMEN_LIMIT = 24577
+SPECIMEN_LIMIT = 24576
 MAX_FILES = 64
 
 

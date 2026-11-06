@@ -1,7 +1,6 @@
 """Self-checks for the C1 candidates: exact bytes, independent expectations and non-advertisement."""
 import json
 from pathlib import Path
-import shutil
 import sys
 
 import pytest
@@ -142,3 +141,70 @@ def test_generator_script_check_mode_passes():
     import subprocess
     done = subprocess.run([sys.executable, str(REPO / 'scripts/generate-c1-candidate-fixtures.py'), '--check'], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def expected_of(candidate, name):
+    manifest = json.loads((REPO / candidate['directory'] / 'manifest.json').read_text())
+    return next(e['expected'] for e in manifest['files'] if e['filename'] == name)
+
+
+def test_specimen_limit_matches_the_documented_budget():
+    assert common.SPECIMEN_LIMIT == 24576
+    assert common.classify(result.CANDIDATE, b'x' * 24576) != {'parse': 'invalid', 'reason': 'budget'}
+    assert common.classify(result.CANDIDATE, b'x' * 24577) == {'parse': 'invalid', 'reason': 'budget'}
+
+
+def test_d6_evidence_for_one_mode_cannot_admit_the_other_and_fallback_is_refused():
+    p = permission.CANDIDATE
+    assert expected_of(p, 'admission-tool-level-evidence-cannot-admit-os-enforced.json') == {'parse': 'valid', 'decision': 'refuse', 'reason': 'evidence_mode_mismatch'}
+    assert expected_of(p, 'admission-os-enforced-evidence-cannot-admit-tool-level.json') == {'parse': 'valid', 'decision': 'refuse', 'reason': 'evidence_mode_mismatch'}
+    assert expected_of(p, 'admission-admits-cross-mode-evidence.json')['reason'] == 'projection_mismatch'
+    assert expected_of(p, 'report-silent-fallback-to-tool-level.json') == {'parse': 'invalid', 'reason': 'fallback'}
+    assert expected_of(p, 'report-silent-fallback-to-os-enforced.json') == {'parse': 'invalid', 'reason': 'fallback'}
+    assert expected_of(p, 'report-established-mode-needs-its-own-evidence.json')['reason'] == 'unqualified_mode'
+
+
+def test_d6_ambient_difference_is_really_present_and_admitted():
+    specimen = load(permission.CANDIDATE, 'admission-ambient-change-is-not-binding.json')
+    assert specimen['input']['evidence']['ambient'] != specimen['input']['current']['ambient']
+    assert specimen['document'] == {'decision': 'admit', 'reason': 'qualified'}
+
+
+def test_118_complete_inventory_needs_more_than_the_process_group():
+    s = survivors.CANDIDATE
+    assert expected_of(s, 'report-process-group-only-claims-complete.json') == {'parse': 'invalid', 'reason': 'inventory_basis'}
+    assert expected_of(s, 'report-complete-without-containment.json')['reason'] == 'inventory_basis'
+    assert expected_of(s, 'report-process-group-only-stays-partial.json') == {'parse': 'valid', 'state': 'unknown'}
+
+
+def test_118_names_are_measured_in_utf8_bytes():
+    s = survivors.CANDIDATE
+    assert expected_of(s, 'report-name-at-the-byte-limit.json')['parse'] == 'valid'
+    assert expected_of(s, 'report-name-in-cjk-within-limit.json')['parse'] == 'valid'
+    assert expected_of(s, 'report-name-over-the-byte-limit.json') == {'parse': 'invalid', 'reason': 'fields'}
+    assert expected_of(s, 'report-cjk-name-over-the-byte-limit.json')['reason'] == 'fields'
+    name = load(s, 'report-name-at-the-byte-limit.json')['document']['survivors']['items'][0]['name']
+    assert len(name) == 32 and len(name.encode()) == 64
+
+
+def test_118_release_needs_settlement_evidence_and_the_partial_hold_is_reachable():
+    s = survivors.CANDIDATE
+    for variant in ('containment-unknown', 'containment-incomplete', 'writer-live', 'writer-unknown', 'claims-pending', 'claims-unknown'):
+        expected = expected_of(s, f'retention-clear-but-{variant}-holds-slot.json')
+        assert (expected['slot'], expected['reason']) == ('retained', 'settlement_evidence_incomplete')
+    held = load(s, 'retention-partial-holds-slot.json')
+    assert (held['input']['survivors'], held['input']['inventory']) == ('unknown', 'partial')
+    assert expected_of(s, 'retention-none-with-partial-inventory-is-inconsistent.json')['reason'] == 'inconsistent_state'
+
+
+def test_118_signal_compares_os_identity_with_the_records_current_generation():
+    specimen = load(survivors.CANDIDATE, 'signal-record-generation-superseded.json')
+    assert 'generation' not in specimen['input']['observed'] and specimen['input']['recorded']['generation'] != specimen['input']['current_generation']
+    assert expected_of(survivors.CANDIDATE, 'signal-record-generation-superseded.json')['reason'] == 'generation_stale'
+
+
+def test_110_candidate_documents_where_the_symptom_remains():
+    held = load(result.CANDIDATE, 'held-pipe-blocks-settlement.json')['document']['settlement']
+    assert (held['workflow'], held['reason']) == ('blocked', 'unsettled')
+    undeclared = load(result.CANDIDATE, 'undeclared-requirement-failed-obligation-fails.json')['document']
+    assert undeclared['background']['requirement'] == 'unknown' and undeclared['settlement']['workflow'] == 'failed'

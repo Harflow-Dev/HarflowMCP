@@ -6,6 +6,7 @@
   },
   "format": "harflow.c1.candidate",
   "input": {
+    "current_generation": "77777777777777777777777777777777",
     "observed": null,
     "recorded": {
       "boot_uuid": "12345678-1234-1234-1234-123456789abc",

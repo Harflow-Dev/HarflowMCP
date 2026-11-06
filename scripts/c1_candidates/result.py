@@ -2,7 +2,7 @@
 import copy
 
 from owner_runtime_profile.models import OBSERVATION, observation
-from owner_runtime_profile.validation import Rejected, require, supported
+from owner_runtime_profile.validation import Rejected, require
 from .common import canonical, enums, specimen
 
 NAME = 'task-result-v1'
@@ -91,6 +91,13 @@ def cases():
         document('succeeded', 'required', 'satisfied', 'complete', 'cancelled', 'cancelled', 'evidence_complete'))
     add('open-pipe-is-unsettled', {'stdout': 'open'},
         document('succeeded', 'required', 'satisfied', 'complete', 'blocked', 'unsettled', 'blocked'))
+    # The #110 shapes this candidate does NOT unblock: a background command that keeps the output pipe open
+    # holds settlement (an open stream is `unsettled` whatever the requirement), and a caller that never
+    # declared the requirement leaves it `unknown`, which behaves as required, so a failed leftover still fails the task.
+    add('held-pipe-blocks-settlement', {'requirement': 'incidental', 'obligations': 'pending', 'stdout': 'open'},
+        document('succeeded', 'incidental', 'pending', 'complete', 'blocked', 'unsettled', 'blocked'))
+    add('undeclared-requirement-failed-obligation-fails', {'requirement': 'unknown', 'obligations': 'failed'},
+        document('succeeded', 'unknown', 'failed', 'complete', 'failed', 'required_obligation_failed', 'evidence_complete'))
     add('open-turn-hides-success', {'turn_open': True},
         document('unknown', 'required', 'satisfied', 'complete', 'blocked', 'unsettled', 'blocked'))
     lie = specimen(NAME, 'projection', document('succeeded', 'incidental', 'failed', 'complete', 'failed', 'execution_failed', 'evidence_complete'),

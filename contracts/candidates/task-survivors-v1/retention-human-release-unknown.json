@@ -13,6 +13,11 @@
     "confirm_unsettled": true,
     "human_release": true,
     "inventory": "partial",
+    "settlement_evidence": {
+      "claims": "unknown",
+      "containment": "unknown",
+      "writer": "unknown"
+    },
     "slot": "held",
     "survivors": "unknown"
   },

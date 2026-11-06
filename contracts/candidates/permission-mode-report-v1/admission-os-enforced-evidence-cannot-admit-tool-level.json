@@ -1,0 +1,30 @@
+{
+  "candidate": "permission-mode-report-v1",
+  "document": {
+    "decision": "refuse",
+    "reason": "evidence_mode_mismatch"
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "current": {
+      "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": "darwin-arm64",
+      "probe_revision": "r1",
+      "version": "2.1.318"
+    },
+    "evidence": {
+      "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "os_enforced",
+      "platform": "darwin-arm64",
+      "probe_revision": "r1",
+      "state": "passed",
+      "version": "2.1.318"
+    },
+    "requested_mode": "tool_level",
+    "tool_level_opt_in": true
+  },
+  "kind": "admission",
+  "v": 1
+}

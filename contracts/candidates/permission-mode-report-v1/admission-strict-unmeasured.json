@@ -16,6 +16,7 @@
     "evidence": {
       "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "os_enforced",
       "platform": "darwin-arm64",
       "probe_revision": "r1",
       "state": "unmeasured",

@@ -13,6 +13,11 @@
     "confirm_unsettled": true,
     "human_release": true,
     "inventory": "complete",
+    "settlement_evidence": {
+      "claims": "reconciled",
+      "containment": "complete",
+      "writer": "settled"
+    },
     "slot": "held",
     "survivors": "present"
   },

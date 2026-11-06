@@ -1,0 +1,17 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "survivors": {
+      "basis": [
+        "process_group"
+      ],
+      "inventory": "complete",
+      "items": [],
+      "state": "none_observed",
+      "truncated": false
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

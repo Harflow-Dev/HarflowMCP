@@ -1,0 +1,31 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "survivors": {
+      "basis": [
+        "process_group",
+        "descendant_tree",
+        "containment_complete"
+      ],
+      "inventory": "complete",
+      "items": [
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 4005,
+            "start_microseconds": 5,
+            "start_seconds": 1700004005
+          },
+          "name": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+          "state": "alive"
+        }
+      ],
+      "state": "present",
+      "truncated": false
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

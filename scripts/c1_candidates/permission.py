@@ -1,20 +1,24 @@
 """Candidate permission-mode-report-v1: truthful permission-mode reporting and evidence admission (plan D6)."""
 import copy
 
-from owner_runtime_profile.validation import Rejected, require, supported, token
+from owner_runtime_profile.validation import Rejected, require, token
 from .common import canonical, enums, specimen
 
 NAME = 'permission-mode-report-v1'
 MODES = 'os_enforced tool_level'
 EVIDENCE_BINDING = ('binary_sha256', 'version', 'platform', 'probe_revision', 'grants_digest')
+AMBIENT_FIELDS = ('user_config_sha256', 'inherited_rules_digest')
 
 
 def evidence(value, with_state=True):
+    """Evidence qualifies one mode: `mode` is recorded with the binding and must match the mode relied on."""
     require(isinstance(value, dict), 'fields')
     require(token(value.get('binary_sha256'), 64) and token(value.get('grants_digest'), 64), 'fields')
     require(all(isinstance(value.get(key), str) and 0 < len(value[key]) <= 128 for key in ('version', 'platform', 'probe_revision')), 'fields')
+    if 'ambient' in value:
+        require(isinstance(value['ambient'], dict) and all(token(value['ambient'].get(key), 64) for key in AMBIENT_FIELDS), 'fields')
     if with_state:
-        enums(value, {'state': 'passed failed unknown unmeasured'})
+        enums(value, {'state': 'passed failed unknown unmeasured', 'mode': MODES})
 
 
 def report(kind, value):
@@ -25,9 +29,13 @@ def report(kind, value):
                        'opt_in_source': 'none explicit_request freedom_level_d6', 'ambient_configuration': 'uncontrolled'},
           ('tool_level_opt_in', 'inherited_rules_may_change_behaviour'))
     evidence(permission.get('evidence'))
-    # Never overclaim: only an established, qualified OS boundary may report os_enforced.
-    qualified = permission['evidence']['state'] == 'passed'
-    require(block['os_enforced'] == (permission['established_mode'] == 'os_enforced' and qualified), 'overclaim')
+    proof = permission['evidence']
+    # No silent fallback: the established mode is the requested mode, or unknown.
+    require(permission['established_mode'] in (permission['requested_mode'], 'unknown'), 'fallback')
+    # Any established mode needs passed evidence that qualifies that very mode.
+    require(permission['established_mode'] == 'unknown' or (proof['state'] == 'passed' and proof['mode'] == permission['established_mode']), 'unqualified_mode')
+    # Never overclaim: os_enforced is true exactly when an OS boundary is established (and so qualified).
+    require(block['os_enforced'] == (permission['established_mode'] == 'os_enforced'), 'overclaim')
     require(permission['requested_mode'] != 'tool_level' or permission['tool_level_opt_in'], 'opt_in')
     require(permission['tool_level_opt_in'] == (permission['opt_in_source'] != 'none'), 'opt_in')
     require(permission['inherited_rules_may_change_behaviour'] is True, 'disclosure')
@@ -40,10 +48,12 @@ def admission(kind, value):
     enums(data, {'requested_mode': MODES}, ('tool_level_opt_in',))
     evidence(data.get('evidence'))
     evidence(data.get('current'), with_state=False)
-    stale = any(data['evidence'][key] != data['current'][key] for key in EVIDENCE_BINDING)
+    stale = any(data['evidence'][key] != data['current'][key] for key in EVIDENCE_BINDING)  # ambient fields are never compared
     passed = data['evidence']['state'] == 'passed'
     if data['requested_mode'] == 'tool_level' and not data['tool_level_opt_in']:
         decision, reason = 'refuse', 'opt_in_required'
+    elif data['evidence']['mode'] != data['requested_mode']:
+        decision, reason = 'refuse', 'evidence_mode_mismatch'
     elif data['requested_mode'] == 'os_enforced' and not passed:
         decision, reason = 'refuse', 'strict_unmeasured'
     elif stale:
@@ -67,13 +77,23 @@ DIGEST_A, DIGEST_B = 'a' * 64, 'b' * 64
 CURRENT = {'binary_sha256': DIGEST_A, 'version': '2.1.318', 'platform': 'darwin-arm64', 'probe_revision': 'r1', 'grants_digest': DIGEST_B}
 
 
+def ev(state='passed', mode='tool_level', **extra):
+    return {**CURRENT, 'state': state, 'mode': mode, **extra}
+
+
 def block(freedom='write_in_repo', os_enforced=False, requested='tool_level', established='tool_level', opt_in=True,
-          source='freedom_level_d6', state='passed', **extra):
+          source='freedom_level_d6', state='passed', mode=None, **extra):
     permission = {'requested_mode': requested, 'established_mode': established, 'tool_level_opt_in': opt_in, 'opt_in_source': source,
-                  'evidence': {**CURRENT, 'state': state}, 'ambient_configuration': 'uncontrolled',
+                  'evidence': ev(state, mode or requested), 'ambient_configuration': 'uncontrolled',
                   'inherited_rules_may_change_behaviour': True}
     permission.update(extra)
     return {'enforcement': {'freedom': freedom, 'os_enforced': os_enforced, 'permission': permission}}
+
+
+def strict(**updates):
+    base = dict(os_enforced=True, requested='os_enforced', established='os_enforced', opt_in=False, source='none')
+    base.update(updates)
+    return block(**base)
 
 
 def cases():
@@ -91,9 +111,14 @@ def cases():
     add('report-stock-claude-tool-level', 'report', block(), valid(False, 'tool_level'))
     add('report-explicit-tool-level', 'report', block(source='explicit_request'), valid(False, 'tool_level'))
     add('report-unknown-establishment', 'report', block(established='unknown', state='unknown'), valid(False, 'unknown'))
-    add('report-os-enforced-qualified', 'report', block(os_enforced=True, requested='os_enforced', established='os_enforced', opt_in=False, source='none'), valid(True, 'os_enforced'))
+    add('report-os-enforced-qualified', 'report', strict(), valid(True, 'os_enforced'))
     reject('report-tool-level-claims-os', specimen(NAME, 'report', block(os_enforced=True)), 'invalid', 'overclaim')
-    reject('report-unqualified-claims-os', specimen(NAME, 'report', block(os_enforced=True, requested='os_enforced', established='os_enforced', opt_in=False, source='none', state='unmeasured')), 'invalid', 'overclaim')
+    reject('report-os-established-but-reported-false', specimen(NAME, 'report', strict(os_enforced=False)), 'invalid', 'overclaim')
+    reject('report-unqualified-claims-os', specimen(NAME, 'report', strict(state='unmeasured')), 'invalid', 'unqualified_mode')
+    reject('report-established-tool-level-unqualified', specimen(NAME, 'report', block(state='unmeasured')), 'invalid', 'unqualified_mode')
+    reject('report-established-mode-needs-its-own-evidence', specimen(NAME, 'report', block(mode='os_enforced')), 'invalid', 'unqualified_mode')
+    reject('report-silent-fallback-to-tool-level', specimen(NAME, 'report', block(requested='os_enforced', established='tool_level', mode='tool_level')), 'invalid', 'fallback')
+    reject('report-silent-fallback-to-os-enforced', specimen(NAME, 'report', strict(requested='tool_level', opt_in=True, source='explicit_request')), 'invalid', 'fallback')
     reject('report-tool-level-without-opt-in', specimen(NAME, 'report', block(opt_in=False, source='none')), 'invalid', 'opt_in')
     reject('report-opt-in-without-source', specimen(NAME, 'report', block(source='none')), 'invalid', 'opt_in')
     reject('report-missing-disclosure', specimen(NAME, 'report', block(inherited_rules_may_change_behaviour=False)), 'invalid', 'disclosure')
@@ -103,12 +128,15 @@ def cases():
     boolean = copy.deepcopy(block()); boolean['enforcement']['os_enforced'] = 0
     reject('report-boolean-as-number', specimen(NAME, 'report', boolean), 'invalid', 'fields')
 
-    def admit(name, requested, opt_in, state, decision, reason, current=None):
-        data = {'requested_mode': requested, 'tool_level_opt_in': opt_in, 'evidence': {**CURRENT, 'state': state}, 'current': current or CURRENT}
+    def admit(name, requested, opt_in, state, decision, reason, current=None, mode=None, **evidence_extra):
+        data = {'requested_mode': requested, 'tool_level_opt_in': opt_in,
+                'evidence': ev(state, mode or requested, **evidence_extra), 'current': current or CURRENT}
         add(name, 'admission', {'decision': decision, 'reason': reason}, {'parse': 'valid', 'decision': decision, 'reason': reason}, data)
 
     admit('admission-tool-level-qualified', 'tool_level', True, 'passed', 'admit', 'qualified')
     admit('admission-tool-level-needs-opt-in', 'tool_level', False, 'passed', 'refuse', 'opt_in_required')
+    admit('admission-tool-level-evidence-cannot-admit-os-enforced', 'os_enforced', False, 'passed', 'refuse', 'evidence_mode_mismatch', mode='tool_level')
+    admit('admission-os-enforced-evidence-cannot-admit-tool-level', 'tool_level', True, 'passed', 'refuse', 'evidence_mode_mismatch', mode='os_enforced')
     admit('admission-strict-unmeasured', 'os_enforced', False, 'unmeasured', 'refuse', 'strict_unmeasured')
     admit('admission-strict-failed', 'os_enforced', False, 'failed', 'refuse', 'strict_unmeasured')
     admit('admission-strict-qualified', 'os_enforced', False, 'passed', 'admit', 'qualified')
@@ -116,15 +144,21 @@ def cases():
         admit('admission-stale-' + key.replace('_', '-'), 'tool_level', True, 'passed', 'refuse', 'evidence_stale', {**CURRENT, key: changed})
     admit('admission-unqualified', 'tool_level', True, 'unmeasured', 'refuse', 'unqualified')
     admit('admission-stale-before-unqualified', 'tool_level', True, 'failed', 'refuse', 'evidence_stale', {**CURRENT, 'probe_revision': 'r2'})
-    admit('admission-ambient-change-is-not-binding', 'tool_level', True, 'passed', 'admit', 'qualified', {**CURRENT})
+    # Ambient configuration differs between qualification and now: it is disclosed as uncontrolled and is not part of the binding.
+    admit('admission-ambient-change-is-not-binding', 'tool_level', True, 'passed', 'admit', 'qualified',
+          {**CURRENT, 'ambient': {'user_config_sha256': '3' * 64, 'inherited_rules_digest': '4' * 64}},
+          ambient={'user_config_sha256': '1' * 64, 'inherited_rules_digest': '2' * 64})
     wrong = specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'qualified'},
-                     {'requested_mode': 'tool_level', 'tool_level_opt_in': True, 'evidence': {**CURRENT, 'state': 'passed'}, 'current': {**CURRENT, 'version': '9'}})
+                     {'requested_mode': 'tool_level', 'tool_level_opt_in': True, 'evidence': ev(), 'current': {**CURRENT, 'version': '9'}})
     reject('admission-admits-stale-evidence', wrong, 'invalid', 'projection_mismatch')
     fallback = specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'qualified'},
-                        {'requested_mode': 'os_enforced', 'tool_level_opt_in': True, 'evidence': {**CURRENT, 'state': 'unmeasured'}, 'current': CURRENT})
+                        {'requested_mode': 'os_enforced', 'tool_level_opt_in': True, 'evidence': ev('unmeasured', 'os_enforced'), 'current': CURRENT})
     reject('admission-no-fallback-to-tool-level', fallback, 'invalid', 'projection_mismatch')
+    crossed = specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'qualified'},
+                       {'requested_mode': 'os_enforced', 'tool_level_opt_in': False, 'evidence': ev('passed', 'tool_level'), 'current': CURRENT})
+    reject('admission-admits-cross-mode-evidence', crossed, 'invalid', 'projection_mismatch')
     reject('admission-future-mode', specimen(NAME, 'admission', {'decision': 'refuse', 'reason': 'x'},
-                                              {'requested_mode': 'sandboxed', 'tool_level_opt_in': True, 'evidence': {**CURRENT, 'state': 'passed'}, 'current': CURRENT}), 'unsupported', 'enum')
+                                              {'requested_mode': 'sandboxed', 'tool_level_opt_in': True, 'evidence': ev(), 'current': CURRENT}), 'unsupported', 'enum')
     reject('envelope-future-kind', {**specimen(NAME, 'report', block()), 'kind': 'future'}, 'unsupported', 'envelope')
     return out
 

@@ -2,6 +2,9 @@
   "candidate": "task-survivors-v1",
   "document": {
     "survivors": {
+      "basis": [
+        "process_group"
+      ],
       "inventory": "partial",
       "items": [
         {

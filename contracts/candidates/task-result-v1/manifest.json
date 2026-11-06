@@ -86,6 +86,18 @@
       "sha256": "24edb29d4f6b2cf0172f224ccd0f31a61e917d760147923e15ec03f0cc81bc9a"
     },
     {
+      "bytes": 881,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "held-pipe-blocks-settlement.json",
+      "sha256": "21c6977a1f3cf2512011e5b7dc247340fda159e4f2e6fe7a30a9354bb796484c"
+    },
+    {
       "bytes": 890,
       "expected": {
         "agent_result": "succeeded",
@@ -224,6 +236,18 @@
       "sha256": "014fa098eb2e6a33ceb5cc05c5373c95d27735a7b7dfff3aae3bac20c4f4d060"
     },
     {
+      "bytes": 898,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "required_obligation_failed",
+        "release": "evidence_complete",
+        "workflow": "failed"
+      },
+      "filename": "undeclared-requirement-failed-obligation-fails.json",
+      "sha256": "89d49bfb5ae817c8d6b39145060226f03e02f8bbdb0b513872d6019a3a10d9cf"
+    },
+    {
       "bytes": 876,
       "expected": {
         "agent_result": "succeeded",
@@ -242,7 +266,7 @@
   "specifications": [
     {
       "path": "docs/decisions/C1-task-result-separation.md",
-      "sha256": "ff8be0ac0da0db5f0418832a404b8e13363babb5a2423b7731fc169e31a1f3f8"
+      "sha256": "025fc39f8c38a8823c5c1dfd2402aa7e0e58a06c6f589cb88ab7882649296de2"
     }
   ],
   "status": "specified_unimplemented",

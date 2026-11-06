@@ -7,6 +7,10 @@
   "format": "harflow.c1.candidate",
   "input": {
     "current": {
+      "ambient": {
+        "inherited_rules_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "user_config_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
       "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "platform": "darwin-arm64",
@@ -14,8 +18,13 @@
       "version": "2.1.318"
     },
     "evidence": {
+      "ambient": {
+        "inherited_rules_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "user_config_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
       "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "tool_level",
       "platform": "darwin-arm64",
       "probe_revision": "r1",
       "state": "passed",
