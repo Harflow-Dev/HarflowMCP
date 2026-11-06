@@ -1,5 +1,6 @@
 """Self-checks for the E1 read scenarios: port fidelity and sensitivity to a deviating engine."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -8,7 +9,6 @@ import pytest
 
 from conformance.e1 import cases, harness, scenarios, world
 from conformance.e1.port import OPERATIONS, ExternalAdapter, PythonLayoutAdapter
-from conformance.e1.seed import init_root
 from conformance.oracles import ConformanceError, strict_json
 
 REAL = [sys.executable, '-I', '-B', '-m', 'harflow_mcp.cli']
@@ -209,7 +209,7 @@ def test_external_adapter_round_trips_every_argument_name(tmp_path):
         adapter.append_malformed_line(root, world.A)
         adapter.truncate_log(root, world.A, 3)
         adapter.damage_task(root, world.BROKEN)
-        adapter.write_artifacts(root, world.A, [{'artifact_id': '11111111-2222-4333-8444-555555555555', 'name': 'a.txt'}], True)
+        adapter.write_artifacts(root, world.A, [world.artifact('11111111-2222-4333-8444-555555555555', 'a.txt')], True)
     assert external.root_state(tmp_path / 'ext') == 'initialized' and external.root_state(tmp_path / 'none') == 'missing'
     assert external.authoritative_digest(tmp_path / 'ext') == direct.authoritative_digest(tmp_path / 'dir')
     assert external.add_live_caller(tmp_path / 'ext', '12121212-1212-4212-8212-121212121212', os.getpid(), 'alive', 'running', None) == {'supported': True}
@@ -296,3 +296,42 @@ def test_delta_profiles_have_live_alternate_expectations(tmp_path):
     assert not interim['ok'] and any('interim-6.1' in m for m in interim['failures'])
     base = run_selected(tmp_path / 'b', 'passthrough', ['list.missing_root_initializes'])['list.missing_root_initializes']
     assert base['ok']
+
+
+class SilentCaller(PythonLayoutAdapter):
+    answer = None
+
+    def add_live_caller(self, root, task_id, pid, identity='alive', status='running', marker=None):
+        return self.answer
+
+
+@pytest.mark.parametrize('answer', [None, {}, {'supported': 'yes'}, {'supported': 1}, 'ok'])
+def test_an_adapter_that_does_not_answer_explicitly_cannot_pass_or_skip(tmp_path, answer):
+    adapter = SilentCaller()
+    adapter.answer = answer
+    result = run_selected(tmp_path, 'passthrough', ['scope.identity_verdicts'], port=adapter)['scope.identity_verdicts']
+    assert not result['ok'] and not result['skips']
+    assert any('explicit boolean' in message for message in result['failures']), result['failures']
+
+
+def test_artifact_items_are_complete_and_the_adapter_has_no_defaults(tmp_path):
+    adapter = PythonLayoutAdapter()
+    adapter.seed_world(tmp_path / 'root', world.WORLD_READS)
+    item = world.artifact('11111111-2222-4333-8444-555555555555', 'a.txt')
+    assert {'kind', 'note', 'registered_at', 'provenance_method', 'observation', 'target'} <= set(item)
+    for missing in ('kind', 'note', 'registered_at', 'provenance_method', 'observation'):
+        broken = {k: v for k, v in item.items() if k != missing}
+        with pytest.raises(KeyError):
+            adapter.write_artifacts(tmp_path / 'root', world.A, [broken], True)
+    adapter.write_artifacts(tmp_path / 'root', world.A, [item], True)
+    manifest = json.loads((tmp_path / 'root' / 'tasks' / f'{world.A}.artifacts.json').read_text())
+    row = manifest['items'][0]
+    assert (row['kind'], row['note'], row['registered_at'], row['registered_observation']) == \
+        (world.ARTIFACT_KIND, world.ARTIFACT_NOTE, world.ARTIFACT_REGISTERED_AT, world.ABSENT_OBSERVATION)
+
+
+def test_port_docstring_names_all_seventeen_operations():
+    from conformance.e1 import port
+    assert len(port.OPERATIONS) == 17
+    for op in port.OPERATIONS:
+        assert f'{op}(' in port.__doc__, op

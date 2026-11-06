@@ -4,42 +4,45 @@ A case never writes a file under the state root. It calls one of the named opera
 adapter turns the layout-neutral request into whatever store the engine under test uses (the engine
 may keep a SQLite root; no file layout is part of this interface).
 
-Operations (all take the state root first):
+The seventeen operations (all take the state root first):
 
-    initialize_empty(root)                    a compatible, empty, initialized store
-    remove_root(root)                         the selected root no longer exists
-    make_foreign_root(root)                   a nonempty root that is not a Harflow store
-    root_state(root) -> 'missing' | 'initialized' | 'other'
-    seed_world(root, world)                   the layout-neutral world from `world.py`
-    add_task(root, spec) -> dict              one settled or running task (see keys below)
-    add_live_caller(root, task_id, pid, identity='alive', status='running', marker=None) -> dict
-    damage_task(root, task_id)                task metadata that is no longer a valid task
-    append_event(root, task_id, seq, kind, observed_at, fields)
-    append_malformed_line(root, task_id)
-    append_partial_line(root, task_id)        an unterminated trailing event line
-    truncate_log(root, task_id, keep_events)
-    remove_log(root, task_id)
-    tamper_prompt(root, task_id)              the stored full prompt no longer matches its digest
-    write_artifacts(root, task_id, items, header_valid=True) -> dict
-    change_artifact_target(root, task_id, name)
-    authoritative_digest(root) -> str         non-empty digest of all authoritative state
+     1. initialize_empty(root)                 a compatible, empty, initialized store
+     2. remove_root(root)                      the selected root no longer exists
+     3. make_foreign_root(root)                a nonempty root that is not a Harflow store
+     4. root_state(root) -> 'missing' | 'initialized' | 'other'
+     5. seed_world(root, world)                the layout-neutral world from `world.py`
+     6. add_task(root, spec) -> dict           one settled or running task (spec below)
+     7. add_live_caller(root, task_id, pid, identity, status, marker) -> {'supported': bool}
+     8. damage_task(root, task_id)             task metadata that is no longer a valid task
+     9. append_event(root, task_id, seq, kind, observed_at, fields)
+    10. append_malformed_line(root, task_id)   a complete trailing line that is not an event
+    11. append_partial_line(root, task_id)     an unterminated trailing event line
+    12. truncate_log(root, task_id, keep_events)
+    13. remove_log(root, task_id)
+    14. tamper_prompt(root, task_id)           the stored full prompt no longer matches its digest
+    15. write_artifacts(root, task_id, items, header_valid) -> {'paths': [...]}
+    16. change_artifact_target(root, task_id, name)   the present target's stat now differs
+    17. authoritative_digest(root) -> str      non-empty digest of all authoritative state
 
-`add_task` spec keys: task_id, status, exit_code, started_at, finished_at, prompt, title, group, model,
-session_id, continuation_of, output_drained, prompt_store ('inline' | 'sidecar_verified' |
-'sidecar_missing' | 'sidecar_mismatch' | 'sidecar_foreign_name'), real_workspace (bool).
+`add_task` spec: always present are `task_id`, `backend`, `repo_path`, `freedom`, `session_id`, `status`,
+`exit_code`, `started_at`, `finished_at`, `output_drained` and `prompt` (see `world.task`). Optional keys are
+`title`, `group`, `model`, `continuation_of`, `prompt_store` ('inline' | 'sidecar_verified' | 'sidecar_missing' |
+'sidecar_mismatch' | 'sidecar_foreign_name') and `real_workspace`. An adapter has no defaults for asserted values.
+
+`write_artifacts` items (see `world.artifact`): always present are `artifact_id`, `name`, `target`
+('absent' | 'present'), `kind`, `note`, `registered_at` and `provenance_method`; an `absent` item also carries
+the `observation` to register, while a `present` item has its real stat recorded. A target is
+`<repo_path>/out/<name>` (`world.artifact_path`). `header_valid=False` writes a manifest the engine must report
+unavailable.
 
 `add_live_caller` identities. Required of every adapter: 'alive' (the pid's current start identity matches
 the record), 'reused' (the pid now has a different start identity, so the record is dead) and 'unknown'
 (the identity cannot be decided either way). Optional, Python-record forms: 'legacy_alive_with_markers',
 'legacy_markers_missing', 'legacy_markers_seen', 'legacy_markers_unseen', 'legacy_no_markers'. `status` is
 'running', 'completed_observed' (terminal with an exit code) or 'failed_unobserved' (terminal without one).
-It returns `{'supported': bool}`. An unsupported required state fails the scenario; an unsupported
-`legacy_*` state is a recorded skip.
-
-Every `add_task` spec is complete: `backend`, `repo_path`, `freedom`, `session_id`, `status`, `exit_code`,
-`started_at`, `finished_at`, `output_drained` and `prompt` are always present (see `world.task`); optional
-keys are `title`, `group`, `model`, `continuation_of`, `prompt_store` and `real_workspace`. An artifact
-target is `<repo_path>/out/<name>` (`world.artifact_path`). `seed_world` takes the argument `world`.
+The adapter must answer **explicitly** with `{'supported': true}` or `{'supported': false}`; an empty,
+null or non-boolean answer fails the scenario. An unsupported required state fails it too; an unsupported
+`legacy_*` state is a recorded skip. `seed_world` takes the argument `world`.
 
 An external adapter is an executable invoked as `ADAPTER OP --root ROOT` with the JSON arguments on
 stdin and one JSON result on stdout; it must be pinned by SHA-256 and is never reachable from the
@@ -212,17 +215,17 @@ class PythonLayoutAdapter:
         rows, paths = [], []
         for item in items:
             path = Path(worldmod.artifact_path(str(repo), item['name']))
-            if item.get('target') == 'present':
+            if item['target'] == 'present':
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'artifact bytes')
                 info = os.stat(path)
                 observation = {'device': info.st_dev, 'inode': info.st_ino, 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
             else:
-                observation = {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}
+                observation = item['observation']
             paths.append(str(path))
-            rows.append({'artifact_id': item['artifact_id'], 'task_id': task_id, 'path': str(path), 'kind': item.get('kind', 'report'),
-                         'note': item.get('note', 'n'), 'registered_at': '2026-01-10T10:04:00+00:00',
-                         'provenance': {'method': 'verified_process_lineage', 'task_id': task_id},
+            rows.append({'artifact_id': item['artifact_id'], 'task_id': task_id, 'path': str(path), 'kind': item['kind'],
+                         'note': item['note'], 'registered_at': item['registered_at'],
+                         'provenance': {'method': item['provenance_method'], 'task_id': task_id},
                          'registered_observation': observation})
         document = {'product': 'harflow', 'format': 'harflow.task.artifacts' if header_valid else 'harflow.other', 'v': 1,
                     'product_version': seed.PRODUCT_VERSION, 'task_id': task_id, 'items': rows}

@@ -4,7 +4,6 @@ Cases never import this module. It writes the documented private formats (store 
 metadata, normalized event lines, prompt sidecars) as literal bytes with the standard library and
 imports nothing from the engine.
 """
-import hashlib
 import json
 import os
 from pathlib import Path

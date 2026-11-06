@@ -85,3 +85,20 @@ WORLD_READS = {
     ],
     'events': {A: _a_events(), B: _b_events()},
 }
+
+
+ARTIFACT_KIND = 'report'
+ARTIFACT_NOTE = 'n'
+ARTIFACT_REGISTERED_AT = '2026-01-10T10:04:00+00:00'
+ARTIFACT_PROVENANCE_METHOD = 'verified_process_lineage'
+ABSENT_OBSERVATION = {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}
+
+
+def artifact(artifact_id, name, target='absent'):
+    """A complete artifact item. Every value a case asserts is explicit here; for an `absent` target the
+    registered observation is `ABSENT_OBSERVATION`, for a `present` one the adapter records the real file's stat."""
+    item = {'artifact_id': artifact_id, 'name': name, 'target': target, 'kind': ARTIFACT_KIND, 'note': ARTIFACT_NOTE,
+            'registered_at': ARTIFACT_REGISTERED_AT, 'provenance_method': ARTIFACT_PROVENANCE_METHOD}
+    if target == 'absent':
+        item['observation'] = dict(ABSENT_OBSERVATION)
+    return item

@@ -15,7 +15,7 @@ from datetime import datetime
 
 from . import harness
 from .world import (A, B, C, D, E, MISSING, BROKEN, LONG_PROMPT, PREVIEW_CHARS, WORLD_READS, BACKEND, REPO_PATH, FREEDOM,
-                    artifact_path, session_id, settled)
+                    artifact, artifact_path, session_id, settled, ABSENT_OBSERVATION, ARTIFACT_KIND, ARTIFACT_NOTE)
 
 CASES = {}
 CORE = ('ctl.v1',)
@@ -77,11 +77,14 @@ def own_marker():
 
 def agent_caller(ctx, task_id, identity='alive', status='running'):
     """Register the test process itself as a live task's process: the engine, being its descendant,
-    is run by a verified agent caller (detected by ancestry). Returns whether the adapter supports it."""
+    is run by a verified agent caller (detected by ancestry). Returns whether the adapter supports it; an unanswered or non-boolean reply raises."""
     marker = own_marker() if identity in ('legacy_alive_with_markers', 'legacy_markers_seen') else None
-    result = ctx.fx.add_live_caller(task_id, os.getpid(), identity=identity, status=status, marker=marker) or {}
+    result = ctx.fx.add_live_caller(task_id, os.getpid(), identity=identity, status=status, marker=marker)
+    if not isinstance(result, dict) or type(result.get('supported')) is not bool:
+        # An adapter that does not answer must never be read as supporting (or skipping) a state.
+        raise harness.Failure(f'the fixture adapter did not answer add_live_caller({identity}) with an explicit boolean `supported`: {result!r}')
     ctx.rebase()
-    return bool(result.get('supported', True))
+    return result['supported']
 
 
 def delta(ctx, name):
@@ -523,19 +526,19 @@ def _(ctx):
     ctx.eq({k: empty[k] for k in ('task_id', 'items', 'count', 'has_more', 'next_cursor', 'state')},
            {'task_id': A, 'items': [], 'count': 0, 'has_more': False, 'next_cursor': None, 'state': 'available'},
            'a task with no manifest has an empty available set [contract]')
-    ctx.fx.write_artifacts(A, [{'artifact_id': ART1, 'name': 'a.txt'}, {'artifact_id': ART2, 'name': 'b.txt'}])
+    ctx.fx.write_artifacts(A, [artifact(ART1, 'a.txt'), artifact(ART2, 'b.txt')])
     ctx.rebase()
     first = success(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1'))
     ctx.eq((first['count'], first['has_more'], [i['artifact_id'] for i in first['items']]), (2, True, [ART1]), 'first artifact page')
     item = first['items'][0]
-    subset(ctx, item, {'path': artifact_path(REPO_PATH, 'a.txt'), 'kind': 'report', 'note': 'n', 'task_id': A,
-                       'registered_observation': {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}}, 'artifact item [contract]')
+    subset(ctx, item, {'path': artifact_path(REPO_PATH, 'a.txt'), 'kind': ARTIFACT_KIND, 'note': ARTIFACT_NOTE, 'task_id': A,
+                       'registered_observation': ABSENT_OBSERVATION}, 'artifact item [contract]')
     ctx.eq(item['availability']['state'], 'deleted', 'a reference whose target is absent is deleted [contract]')
     ctx.check(isinstance(first['next_cursor'], str) and first['next_cursor'], 'continuing page carries a cursor [contract]')
     second = success(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1', '--cursor', first['next_cursor']))
     ctx.eq(([i['artifact_id'] for i in second['items']], second['has_more'], second['next_cursor']), ([ART2], False, None), 'second artifact page')
     error(ctx, ctx.ctl('task-artifacts', A, '--json', '--cursor', 'zzz'), 'artifact_error')
-    ctx.fx.write_artifacts(A, [{'artifact_id': ART1, 'name': 'a.txt'}])
+    ctx.fx.write_artifacts(A, [artifact(ART1, 'a.txt')])
     ctx.rebase()
     error(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1', '--cursor', first['next_cursor']), 'artifact_error',
           label='task-artifacts cursor after the manifest changed')
@@ -552,8 +555,7 @@ def _(ctx):
 def _(ctx):
     ctx.seed_reads()
     ctx.fx.add_task(settled(PRESENT, prompt='p', real_workspace=True))
-    ctx.fx.write_artifacts(PRESENT, [{'artifact_id': ART1, 'name': 'a.txt', 'target': 'present'},
-                                     {'artifact_id': ART2, 'name': 'b.txt', 'target': 'absent'}])
+    ctx.fx.write_artifacts(PRESENT, [artifact(ART1, 'a.txt', 'present'), artifact(ART2, 'b.txt')])
     ctx.rebase()
     states = lambda r: {i['artifact_id']: i['availability']['state'] for i in success(ctx, r)['items']}
     ctx.eq(states(ctx.ctl('task-artifacts', PRESENT, '--json')), {ART1: 'available', ART2: 'deleted'},

@@ -4,12 +4,9 @@ Standard library only. The engine under test is a black box reached through its 
 command line, in a fresh isolated root per case. Expectations live in `cases.py` as literals
 derived from `seed.py` and the published contract text.
 """
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 
 from ..oracles import ConformanceError, read_regular, strict_json, validate_envelope, validate_version_info

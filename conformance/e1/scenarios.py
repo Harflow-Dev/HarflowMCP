@@ -20,7 +20,7 @@ import sys
 import traceback
 import uuid
 
-from ..oracles import ConformanceError, PINNED_MANIFEST_SHA256, read_regular, strict_json, verify_manifest
+from ..oracles import ConformanceError, read_regular, strict_json, verify_manifest
 from ..runner import digest, publish_report
 from . import cases as case_module
 from .harness import Ctx, binary_target, source_target
