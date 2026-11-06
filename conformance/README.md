@@ -211,27 +211,36 @@ approve C0 or authorize the next migration session.
 `conformance/e1` checks the bounded ctl reads from outside the engine: `list`, `status`,
 `status-batch`, `task-list-page` (including successor discovery), `task-events`, `task-prompt`,
 `task-artifacts`, `recovery-activity`, `interaction-events` and `statistics-page`, plus the caller and
-scoped-read refusals around them. It is a separate entry point from S07 and, like S07, imports no
-engine code.
+scoped-read refusals around them. It is a separate entry point from S07 and imports no engine code.
 
-- **Oracle independence.** `seed.py` writes the documented private formats (store marker, task
-  metadata, normalized event lines, prompt sidecars, artifact manifests) as literal bytes with the
-  standard library, so an engine under test reads documents it did not write. Expected values in
-  `cases.py` are literals derived from the seed and `docs/contracts.md`. Nothing shares a codec with
-  an engine, and cursors are treated as opaque.
-- **Tags.** A check tagged `[contract]` follows the published text. A check tagged `[baseline]`
-  pins observed 0.0.11 behaviour that the contracts do not spell out; an engine that differs must
-  record a contract delta rather than diverge silently.
-- **Caller rules.** `agent_caller` is produced by registering the test process itself as a live
-  task, so the engine, as its descendant, is detected by ancestry; environment markers
-  (`HARFLOW_TASK_ID`, `PB_TASK_ID`, `HARFLOW_DEPTH`, `PB_DEPTH`) and unverifiable task history are
-  covered separately. Workflow-managed callers need workflow run documents and are not covered.
-- **Read-only.** After each case the marker, task metadata, event logs, prompt sidecars and
-  artifact manifests must be byte-identical to the seed (derived caches such as the listing index
-  are not compared).
+- **Fixture port.** Cases create, damage and inspect state only through the named operations in
+  `port.py` (`seed_world`, `add_task`, `add_live_caller`, `damage_task`, `append_event`,
+  `append_partial_line`, `truncate_log`, `remove_log`, `tamper_prompt`, `write_artifacts`,
+  `authoritative_digest`, and root helpers). No case writes under the state root and no store layout is
+  part of the interface. `PythonLayoutAdapter` is the only code that knows Python 0.0.11's files and
+  writes the documented private formats as literal bytes with the standard library. An external adapter
+  is selected with `--fixture-adapter PATH --fixture-adapter-sha256 DIGEST` (invoked `ADAPTER OP --root ROOT`,
+  JSON arguments on stdin, JSON result on stdout) and is never reachable from the public engine binary.
+- **Oracle independence.** Expected values in `cases.py` are literals derived from `world.py` and
+  `docs/contracts.md`. Nothing shares a codec with an engine, cursors are opaque, and error wording is
+  never pinned (codes and identities only).
+- **Tags.** A check tagged `[contract]` follows the published text. Every other check is `[baseline]`
+  (the default tag): it pins observed 0.0.11 behaviour the contracts do not spell out, so an engine that
+  differs must record a contract delta. `[baseline, pending U2]`, `[baseline, U4]`, `[pending U10]` and
+  `[proposed]` mark owner decisions still open (see `docs/decisions/C1-caller-and-scoped-reads.md`).
+- **Caller rules.** `agent_caller` is produced by registering the test process itself as a live task
+  through the port, so the engine, as its descendant, is detected by ancestry. `scope.identity_verdicts`
+  covers the alive, dead, undecidable, legacy and terminal-record identity states; environment markers
+  (including empty values) and unverifiable task history are covered separately. Workflow-managed callers
+  need workflow run documents and are listed for E6 in C1 section 6.1.
+- **Read-only.** After each case the digest of all authoritative state must equal the seed's. The digest
+  must be non-empty and must differ from an empty store's, so an adapter that hashes nothing fails.
+- **Bounds.** Paging walks fail when the bound is exhausted. Re-issuing a read that reports preparation
+  follows a harness bootstrap policy (40 attempts, 250 ms), not the contract.
+- **Framework identity.** `conformance/*.py` and `conformance/e1/**` are hashed before the run, checked
+  after it, and again when the report is validated.
 - **Targets.** `--source-repo/--commit/--python` runs a Git archive of an exact commit;
-  `--engine-bin/--engine-sha256` runs a caller-pinned binary. A subset (`--case`) is reported as
-  incomplete.
+  `--engine-bin/--engine-sha256` runs a caller-pinned binary. A subset (`--case`) is reported as incomplete.
 
 ```sh
 .venv/bin/python -m conformance.e1.scenarios \
@@ -242,6 +251,10 @@ engine code.
 .venv/bin/python -m pytest conformance/tests_e1 -q   # infrastructure self-checks
 ```
 
-The self-checks include deviating-engine doubles (dropped fields, wrong status, missing authority
-refusal, state rewritten by a read) that must make the scenarios fail. Passing against Python 0.0.11
-establishes the scenarios, not any other engine.
+The self-checks include deviating-engine doubles (dropped fields, wrong status, missing or opened
+authority refusals, ignored environment markers, unbound cursors, state rewritten by a read,
+nonterminating paging, vacuous digests). For each, the same case must pass against the undoubled
+engine, fail against the double for the stated reason, and the double must have logged its mutation.
+Passing against Python 0.0.11 establishes the scenarios, not any other engine. The S08 and S09
+profiles cannot be rerun on their old 0.0.7 manifest digest until the E2 port gives them a per-source
+digest.

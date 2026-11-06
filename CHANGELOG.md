@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Repin the S07 conformance oracles to the 0.0.11 contract manifest (291 fixtures, digest `cd58a5ef…`) and add `conformance/e1`: independent read scenarios for `list`, `status`, `status-batch`, `task-list-page`, `task-events`, `task-prompt`, `task-artifacts`, `recovery-activity`, `interaction-events` and `statistics-page`, including caller and scoped-read refusals. They create and inspect engine state only through a fixture port, with a Python 0.0.11 adapter and a hash-pinned external adapter option. No product behaviour or wire contract changes.
+- The S08 and S09 conformance profiles snapshot 0.0.7 sources whose manifest digest differs; `verify_manifest` accepts only the pinned 0.0.11 digest, so those profiles cannot be rerun on their old digest until the E2 port gives them a per-source digest.
+- Add `docs/decisions/C1-caller-and-scoped-reads.md`, the specification of Python 0.0.11 caller identification and scoped-read rules for the Rust engine, with open questions.
+
 ## 0.0.11
 
 - Add negotiated native conversation delivery across standalone tasks, workflows and workflow creation/editing. Queue finishes the full active response and automatically delivers one FIFO message per response in the same context; Now interrupts supported streaming phases while preserving older queued messages. Known unqualified active tools refuse Now explicitly. Exact runtime/profile qualification, bounded status and replay receipts remain separate from workflow commit/apply authority and Rust adoption.

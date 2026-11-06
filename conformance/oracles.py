@@ -33,7 +33,7 @@ def _version(value):
         raise ConformanceError('invalid product version')
     return tuple(int(x) for x in match.groups())
 
-def validate_envelope(doc, format, expected_version='0.0.7'):
+def validate_envelope(doc, format, expected_version='0.0.11'):
     if not isinstance(doc, dict) or doc.get('product') != 'harflow' or doc.get('format') != format or type(doc.get('v')) is not int or doc['v'] != 1:
         raise ConformanceError('incompatible wire envelope')
     version = _version(doc.get('product_version'))
@@ -105,7 +105,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
     return manifest
 
 
-def validate_event_page(doc, expected_version='0.0.7'):
+def validate_event_page(doc, expected_version='0.0.11'):
     validate_envelope(doc, 'harflow.ctl', expected_version)
     result = doc.get('result')
     if not isinstance(result, dict) or not isinstance(result.get('events'), list):

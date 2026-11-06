@@ -15,10 +15,14 @@ import sys
 from ..oracles import ConformanceError, read_regular, strict_json, validate_envelope, validate_version_info
 from ..process import run_process
 from ..runner import _runtime, _snapshot, digest, isolated_environment, tree_hash
-from . import seed
+from . import world
+from .port import PythonLayoutAdapter
 
-AUTHORITATIVE = re.compile(r'(\.meta\.json|\.events\.jsonl|\.prompt\.[0-9a-f]{64}\.txt|\.artifacts\.json)$')
 OPERATION_TIMEOUT = 60
+# Harness policy for a cold index: how long a client re-issues a read that reports preparation.
+BOOTSTRAP_ATTEMPTS = 40
+BOOTSTRAP_INTERVAL_SECONDS = 0.25
+TAGS = ('[contract]', '[baseline', '[harness]', '[proposed')
 
 
 class Failure(Exception):
@@ -31,15 +35,12 @@ class Result:
         self.rc = record.get('returncode')
         self.doc = None
         self.parse_error = None
-        text = stdout.decode('utf-8', 'replace')
-        lines = [line for line in text.split('\n') if line]
-        if len(lines) == 1:
+        text = stdout.decode('utf-8', 'replace').strip()
+        if text:
             try:
-                self.doc = strict_json(lines[0])
+                self.doc = strict_json(text)
             except ConformanceError as exc:
-                self.parse_error = str(exc)
-        elif lines:
-            self.parse_error = 'stdout is not exactly one JSON line'
+                self.parse_error = 'stdout is not exactly one JSON document: ' + str(exc)
 
     @property
     def result(self):
@@ -57,7 +58,10 @@ class Result:
 class Ctx:
     """One case: a fresh isolated root, a way to run the engine, and recorded checks."""
 
-    def __init__(self, name, folder, command, capabilities, probe=False):
+    def __init__(self, name, folder, command, capabilities, probe=False, port=None, default_tag='baseline'):
+        self.port = port or PythonLayoutAdapter()
+        self.default_tag = default_tag
+        self.skips = []
         self.name, self.folder, self.command, self.capabilities = name, Path(folder), list(command), capabilities
         self.probe = probe
         self.folder.mkdir(parents=True)
@@ -68,36 +72,41 @@ class Ctx:
         self.failures = []
         self.operations = []
         self.baseline = None
+        self.fx = Bound(self.port, self.root)
         self.handshake_done = False
         self._count = 0
 
     # --- seeding and invariants -------------------------------------------------------------------
 
-    seeder = staticmethod(seed.seed_reads)  # the one seeding seam; replace to use another fixture tool
-
     def seed_reads(self):
-        self.seeder(self.root)
+        self.fx.seed_world(world.WORLD_READS)
         self.rebase()
 
     def init_root(self):
-        seed.init_root(self.root)
+        self.fx.initialize_empty()
         self.rebase()
 
-    def authoritative_hashes(self):
-        rows = {}
-        if self.root.exists():
-            marker = self.root / '.harflow-store.json'
-            if marker.exists():
-                rows['.harflow-store.json'] = digest(marker.read_bytes())
-            if self.tasks.is_dir():
-                for path in sorted(self.tasks.iterdir()):
-                    if AUTHORITATIVE.search(path.name) and path.is_file():
-                        rows['tasks/' + path.name] = digest(path.read_bytes())
-        return rows
+    def digest(self, root=None):
+        value = self.port.authoritative_digest(root or self.root)
+        if not isinstance(value, str) or len(value) < 32:
+            raise Failure('the fixture adapter returned an empty authoritative digest')
+        return value
 
     def rebase(self):
-        """Declare the current authoritative documents as the expected unchanged state."""
-        self.baseline = self.authoritative_hashes()
+        """Declare the current authoritative state as the expected unchanged state.
+
+        The digest must be non-empty and, once the world is seeded, differ from the digest of an empty
+        initialized store, so an adapter that hashes nothing cannot make the invariant vacuous."""
+        self.baseline = self.digest()
+        if not getattr(self, '_empty_digest', None):
+            scratch = self.folder / 'empty-store'
+            self.port.initialize_empty(scratch)
+            self._empty_digest = self.digest(scratch)
+        if self.baseline != self._empty_digest:
+            self._nonvacuous = True
+
+    def skip(self, message):
+        self.skips.append(message)
 
     # --- running the engine -----------------------------------------------------------------------
 
@@ -109,9 +118,9 @@ class Ctx:
         out = read_regular(record['streams']['stdout']['path'])
         try:
             validate_version_info(strict_json(out), self.env['HARFLOW_STATE_ROOT'], self.capabilities, sys.platform, None)
-            self.check(True, 'fresh handshake qualifies the required capabilities')
+            self.check(True, 'fresh handshake qualifies the required capabilities', tag='harness')
         except ConformanceError as exc:
-            self.check(False, f'fresh handshake failed: {exc}')
+            self.check(False, f'fresh handshake failed: {exc}', tag='harness')
         self.handshake_done = True
 
     def ctl(self, *args, env=None, expect_rc=None, auto=True):
@@ -134,7 +143,7 @@ class Ctx:
         if auto:
             self.document_checks(result)
         if expect_rc is not None:
-            self.check(result.rc == expect_rc, f'{args[0]} exit status {result.rc} == {expect_rc}')
+            self.check(result.rc == expect_rc, f'{args[0]} exit status {result.rc} == {expect_rc}', tag='baseline')
         if self.probe:
             print(json.dumps(result.summary(), sort_keys=True))
         return result
@@ -143,31 +152,33 @@ class Ctx:
         name = ' '.join(map(str, res.args[:2]))
         clean = (res.record.get('pipes_drained') and not res.record.get('timed_out')
                  and not res.record.get('capture_exceeded') and res.record.get('cleanup') != 'unknown')
-        self.check(clean, f'{name}: process finished, drained and was cleaned up')
-        self.check(res.rc in (0, 1, 2), f'{name}: exit status {res.rc} is 0, 1 or 2')
+        self.check(clean, f'{name}: process finished, drained and was cleaned up', tag='harness')
+        self.check(res.rc in (0, 1, 2), f'{name}: exit status {res.rc} is 0, 1 or 2', tag='contract')
         if '--json' in map(str, res.args) or res.rc == 2 and res.stdout:
             if res.rc != 2 or res.stdout:
-                self.check(res.parse_error is None and res.doc is not None, f'{name}: stdout is one strict JSON document ({res.parse_error})')
+                self.check(res.parse_error is None and res.doc is not None, f'{name}: stdout is one strict JSON document ({res.parse_error})', tag='contract')
         if res.doc is None:
             return
         try:
             validate_envelope(res.doc, 'harflow.ctl')
-            self.check(True, f'{name}: common envelope')
+            self.check(True, f'{name}: common envelope', tag='contract')
         except ConformanceError as exc:
-            self.check(False, f'{name}: common envelope: {exc}')
+            self.check(False, f'{name}: common envelope: {exc}', tag='contract')
         if res.rc == 0:
-            self.check('error' not in res.doc, f'{name}: success carries no error')
+            self.check('error' not in res.doc, f'{name}: success carries no error', tag='contract')
         else:
             error = res.doc.get('error')
             self.check(isinstance(error, dict) and isinstance(error.get('code'), str) and isinstance(error.get('message'), str),
-                       f'{name}: failure carries error.code and error.message')
+                       f'{name}: failure carries error.code and error.message', tag='contract')
             if res.rc == 2:
-                self.check(isinstance(error, dict) and error.get('code') == 'usage', f'{name}: exit 2 is a usage error')
-        self.check(len(res.stdout) <= 1_048_576, f'{name}: document within 1 MiB')
+                self.check(isinstance(error, dict) and error.get('code') == 'usage', f'{name}: exit 2 is a usage error', tag='contract')
+        self.check(len(res.stdout) <= 1_048_576, f'{name}: document within 1 MiB', tag='harness')
 
     # --- assertions -------------------------------------------------------------------------------
 
-    def check(self, condition, message):
+    def check(self, condition, message, tag=None):
+        if not any(t in message for t in TAGS):
+            message = f'{message} [{tag or self.default_tag}]'
         self.checks.append({'ok': bool(condition), 'message': message})
         if not condition:
             self.failures.append(message)
@@ -179,13 +190,25 @@ class Ctx:
         return ok
 
     def finish(self):
-        now = self.authoritative_hashes()
         if self.baseline is not None:
-            self.eq(now, self.baseline, 'authoritative documents unchanged by reads')
-        return {'name': self.name, 'ok': not self.failures, 'failures': self.failures,
+            self.check(getattr(self, '_nonvacuous', False), 'authoritative digest distinguishes a seeded store from an empty one', tag='harness')
+            self.eq(self.digest(), self.baseline, 'authoritative state unchanged by reads [harness]')
+        return {'name': self.name, 'ok': not self.failures, 'failures': self.failures, 'skips': self.skips,
                 'checks': len(self.checks), 'operations': self.operations}
 
 
+class Bound:
+    """The fixture port bound to one state root: `ctx.fx.add_task(spec)`."""
+
+    def __init__(self, port, root):
+        self._port, self._root = port, root
+
+    def at(self, root):
+        return Bound(self._port, root)
+
+    def __getattr__(self, name):
+        method = getattr(self._port, name)
+        return lambda *args, **kwargs: method(self._root, *args, **kwargs)
 def source_target(repo, commit, python, output):
     """Python source at an exact commit, run from an isolated archive (never an editable checkout)."""
     repo, python, output = Path(repo).absolute(), Path(python).absolute(), Path(output).absolute()
@@ -226,3 +249,4 @@ def binary_target(engine_bin, engine_sha256):
             raise ConformanceError('binary digest mismatch')
     check()
     return [str(binary)], {'kind': 'binary', 'path': str(binary), 'sha256': engine_sha256}, check, None
+

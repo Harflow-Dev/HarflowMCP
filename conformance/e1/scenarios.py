@@ -20,23 +20,35 @@ import traceback
 import uuid
 
 from ..oracles import ConformanceError, PINNED_MANIFEST_SHA256, read_regular, strict_json, verify_manifest
-from ..runner import digest, framework_identity, publish_report
+from ..runner import digest, publish_report
 from . import cases as case_module
 from .harness import Ctx, binary_target, source_target
+from .port import ExternalAdapter, PythonLayoutAdapter
 
 
-def run_cases(command, identity, check, output, selected=None, probe=False):
+def framework_identity():
+    """Digest of every harness source the result depends on: conformance/*.py and conformance/e1/** recursively."""
+    root = Path(__file__).resolve().parents[1]
+    paths = sorted(list(root.glob('*.py')) + [p for p in (root / 'e1').rglob('*.py') if '__pycache__' not in p.parts])
+    return {str(p.relative_to(root)): digest(read_regular(p)) for p in paths}
+
+
+def run_cases(command, identity, check, output, selected=None, probe=False, port=None):
     results = []
-    for name, (capabilities, function) in case_module.CASES.items():
+    for name, (capabilities, function, tag) in case_module.CASES.items():
         if selected and name not in selected:
             continue
-        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe)
+        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe, port=port, default_tag=tag)
         try:
             function(ctx)
         except Exception as exc:  # a crashing case is a failure, never a pass
             ctx.failures.append('case raised ' + type(exc).__name__ + ': ' + str(exc))
             ctx.failures.append(traceback.format_exc(limit=4))
-        outcome = ctx.finish()
+        try:
+            outcome = ctx.finish()
+        except Exception as exc:
+            ctx.failures.append('finish raised ' + type(exc).__name__ + ': ' + str(exc))
+            outcome = {'name': name, 'ok': False, 'failures': ctx.failures, 'skips': ctx.skips, 'checks': len(ctx.checks), 'operations': ctx.operations}
         outcome['checks_detail'] = ctx.checks
         results.append(outcome)
         print(('PASS ' if outcome['ok'] else 'FAIL ') + name + f' ({outcome["checks"]} checks)', file=sys.stderr)
@@ -52,9 +64,11 @@ def run(args):
     if not re.fullmatch('[a-f0-9]{32}', invocation_id):
         raise ConformanceError('invalid invocation id')
     manifest = verify_manifest(args.manifest, args.manifest_sha256)
+    port = ExternalAdapter(args.fixture_adapter, args.fixture_adapter_sha256) if args.fixture_adapter else PythonLayoutAdapter()
+    framework_before = framework_identity()
     report = {'format': 'harflow.conformance.e1-report', 'v': 1, 'invocation_id': invocation_id, 'ok': False,
               'manifest_sha256': args.manifest_sha256, 'fixture_count': len(manifest['files']),
-              'framework_sha256': framework_identity(), 'platform': [sys.platform, platform.machine()], 'cases': []}
+              'framework_sha256': framework_before, 'fixture_adapter': port.name, 'platform': [sys.platform, platform.machine()], 'cases': []}
     try:
         if args.engine_bin:
             command, identity, check, _ = binary_target(args.engine_bin, args.engine_sha256)
@@ -62,8 +76,10 @@ def run(args):
             command, identity, check, _ = source_target(args.source_repo, args.commit, args.python, output)
         report['target'] = identity
         check()
-        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe)
+        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe, port)
         check()
+        if framework_identity() != framework_before:
+            raise ConformanceError('framework source changed during execution')
         known = set(case_module.CASES)
         missing = sorted(set(args.case or ()) - known)
         if missing:
@@ -82,6 +98,8 @@ def validate_report(path, expected_invocation_id):
     report = strict_json(read_regular(path))
     if report.get('format') != 'harflow.conformance.e1-report' or report.get('invocation_id') != expected_invocation_id:
         raise ConformanceError('report identity mismatch')
+    if report.get('framework_sha256') != framework_identity():
+        raise ConformanceError('framework source differs from the report')
     root = path.parent
     for case in report['cases']:
         for operation in case['operations']:
@@ -108,6 +126,8 @@ def main(argv=None):
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--manifest-sha256', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--fixture-adapter', help='absolute path of a pinned external fixture tool (default: the Python 0.0.11 layout adapter)')
+    parser.add_argument('--fixture-adapter-sha256')
     parser.add_argument('--invocation-id')
     parser.add_argument('--case', action='append', help='run only this case; repeat for several (a subset is not the complete matrix)')
     parser.add_argument('--probe', action='store_true', help='print every command result while running')
@@ -116,6 +136,8 @@ def main(argv=None):
     if args.list:
         print('\n'.join(case_module.CASES))
         return 0
+    if bool(args.fixture_adapter) != bool(args.fixture_adapter_sha256):
+        parser.error('--fixture-adapter and --fixture-adapter-sha256 go together')
     if args.engine_bin:
         if args.source_repo or args.commit or args.python or not args.engine_sha256:
             parser.error('binary selection requires --engine-sha256 and excludes source selection')

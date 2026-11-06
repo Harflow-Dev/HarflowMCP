@@ -396,45 +396,45 @@
     "count": 1
   },
   {
-    "file": "conformance/README.md",
-    "literal": "PB_DEPTH",
-    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
-    "count": 1
-  },
-  {
-    "file": "conformance/README.md",
-    "literal": "PB_TASK_ID",
-    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
-    "count": 1
-  },
-  {
     "file": "conformance/e1/cases.py",
     "literal": "PB_DEPTH",
-    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
-    "count": 1
-  },
-  {
-    "file": "conformance/e1/cases.py",
-    "literal": "PB_TASK_ID",
     "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
     "count": 2
   },
   {
+    "file": "conformance/e1/cases.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
+    "count": 4
+  },
+  {
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",
     "literal": "PB_DEPTH",
     "reason": "Specify the legacy caller variables and the stable method name the engine still reports.",
-    "count": 1
+    "count": 2
   },
   {
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",
     "literal": "PB_TASK_ID",
     "reason": "Specify the legacy caller variables and the stable method name the engine still reports.",
-    "count": 4
+    "count": 6
   },
   {
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",
     "literal": "pb_task_id",
     "reason": "Specify the legacy caller variables and the stable method name the engine still reports.",
     "count": 1
+  },
+  {
+    "file": "conformance/tests_e1/proxy_engine.py",
+    "literal": "PB_DEPTH",
+    "reason": "Self-check double that strips the legacy caller variables the engine still honours as agent signals.",
+    "count": 2
+  },
+  {
+    "file": "conformance/tests_e1/proxy_engine.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Self-check double that strips the legacy caller variables the engine still honours as agent signals.",
+    "count": 2
   }
 ]

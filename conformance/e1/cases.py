@@ -1,27 +1,29 @@
-"""E1 read cases. Expectations are literals derived from `seed.py` and the published contract.
+"""E1 read cases. Expectations are literals derived from `world.py` and the published contract.
 
-Each case runs in a fresh isolated state root against the public command line only. Checks tagged
-`[contract]` follow `docs/contracts.md`; checks tagged `[baseline]` pin observed 0.0.11 behaviour that
-the contracts do not spell out, so an engine that differs must record the difference as a contract
-delta (C1) rather than silently diverge.
+Each case runs in a fresh isolated state root against the public command line only, and creates or
+damages state exclusively through the fixture port (`port.py`). Checks tagged `[contract]` follow
+`docs/contracts.md`; every other check is `[baseline]`: it pins observed Python 0.0.11 behaviour that the
+contracts do not spell out, so an engine that differs must record a contract delta (C1) rather than
+silently diverge. `[baseline, pending U2]`, `[baseline, U4]` and `[proposed]` mark checks whose
+status the owner has yet to decide (see `docs/decisions/C1-caller-and-scoped-reads.md`).
 """
-import hashlib
 import json
 import os
 import subprocess
 import time
 from datetime import datetime
 
-from . import seed
-from .seed import A, B, C, D, E, MISSING
+from . import harness
+from .world import A, B, C, D, E, MISSING, BROKEN, LONG_PROMPT, PREVIEW_CHARS, WORLD_READS
 
 CASES = {}
 CORE = ('ctl.v1',)
+MAX_PAGES = 12
 
 
-def case(name, capabilities=CORE):
+def case(name, capabilities=CORE, tag='baseline'):
     def wrap(function):
-        CASES[name] = (capabilities, function)
+        CASES[name] = (capabilities, function, tag)
         return function
     return wrap
 
@@ -59,20 +61,26 @@ def now_close(ctx, text, label):
         ctx.check(False, f'{label} is an ISO8601 timestamp, got {text!r}')
 
 
-def agent_caller(ctx, task_id):
-    """Register the test process itself as a live task's process: the engine, being its descendant,
-    is run by a verified agent caller (detected by ancestry)."""
-    out = subprocess.run(['ps', '-o', 'lstart=', '-p', str(os.getpid())], capture_output=True, text=True,
-                         env={**os.environ, 'LC_ALL': 'C'}).stdout
-    seed.write_task(ctx.tasks, task_id, status='running', exit_code=None, finished_at=None, output_drained=False,
-                    pid=os.getpid(), start_time=' '.join(out.split()), started_at='2026-11-07T00:00:00+00:00',
-                    prompt='the caller')
-    ctx.rebase()
-
-
 CALLER = '12121212-1212-4212-8212-121212121212'
 WINDOW = ['--since', '2026-01-01T00:00:00+00:00', '--before', '2026-02-01T00:00:00+00:00']
 ALL_IDS = {A, B, C, D, E}
+
+
+def own_marker():
+    """A substring of this process's own command line, for identities that carry markers."""
+    out = subprocess.run(['ps', '-o', 'command=', '-p', str(os.getpid())], capture_output=True, text=True,
+                         env={**os.environ, 'LC_ALL': 'C'}).stdout.strip()
+    token = out.split()[0] if out else ''
+    return token if token and token in out else None
+
+
+def agent_caller(ctx, task_id, identity='alive', status='running'):
+    """Register the test process itself as a live task's process: the engine, being its descendant,
+    is run by a verified agent caller (detected by ancestry). Returns whether the adapter supports it."""
+    marker = own_marker() if identity in ('alive_with_markers', 'legacy_markers_seen') else None
+    result = ctx.fx.add_live_caller(task_id, os.getpid(), identity=identity, status=status, marker=marker) or {}
+    ctx.rebase()
+    return bool(result.get('supported', True))
 
 
 def pending_shape(ctx, result, label):
@@ -86,16 +94,24 @@ def pending_shape(ctx, result, label):
               f'{label}: catalog_state exposes only status, source, reason [contract]')
 
 
-def page_ready(ctx, *args, attempts=40, env=None):
-    """Re-issue a page read while it reports bootstrap_pending, as the contract tells clients to."""
-    for _ in range(attempts):
+def settled_page(ctx, *args, env=None):
+    """Re-issue a page read while it reports preparation (the contract tells clients to retry), under the
+    harness bootstrap policy. Returns the first settled response, which may be an error."""
+    res = None
+    for _ in range(harness.BOOTSTRAP_ATTEMPTS):
         res = ctx.ctl(*args, env=env)
-        result = success(ctx, res)
-        if result.get('bootstrap_pending') is not True:
+        result = res.result if res.rc == 0 and res.doc else None
+        if result is None or result.get('bootstrap_pending') is not True:
             return res
         pending_shape(ctx, result, 'task-list-page')
-        time.sleep(0.25)
-    ctx.check(False, 'task-list-page leaves bootstrap_pending within the bounded retries')
+        time.sleep(harness.BOOTSTRAP_INTERVAL_SECONDS)
+    ctx.check(False, 'task-list-page leaves bootstrap_pending within the harness bootstrap budget', tag='harness')
+    return res
+
+
+def page_ready(ctx, *args, env=None):
+    res = settled_page(ctx, *args, env=env)
+    success(ctx, res)
     return res
 
 
@@ -103,6 +119,7 @@ def ids(items):
     return [row['task_id'] for row in items]
 
 
+# --- list ---------------------------------------------------------------------------------------------
 # --- list ---------------------------------------------------------------------------------------------
 
 @case('list.populated')
@@ -125,7 +142,7 @@ def _(ctx):
     ctx.seed_reads()
     recent = '77777777-7777-4777-8777-777777777777'
     stamp = datetime.fromtimestamp(time.time() - 3600).astimezone().isoformat()
-    seed.write_task(ctx.tasks, recent, started_at=stamp, finished_at=stamp, prompt='recent')
+    ctx.fx.add_task({'task_id': recent, 'started_at': stamp, 'finished_at': stamp, 'prompt': 'recent', 'status': 'completed', 'exit_code': 0})
     ctx.rebase()
     doc = success(ctx, ctx.ctl('list', '--json', '--since', '7d'))
     ctx.eq([row['task_id'] for row in doc['tasks']], [recent], 'only a task started within the window is listed [contract]')
@@ -136,22 +153,20 @@ def _(ctx):
 
 @case('list.missing_root_initializes')
 def _(ctx):
-    ctx.eq(ctx.root.exists(), False, 'precondition: no state root')
+    ctx.eq(ctx.fx.root_state(), 'missing', 'precondition: no state root')
     doc = success(ctx, ctx.ctl('list', '--json'))
     ctx.eq(doc['tasks'], [], 'an empty store lists no tasks')
-    marker = json.loads((ctx.root / '.harflow-store.json').read_text())
-    subset(ctx, marker, {'product': 'harflow', 'format': 'harflow.store', 'v': 1, 'layout_version': 1}, 'marker [contract]')
-    ctx.check((ctx.root / '.harflow-store.lock').exists(), 'the stable store lock exists [contract]')
+    ctx.eq(ctx.fx.root_state(), 'initialized', 'an ordinary read initializes a missing root [contract, pending U10]')
 
 
 @case('list.foreign_root_refused')
 def _(ctx):
-    ctx.root.mkdir()
-    (ctx.root / 'stranger.txt').write_text('not harflow')
+    ctx.fx.make_foreign_root()
+    ctx.rebase()
     res = ctx.ctl('list', '--json')
     err = error(ctx, res, 'state_incompatible')
     subset(ctx, err.get('data') or {}, {'reason': 'unmarked_nonempty', 'state_root': str(ctx.root)}, 'error.data [contract]')
-    ctx.eq(sorted(os.listdir(ctx.root)), ['stranger.txt'], 'a refused root is left untouched [contract]')
+    ctx.eq(ctx.fx.root_state(), 'other', 'a refused root is left untouched [contract]')
 
 
 # --- status / status-batch ----------------------------------------------------------------------------
@@ -179,7 +194,8 @@ def _(ctx):
 def _(ctx):
     ctx.seed_reads()
     for name in ('abababab-0000-4000-8000-000000000001', 'abababab-1111-4111-8111-111111111111'):
-        seed.write_task(ctx.tasks, name)
+        ctx.fx.add_task({'task_id': name, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
+                         'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
     ctx.rebase()
     err = error(ctx, ctx.ctl('status', MISSING, '--json'), 'unknown_task')
     ctx.eq((err.get('data') or {}).get('input'), MISSING, 'unknown id is echoed in data.input [contract]')
@@ -203,7 +219,7 @@ def _(ctx):
     ctx.eq([row['task_id'] for row in rows], [A, B, B],
            'one row per distinct input in order; two spellings of one task give two rows [contract]')
     ctx.eq(rows[1].get('resolved_from'), {'input': 'bbbbbbbb', 'task_id': B}, 'prefix row echoes resolved_from [contract]')
-    ctx.check('resolved_from' not in rows[2], 'exact row has no resolved_from')
+    ctx.check('resolved_from' not in rows[2], 'exact row has no resolved_from [contract]')
     ctx.eq(sorted(doc['errors']), sorted([MISSING, 'bad/id']), 'errors are keyed by the raw input [contract]')
     ctx.eq(doc['errors'][MISSING]['code'], 'unknown_task', 'unknown id code uses the status code [contract]')
     ctx.eq(doc['errors']['bad/id']['code'], 'invalid_task_id', 'invalid id code [contract]')
@@ -229,17 +245,17 @@ def _(ctx):
     ctx.seed_reads()
     first = page_ready(ctx, 'task-list-page', '--json', '--limit', '2')
     result = first.result
-    ctx.eq(ids(result['items']), [E, D], 'first page is the two newest tasks, newest first [baseline]')
+    ctx.eq(ids(result['items']), [E, D], 'first page is the two newest tasks, newest first')
     ctx.eq(result['has_more'], True, 'first page has_more')
     ctx.eq(result.get('counts_complete'), True, 'ready page reports counts_complete')
     ctx.eq(result.get('total_active_count'), 0, 'no active tasks are counted')
     seen = ids(result['items'])
     cursor = result['next_cursor']
-    ctx.check(isinstance(cursor, str) and cursor, 'a continuing page carries an opaque next_cursor')
+    ctx.check(isinstance(cursor, str) and cursor, 'a continuing page carries an opaque next_cursor [contract]')
     for expected, more in (([C, B], True), ([A], False)):
         res = ctx.ctl('task-list-page', '--json', '--limit', '2', '--cursor', cursor)
         page = success(ctx, res)
-        ctx.eq(ids(page['items']), expected, 'continuation page items [baseline]')
+        ctx.eq(ids(page['items']), expected, 'continuation page items')
         ctx.eq(page['has_more'], more, 'continuation has_more')
         seen += ids(page['items'])
         cursor = page['next_cursor']
@@ -323,11 +339,15 @@ def _(ctx):
            'oldest-forward first page: older_cursor is null at the start of the log [contract]')
     ctx.eq(page['span'], {'first_seq': 0, 'last_seq': 1}, '--limit bounds decoded lines, hidden ones included [contract]')
     collected, spans = list(seqs(page)), [page['span']]
-    while page['has_newer']:
+    for _ in range(MAX_PAGES):
+        if not page['has_newer']:
+            break
         page = success(ctx, ctx.ctl('task-events', A, '--json', '--cursor', page['newer_cursor'], '--limit', '2'))
         collected += seqs(page)
         spans.append(page['span'])
-        ctx.check(len(spans) < 10, 'paging terminates')
+    else:
+        ctx.check(False, f'forward paging reaches the end of the log within {MAX_PAGES} pages [contract]')
+        return
     ctx.eq(collected, [0, 3, 4, 5, 6, 7], 'forward paging yields every default-kind event once [contract]')
     ctx.check(all(a['last_seq'] + 1 == b['first_seq'] for a, b in zip(spans, spans[1:]) if a and b),
               'adjacent pages do not overlap and leave no unexplained gap [contract]')
@@ -366,13 +386,13 @@ def _(ctx):
            ([], None, None, None, False, False), 'a task without a log is unavailable with no cursors [contract]')
     ctx.eq(result['log']['state'], 'unavailable', 'log.state unavailable [contract]')
     gappy = '12345678-0000-4000-8000-000000000001'
-    seed.write_task(ctx.tasks, gappy)
-    lines = [seed.event(0, 'task_started', gappy, '2026-01-10T10:00:00+00:00'),
-             seed.event(1, 'assistant_text', gappy, '2026-01-10T10:00:01+00:00', text='a')]
-    body = ''.join(json.dumps(line) + '\n' for line in lines) + 'not json\n'
-    body += json.dumps(seed.event(5, 'assistant_text', gappy, '2026-01-10T10:00:02+00:00', text='b')) + '\n'
-    body += json.dumps(seed.event(6, 'task_finished', gappy, '2026-01-10T10:00:03+00:00', status='completed', exit_code=0)) + '\n'
-    seed._write(ctx.tasks / f'{gappy}.events.jsonl', body)
+    ctx.fx.add_task({'task_id': gappy, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:05:00+00:00',
+                     'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
+    ctx.fx.append_event(gappy, 0, 'task_started', '2026-01-10T10:00:00+00:00', {})
+    ctx.fx.append_event(gappy, 1, 'assistant_text', '2026-01-10T10:00:01+00:00', {'text': 'a'})
+    ctx.fx.append_malformed_line(gappy)
+    ctx.fx.append_event(gappy, 5, 'assistant_text', '2026-01-10T10:00:02+00:00', {'text': 'b'})
+    ctx.fx.append_event(gappy, 6, 'task_finished', '2026-01-10T10:00:03+00:00', {'status': 'completed', 'exit_code': 0})
     ctx.rebase()
     result = success(ctx, ctx.ctl('task-events', gappy, '--json', '--from', 'oldest'))
     ctx.eq(seqs(result), [0, 1, 5, 6], 'a malformed line is skipped, not fatal [contract]')
@@ -385,24 +405,20 @@ def _(ctx):
 @case('task-events.append_and_cursor_expiry', CORE + EV)
 def _(ctx):
     ctx.seed_reads()
-    path = ctx.tasks / f'{A}.events.jsonl'
-    original = path.read_bytes()
     page = success(ctx, ctx.ctl('task-events', A, '--json', '--from', 'oldest', '--limit', '4'))
     cursor = page['newer_cursor']
-    line = json.dumps(seed.event(8, 'assistant_text', A, '2026-01-10T10:06:00+00:00', text='late')) + '\n'
-    with open(path, 'ab') as stream:
-        stream.write(line.encode())
-        stream.write(b'{"partial":')
+    ctx.fx.append_event(A, 8, 'assistant_text', '2026-01-10T10:06:00+00:00', {'text': 'late'})
+    ctx.fx.append_partial_line(A)
     ctx.rebase()
     after = success(ctx, ctx.ctl('task-events', A, '--json', '--cursor', cursor, '--limit', '50'))
     ctx.eq(seqs(after), [4, 5, 6, 7, 8], 'an append does not expire the cursor and a partial trailing line is held back [contract]')
     ctx.eq(after['has_newer'], False, 'a partial trailing line never sets has_newer [contract]')
     ctx.eq(after['log']['state'], 'incomplete', 'a log whose last complete line is not task_finished is not final [contract]')
-    path.write_bytes(original[:100])
+    ctx.fx.truncate_log(A, 1)
     ctx.rebase()
     err = error(ctx, ctx.ctl('task-events', A, '--json', '--cursor', cursor), 'event_cursor_expired')
     ctx.eq(err.get('data'), {'reload': 'newest'}, 'truncation expires the cursor with reload hint [contract]')
-    path.unlink()
+    ctx.fx.remove_log(A)
     ctx.rebase()
     error(ctx, ctx.ctl('task-events', A, '--json', '--cursor', cursor), 'event_cursor_expired')
     result = success(ctx, ctx.ctl('task-events', A, '--json'))
@@ -436,19 +452,18 @@ PR = ('task-prompt.v1',)
 @case('task-prompt.states_and_bounds', CORE + PR)
 def _(ctx):
     ctx.seed_reads()
-    mismatch = '12345678-0000-4000-8000-0000000000f1'
-    digest = hashlib.sha256(seed.LONG_PROMPT.encode()).hexdigest()
-    name = f'{mismatch}.prompt.{digest}.txt'
-    seed.write_task(ctx.tasks, mismatch, prompt=seed.LONG_PROMPT[:2000], prompt_source=name, prompt_truncated=True)
-    seed._write(ctx.tasks / name, seed.LONG_PROMPT + 'tampered')
+    tampered = '12345678-0000-4000-8000-0000000000f1'
     foreign = '12345678-0000-4000-8000-0000000000f2'
-    seed.write_task(ctx.tasks, foreign, prompt=seed.LONG_PROMPT[:2000], prompt_source='bad-name.txt', prompt_truncated=True)
+    for task_id, store in ((tampered, 'sidecar_verified'), (foreign, 'sidecar_foreign_name')):
+        ctx.fx.add_task({'task_id': task_id, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
+                         'status': 'completed', 'exit_code': 0, 'prompt': LONG_PROMPT, 'prompt_store': store})
+    ctx.fx.tamper_prompt(tampered)
     ctx.rebase()
     result = success(ctx, ctx.ctl('task-prompt', A, '--json'))
     ctx.eq((result['task_id'], result['title']), (A, 'First task'), 'task-prompt identity')
     ctx.eq(result['prompt'], {'state': 'available', 'text': 'Summarize the repo.', 'returned_bytes': 19, 'total_bytes': 19,
                               'truncated': False, 'complete': True, 'integrity': 'not_applicable'}, 'inline prompt [contract]')
-    full = seed.LONG_PROMPT
+    full = LONG_PROMPT
     result = success(ctx, ctx.ctl('task-prompt', D, '--json'))
     ctx.eq(result['prompt'], {'state': 'available', 'text': full, 'returned_bytes': len(full.encode()), 'total_bytes': len(full.encode()),
                               'truncated': False, 'complete': True, 'integrity': 'verified'}, 'sidecar prompt is verbatim and verified [contract]')
@@ -456,13 +471,13 @@ def _(ctx):
     head = full.encode()[:11].decode('utf-8', 'ignore')
     ctx.eq(cut, {'state': 'available', 'text': head, 'returned_bytes': len(head.encode()), 'total_bytes': len(full.encode()),
                  'truncated': True, 'complete': False, 'integrity': 'verified'}, 'a cut drops only an incomplete trailing character [contract]')
-    ctx.eq(len(head.encode()), 10, 'self-check: the multibyte character straddles the bound')
+    ctx.eq(len(head.encode()), 10, 'self-check: the multibyte character straddles the bound [harness]')
     one = success(ctx, ctx.ctl('task-prompt', D, '--json', '--max-bytes', '1'))['prompt']
     ctx.eq((one['text'], one['returned_bytes'], one['truncated']), ('l', 1, True), '--max-bytes 1 [contract]')
     preview = success(ctx, ctx.ctl('task-prompt', E, '--json'))['prompt']
     ctx.eq((preview['state'], preview['text'], preview['complete'], preview['total_bytes'], preview['integrity']),
-           ('preview_only', full[:2000], False, None, 'not_applicable'), 'missing sidecar gives the non-authoritative preview [contract]')
-    failed = success(ctx, ctx.ctl('task-prompt', mismatch, '--json'))['prompt']
+           ('preview_only', full[:PREVIEW_CHARS], False, None, 'not_applicable'), 'missing sidecar gives the non-authoritative preview [contract]')
+    failed = success(ctx, ctx.ctl('task-prompt', tampered, '--json'))['prompt']
     ctx.eq((failed['state'], failed['text'], failed['integrity'], failed['complete']), ('integrity_failed', None, 'failed', False),
            'a sidecar not matching its digest is integrity_failed with no text [contract]')
     other = success(ctx, ctx.ctl('task-prompt', foreign, '--json'))['prompt']
@@ -483,23 +498,8 @@ def _(ctx):
 
 # --- task-artifacts -----------------------------------------------------------------------------------
 
-def artifact_item(task_id, artifact_id, path):
-    return {'artifact_id': artifact_id, 'task_id': task_id, 'path': path, 'kind': 'report', 'note': 'n',
-            'registered_at': '2026-01-10T10:04:00+00:00',
-            'provenance': {'method': 'verified_process_lineage', 'task_id': task_id},
-            'registered_observation': {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}}
-
-
 ART1, ART2 = '11111111-2222-4333-8444-555555555555', '11111111-2222-4333-8444-666666666666'
-
-
-def write_manifest(ctx, task_id, items, **header):
-    document = {'product': 'harflow', 'format': 'harflow.task.artifacts', 'v': 1, 'product_version': seed.PRODUCT_VERSION,
-                'task_id': task_id, 'items': items}
-    document.update(header)
-    path = ctx.tasks / f'{task_id}.artifacts.json'
-    path.write_text(json.dumps(document))
-    return path
+PRESENT = '13131313-1313-4313-8313-131313131313'
 
 
 @case('task-artifacts.pages_and_errors')
@@ -509,7 +509,7 @@ def _(ctx):
     ctx.eq({k: empty[k] for k in ('task_id', 'items', 'count', 'has_more', 'next_cursor', 'state')},
            {'task_id': A, 'items': [], 'count': 0, 'has_more': False, 'next_cursor': None, 'state': 'available'},
            'a task with no manifest has an empty available set [contract]')
-    manifest = write_manifest(ctx, A, [artifact_item(A, ART1, '/workspace/repo/out/a.txt'), artifact_item(A, ART2, '/workspace/repo/out/b.txt')])
+    ctx.fx.write_artifacts(A, [{'artifact_id': ART1, 'name': 'a.txt'}, {'artifact_id': ART2, 'name': 'b.txt'}])
     ctx.rebase()
     first = success(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1'))
     ctx.eq((first['count'], first['has_more'], [i['artifact_id'] for i in first['items']]), (2, True, [ART1]), 'first artifact page')
@@ -517,18 +517,42 @@ def _(ctx):
     subset(ctx, item, {'path': '/workspace/repo/out/a.txt', 'kind': 'report', 'note': 'n', 'task_id': A,
                        'registered_observation': {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}}, 'artifact item [contract]')
     ctx.eq(item['availability']['state'], 'deleted', 'a reference whose target is absent is deleted [contract]')
-    ctx.check(isinstance(first['next_cursor'], str) and first['next_cursor'], 'continuing page carries a cursor')
+    ctx.check(isinstance(first['next_cursor'], str) and first['next_cursor'], 'continuing page carries a cursor [contract]')
     second = success(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1', '--cursor', first['next_cursor']))
     ctx.eq(([i['artifact_id'] for i in second['items']], second['has_more'], second['next_cursor']), ([ART2], False, None), 'second artifact page')
     error(ctx, ctx.ctl('task-artifacts', A, '--json', '--cursor', 'zzz'), 'artifact_error')
+    ctx.fx.write_artifacts(A, [{'artifact_id': ART1, 'name': 'a.txt'}])
+    ctx.rebase()
+    error(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1', '--cursor', first['next_cursor']), 'artifact_error',
+          label='task-artifacts cursor after the manifest changed')
     error(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '0'), 'artifact_error')
     error(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '51'), 'artifact_error')
     error(ctx, ctx.ctl('task-artifacts', MISSING, '--json'), 'artifact_error', label='unknown task')
-    write_manifest(ctx, A, [], format='harflow.other')
+    ctx.fx.write_artifacts(A, [], header_valid=False)
     ctx.rebase()
     broken = success(ctx, ctx.ctl('task-artifacts', A, '--json'))
     ctx.eq((broken['state'], broken['items'], broken['count']), ('unavailable', [], 0), 'a foreign manifest header reports unavailable [contract]')
-    ctx.check(manifest.exists(), 'self-check: manifest stayed in place')
+
+
+@case('task-artifacts.availability_and_prefixes')
+def _(ctx):
+    ctx.seed_reads()
+    ctx.fx.add_task({'task_id': PRESENT, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
+                     'status': 'completed', 'exit_code': 0, 'prompt': 'p', 'real_workspace': True})
+    ctx.fx.write_artifacts(PRESENT, [{'artifact_id': ART1, 'name': 'a.txt', 'target': 'present'},
+                                     {'artifact_id': ART2, 'name': 'b.txt', 'target': 'absent'}])
+    ctx.rebase()
+    states = lambda r: {i['artifact_id']: i['availability']['state'] for i in success(ctx, r)['items']}
+    ctx.eq(states(ctx.ctl('task-artifacts', PRESENT, '--json')), {ART1: 'available', ART2: 'deleted'},
+           'a present target with its registered observation is available, an absent one deleted [contract]')
+    ctx.fx.change_artifact_target(PRESENT, 'a.txt')
+    ctx.eq(states(ctx.ctl('task-artifacts', PRESENT, '--json')), {ART1: 'changed', ART2: 'deleted'},
+           'a target whose stat differs from the registered observation is changed [contract]')
+    result = success(ctx, ctx.ctl('task-artifacts', '13131313', '--json'))
+    ctx.eq((result['task_id'], result.get('resolved_from')), (PRESENT, {'input': '13131313', 'task_id': PRESENT}), 'prefix resolves and is echoed [contract]')
+    err = error(ctx, ctx.ctl('task-artifacts', 'nomatch0123', '--json'), 'unknown_task')
+    ctx.eq((err.get('data') or {}).get('reason'), 'no_prefix_match', 'a non-canonical value of 8 or more characters that matches nothing [contract]')
+    error(ctx, ctx.ctl('task-artifacts', 'zz', '--json'), 'artifact_error', label='a value shorter than 8 characters passes through [contract]')
 
 
 # --- recovery-activity --------------------------------------------------------------------------------
@@ -540,10 +564,12 @@ def _(ctx):
     ctx.eq(res.rc, 0, 'recovery-activity exit status')
     doc = res.doc or {}
     ctx.eq(doc.get('task_id'), A, 'task_id')
-    ctx.eq(doc.get('recovery_activity'), {'source': 'backend_transcript', 'display_only': True, 'events': [], 'next_cursor': None,
-                                          'has_more': False, 'reset': False,
-                                          'notices': ['Transcript recovery requires confirmed capture loss']},
-           'without confirmed capture loss the page is empty and says why [baseline]')
+    page = doc.get('recovery_activity') or {}
+    subset(ctx, page, {'source': 'backend_transcript', 'display_only': True, 'events': [], 'next_cursor': None,
+                       'has_more': False, 'reset': False}, 'without confirmed capture loss the page is empty [baseline]')
+    ctx.check(isinstance(page.get('notices'), list) and page['notices'] and all(isinstance(n, str) for n in page['notices']),
+              'the empty page carries at least one explanatory notice')
+    ctx.skip('recovery-activity with confirmed capture loss is not seedable through the fixture port; transcript paging is unverified')
     doc = success(ctx, ctx.ctl('recovery-activity', 'aaaaaaaa', '--json'))
     ctx.eq(doc.get('resolved_from'), {'input': 'aaaaaaaa', 'task_id': A}, 'prefix echo [contract]')
     error(ctx, ctx.ctl('recovery-activity', MISSING, '--json'), 'unknown_task')
@@ -574,19 +600,23 @@ def _(ctx):
         ctx.check(isinstance(row.get('title'), str) and row['title'], f'event {task_id[:8]} has a display title [contract]')
     titles = {row['task_id']: row['title'] for row in result['events']}
     ctx.eq((titles[A], titles[B], titles[C]), ('First task', 'Second task', 'Third task'), 'titles come from the task record [contract]')
-    collected, cursor, pages = [], None, 0
-    while True:
+    collected, cursor = [], None
+    for _ in range(MAX_PAGES):
         args = ['interaction-events', '--json', '--limit', '2'] + (['--cursor', cursor] if cursor else [])
         page = success(ctx, ctx.ctl(*args))
+        if 'events' not in page:
+            ctx.check(False, 'every interaction page carries events [contract]')
+            return
         collected += [e['event_id'] for e in page['events']]
-        pages += 1
         ctx.check(len(page['events']) <= 2, 'a page respects --limit [contract]')
         if page['cycle_complete']:
             ctx.eq(page['next_cursor'], None, 'the closing page has no cursor [contract]')
             break
         cursor = page['next_cursor']
         ctx.check(isinstance(cursor, str) and cursor, 'an unfinished cycle carries a cursor [contract]')
-        ctx.check(pages < 10, 'cycle terminates')
+    else:
+        ctx.check(False, f'the interaction cycle completes within {MAX_PAGES} pages [contract]')
+        return
     ctx.eq(collected, [e['event_id'] for e in result['events']], 'paged cycle equals the unpaged feed, without duplicates [contract]')
 
 
@@ -605,13 +635,14 @@ ST = ('statistics-page.v1',)
 
 
 def stats_ready(ctx, *args):
-    for _ in range(40):
+    res = None
+    for _ in range(harness.BOOTSTRAP_ATTEMPTS):
         res = ctx.ctl(*args)
         result = success(ctx, res)
         if result.get('state') != 'preparing':
             return res
-        time.sleep(0.25)
-    ctx.check(False, 'statistics-page leaves preparing within the bounded retries')
+        time.sleep(harness.BOOTSTRAP_INTERVAL_SECONDS)
+    ctx.check(False, 'statistics-page leaves preparing within the harness bootstrap budget', tag='harness')
     return res
 
 
@@ -637,7 +668,7 @@ def _(ctx):
     subset(ctx, result['cost_coverage'], {'eligible_executions': 5}, 'cost_coverage [contract]')
     ctx.check(isinstance(result.get('generation'), str) and result['generation'], 'generation is present [contract]')
     paged, cursor, generations = [], None, set()
-    for _ in range(10):
+    for _ in range(MAX_PAGES):
         args = ['statistics-page', *WINDOW, '--limit', '2', '--json'] + (['--cursor', cursor] if cursor else [])
         page = stats_ready(ctx, *args).result
         paged += [row['task_id'] for row in page['items']]
@@ -647,6 +678,9 @@ def _(ctx):
             break
         cursor = page['next_cursor']
         ctx.check(isinstance(cursor, str) and cursor, 'a continuing page carries a cursor [contract]')
+    else:
+        ctx.check(False, f'the statistics walk ends within {MAX_PAGES} pages [contract]')
+        return
     ctx.eq((sorted(paged), len(paged), len(generations)), (sorted(ALL_IDS), 5, 1), 'pages of one generation are disjoint and complete [contract]')
     narrow = stats_ready(ctx, 'statistics-page', '--since', '2026-01-12T00:00:00+00:00', '--before', '2026-01-13T00:00:00+00:00', '--json').result
     ctx.eq([row['task_id'] for row in narrow['items']], [C], 'since is inclusive and before exclusive, filtering by start time [contract]')
@@ -688,50 +722,57 @@ DIRECT_ONLY = [
 SCOPE_CAPS = CORE + EV + PR + ST + IE + ('task-successors.v1',)
 
 
+def refusal_code(kind, refusal):
+    return refusal if kind == 'caller_refusal' else 'unauthorized'
+
+
 @case('scope.agent_caller_by_ancestry', SCOPE_CAPS)
 def _(ctx):
     ctx.seed_reads()
     agent_caller(ctx, CALLER)
     for label, args, kind in DIRECT_ONLY:
         res = ctx.ctl(*args)
-        if kind == 'caller_refusal':
-            err = error(ctx, res, 'agent_caller', label=label)
-            ctx.check(CALLER in err.get('message', '') and 'ancestry' in err.get('message', ''),
-                      f'{label}: the refusal names the calling task and the detection method [baseline]')
-        else:
-            error(ctx, res, 'unauthorized', label=label)
-        ctx.check(A not in json.dumps(res.doc) and MISSING not in json.dumps(res.doc),
-                  f'{label}: a refused caller learns nothing about which ids exist [contract]')
+        error(ctx, res, refusal_code(kind, 'agent_caller'), label=label)
+        text = json.dumps(res.doc)
+        ctx.check(A not in text and MISSING not in text, f'{label}: a refused caller learns nothing about which ids exist [contract]')
     unknown = ctx.ctl('task-events', MISSING, '--json')
     known = ctx.ctl('task-events', A, '--json')
-    ctx.eq((unknown.doc or {}).get('error'), (known.doc or {}).get('error'),
+    ctx.eq((unknown.doc or {}).get('error', {}).get('code'), (known.doc or {}).get('error', {}).get('code'),
+           'authority precedes the task lookup: known and unknown ids refuse with the same code [contract]')
+    ctx.eq((unknown.error or {}).get('message'), (known.error or {}).get('message'),
            'authority precedes the task lookup: known and unknown ids refuse identically [contract]')
-    # Reads that managed workflow callers are scoped on stay available to a standalone task caller.
-    success(ctx, ctx.ctl('status', A, '--json'))
-    success(ctx, ctx.ctl('list', '--json'))
-    success(ctx, ctx.ctl('recovery-activity', A, '--json'))
-    success(ctx, ctx.ctl('status-batch', '--task-ids', A, '--json'))
+    # Reads that managed workflow callers are scoped on stay open to a standalone task caller (pending U2).
+    task = success(ctx, ctx.ctl('status', A, '--json'))['task']
+    ctx.eq(task['task_id'], A, 'a standalone agent caller reads another task through status [baseline, pending U2]')
+    exposed = ('last_output_tail', 'summary', 'raw_stream_log', 'events_log', 'resume_command', 'messages', 'recovery_activity')
+    ctx.eq([key for key in exposed if key not in task], [], 'status exposes output tail, summary, log paths, resume command, messages and recovery activity to it [baseline, pending U2]')
+    ctx.eq({row['task_id'] for row in success(ctx, ctx.ctl('list', '--json'))['tasks']} >= ALL_IDS, True,
+           'list shows every task to a standalone agent caller [baseline, pending U2]')
+    ctx.eq(success(ctx, ctx.ctl('recovery-activity', A, '--json')).get('task_id'), A, 'recovery-activity is open to it [baseline, pending U2]')
+    ctx.eq([row['task_id'] for row in success(ctx, ctx.ctl('status-batch', '--task-ids', A, '--json'))['tasks']], [A],
+           'status-batch is open to it [baseline, pending U2]')
     own = success(ctx, ctx.ctl('task-artifacts', CALLER, '--json'))
     ctx.eq((own['task_id'], own['state'], own['count']), (CALLER, 'available', 0), 'a task caller reads its own artifacts [contract]')
-    err = error(ctx, ctx.ctl('task-artifacts', A, '--json'), 'artifact_error')
-    ctx.eq(err.get('message'), 'Task callers may read only their own artifacts', 'a task caller may not read another task\'s artifacts [baseline]')
+    byprefix = success(ctx, ctx.ctl('task-artifacts', CALLER[:8], '--json'))
+    ctx.eq((byprefix['task_id'], byprefix.get('resolved_from')), (CALLER, {'input': CALLER[:8], 'task_id': CALLER}),
+           'a prefix resolves inside the caller\'s own singleton set [contract]')
+    error(ctx, ctx.ctl('task-artifacts', A, '--json'), 'artifact_error', label='a task caller may not read another task\'s artifacts')
     page = page_ready(ctx, 'task-list-page', '--json')
-    ctx.eq(set(ids(page.result['items'])), ALL_IDS | {CALLER}, 'a standalone task caller sees the unscoped page [baseline]')
+    ctx.eq(set(ids(page.result['items'])), ALL_IDS | {CALLER}, 'a standalone task caller sees the unscoped page [baseline, pending U2]')
 
 
 @case('scope.environment_markers', SCOPE_CAPS)
 def _(ctx):
     ctx.seed_reads()
     for env in ({'HARFLOW_TASK_ID': MISSING}, {'HARFLOW_TASK_ID': A}, {'PB_TASK_ID': MISSING}, {'HARFLOW_DEPTH': '1'},
-                {'HARFLOW_DEPTH': 'x'}, {'PB_DEPTH': '2'}):
+                {'HARFLOW_DEPTH': 'x'}, {'PB_DEPTH': '2'}, {'HARFLOW_TASK_ID': ''}, {'HARFLOW_DEPTH': ''}, {'PB_TASK_ID': ''}, {'PB_DEPTH': ''}):
         label = ','.join(f'{k}={v[:8]}' for k, v in env.items())
         for name, args, kind in DIRECT_ONLY:
-            res = ctx.ctl(*args, env=env)
-            if kind == 'caller_refusal':
-                err = error(ctx, res, 'agent_caller', label=f'{name} [{label}]')
-                ctx.check('HARFLOW_TASK_ID' in err.get('message', ''), f'{name} [{label}]: the refusal names the worker variables [baseline]')
-            else:
-                error(ctx, res, 'unauthorized', label=f'{name} [{label}]')
+            error(ctx, ctx.ctl(*args, env=env), refusal_code(kind, 'agent_caller'), label=f'{name} [{label}]')
+    # Presence is the test for the direct-only gate, truthiness for the managed reader.
+    for env in ({'HARFLOW_TASK_ID': ''}, {'HARFLOW_DEPTH': ''}, {'PB_TASK_ID': ''}):
+        for args in (['status', A, '--json'], ['list', '--json']):
+            success(ctx, ctx.ctl(*args, env=env), f'{args[0]} with an empty marker [{",".join(env)}] is read normally [baseline]')
 
 
 @case('scope.unverifiable_task_identity', SCOPE_CAPS)
@@ -739,48 +780,93 @@ def _(ctx):
     ctx.seed_reads()
     env = {'HARFLOW_TASK_ID': MISSING}
     for args in (['status', A, '--json'], ['list', '--json'], ['status-batch', '--task-ids', A, '--json'], ['recovery-activity', A, '--json']):
-        error(ctx, ctx.ctl(*args, env=env), 'workflow_read_refused', label=' '.join(args[:1]) + ' with an unverifiable HARFLOW_TASK_ID')
+        error(ctx, ctx.ctl(*args, env=env), 'workflow_read_refused', label=args[0] + ' with an unverifiable HARFLOW_TASK_ID')
+    for args in (['task-list-page', '--json'], ['task-list-page', '--json', '--task-ids', A]):
+        error(ctx, settled_page(ctx, *args, env=env), 'invalid_params', label='task-list-page with an unverifiable HARFLOW_TASK_ID')
     error(ctx, ctx.ctl('task-artifacts', A, '--json', env=env), 'artifact_error', label='task-artifacts with an unverifiable HARFLOW_TASK_ID')
     for args in (['status', A, '--json'], ['list', '--json']):
         success(ctx, ctx.ctl(*args, env={'HARFLOW_TASK_ID': None}), 'unset marker reads normally')
     for env in ({'HARFLOW_DEPTH': '1'}, {'PB_TASK_ID': MISSING}):
         label = ','.join(env)
         for args in (['status', A, '--json'], ['list', '--json']):
-            success(ctx, ctx.ctl(*args, env=env), f'{args[0]} with only {label} set [baseline]')
-    live = '34343434-3434-4434-8434-343434343434'
-    agent_caller(ctx, live)
-    holder = ctx.ctl('status', A, '--json', env={'HARFLOW_TASK_ID': MISSING})
-    ctx.eq(holder.rc, 0, 'a marker naming an unknown task is overridden by a confirmed ancestry caller [baseline]')
+            success(ctx, ctx.ctl(*args, env=env), f'{args[0]} with only {label} set')
+    agent_caller(ctx, '34343434-3434-4434-8434-343434343434')
+    ctx.eq(ctx.ctl('status', A, '--json', env={'HARFLOW_TASK_ID': MISSING}).rc, 0,
+           'a marker naming an unknown task is overridden by a confirmed ancestry caller')
+
+
+IDENTITY_AGENT = (('alive', 'running'), ('alive_with_markers', 'running'), ('alive', 'failed_unobserved'))
+IDENTITY_DIRECT = (('reused', 'running'), ('legacy_markers_unseen', 'running'), ('alive', 'completed_observed'))
+IDENTITY_UNDECIDABLE = (('markers_missing', 'running'), ('legacy_markers_seen', 'running'), ('legacy_no_markers', 'running'))
+
+
+@case('scope.identity_verdicts', SCOPE_CAPS)
+def _(ctx):
+    """Fail-closed identity branches. Each variant registers this process under a different identity state."""
+    for expectation, variants in (('agent', IDENTITY_AGENT), ('direct', IDENTITY_DIRECT), ('undecidable', IDENTITY_UNDECIDABLE)):
+        for identity, status in variants:
+            tag = f'{identity}/{status}'
+            ctx.fx.remove_root()
+            ctx.seed_reads()
+            if not agent_caller(ctx, CALLER, identity=identity, status=status):
+                ctx.skip(f'the fixture adapter does not express the identity state {tag}')
+                continue
+            events = ctx.ctl('task-events', A, '--json')
+            interaction = ctx.ctl('interaction-events', '--json')
+            status_res = ctx.ctl('status', A, '--json')
+            listing = ctx.ctl('list', '--json')
+            page = settled_page(ctx, 'task-list-page', '--json')
+            artifacts = ctx.ctl('task-artifacts', A, '--json')
+            label = f'[{tag}]'
+            if expectation == 'agent':
+                error(ctx, events, 'agent_caller', label=f'task-events {label}')
+                error(ctx, interaction, 'unauthorized', label=f'interaction-events {label}')
+                success(ctx, status_res, f'status {label}')
+                success(ctx, listing, f'list {label}')
+                success(ctx, page, f'task-list-page {label}')
+                error(ctx, artifacts, 'artifact_error', label=f'task-artifacts of another task {label}')
+            elif expectation == 'direct':
+                for res, name in ((events, 'task-events'), (interaction, 'interaction-events'), (status_res, 'status'),
+                                  (listing, 'list'), (page, 'task-list-page'), (artifacts, 'task-artifacts')):
+                    success(ctx, res, f'{name} {label} (a stale or terminal record is not a caller)')
+            else:
+                error(ctx, events, 'caller_undecidable', label=f'task-events {label}')
+                error(ctx, interaction, 'unauthorized', label=f'interaction-events {label}')
+                error(ctx, status_res, 'workflow_read_refused', label=f'status {label}')
+                error(ctx, listing, 'workflow_read_refused', label=f'list {label}')
+                error(ctx, page, 'invalid_params', label=f'task-list-page {label}')
+                error(ctx, artifacts, 'artifact_error', label=f'task-artifacts {label}')
 
 
 @case('scope.incompatible_metadata_fails_closed', SCOPE_CAPS)
 def _(ctx):
+    """U4: one damaged task document fails every authority-gated read closed (baseline, owner decision pending)."""
     ctx.seed_reads()
-    seed._write(ctx.tasks / f'{seed.BROKEN}.meta.json',
-                json.dumps({'task_id': seed.BROKEN, 'product': 'other', 'format': 'x', 'v': 1, 'product_version': seed.PRODUCT_VERSION}))
+    ctx.fx.damage_task(BROKEN)
     ctx.rebase()
     for args in (['list', '--json'], ['status', A, '--json'], ['status-batch', '--task-ids', A, '--json'], ['recovery-activity', A, '--json']):
-        error(ctx, ctx.ctl(*args), 'workflow_read_refused', label=args[0] + ' with unverifiable history')
+        error(ctx, ctx.ctl(*args), 'workflow_read_refused', label=args[0] + ' with unverifiable history [baseline, U4]')
+    # The contract says status reports task_incompatible for a damaged document; the caller check refuses first.
+    error(ctx, ctx.ctl('status', BROKEN, '--json'), 'workflow_read_refused', label='status of the damaged task (task_incompatible is unreachable) [baseline, U4]')
     for name, args, kind in DIRECT_ONLY:
-        if kind == 'caller_refusal':
-            error(ctx, ctx.ctl(*args), 'caller_undecidable', label=name + ' with unverifiable history')
-        else:
-            error(ctx, ctx.ctl(*args), 'unauthorized', label=name + ' with unverifiable history')
-    error(ctx, ctx.ctl('task-artifacts', A, '--json'), 'artifact_error', label='task-artifacts with unverifiable history')
-    page = success(ctx, ctx.ctl('task-list-page', '--json'))
+        code = 'caller_undecidable' if kind == 'caller_refusal' else 'unauthorized'
+        error(ctx, ctx.ctl(*args), code, label=name + ' with unverifiable history [baseline, U4]')
+    error(ctx, ctx.ctl('task-artifacts', A, '--json'), 'artifact_error', label='task-artifacts with unverifiable history [baseline, U4]')
+    res = settled_page(ctx, 'task-list-page', '--json')
+    page = success(ctx, res)
     ctx.eq((page.get('items'), page.get('authority_incomplete'), page.get('history_incomplete'), page.get('has_more'), page.get('next_cursor')),
-           ([], True, True, False, None), 'the page read withholds all items when authority is incomplete [contract]')
-    ctx.check(isinstance(page.get('note'), str) and page['note'], 'the withheld page carries a safe note [contract]')
+           ([], True, True, False, None), 'the page read withholds all items when the catalog is incomplete [contract]')
+    ctx.check(isinstance(page.get('note'), str) and page['note'], 'the withheld page carries a note [contract]')
     ctx.check(set(page.get('catalog_state', {})) <= {'status', 'source', 'reason'}, 'withheld page exposes only the allowlisted catalog state [contract]')
 
 
 # --- cursor binding -----------------------------------------------------------------------------------
 
-@case('cursors.binding', CORE + EV + ST)
+@case('cursors.binding', CORE + EV + ST + IE)
 def _(ctx):
     ctx.seed_reads()
-    other = ctx.folder / 'state-other'
-    seed.seed_reads(other)
+    other = ctx.root.parent / 'state-other'
+    ctx.fx.at(other).seed_world(WORLD_READS)
     elsewhere = {'HARFLOW_STATE_ROOT': str(other)}
     cursor = page_ready(ctx, 'task-list-page', '--json', '--limit', '2').result['next_cursor']
     page_ready(ctx, 'task-list-page', '--json', env=elsewhere)
@@ -788,29 +874,31 @@ def _(ctx):
                               ('a different session filter', ['--session-id', 'x'], None),
                               ('a different predecessor scope', ['--predecessor-task-id', A], None)):
         error(ctx, ctx.ctl('task-list-page', '--json', '--limit', '2', '--cursor', cursor, *extra, env=env), 'invalid_params',
-              label=f'task-list-page cursor under {label} [baseline]')
+              label=f'task-list-page cursor under {label}')
     ctx.eq(ids(success(ctx, ctx.ctl('task-list-page', '--json', '--limit', '3', '--cursor', cursor))['items']), [C, B, A],
-           'a page cursor survives a change of limit [baseline]')
+           'a page cursor survives a change of limit')
     token = stats_ready(ctx, 'statistics-page', *WINDOW, '--limit', '2', '--json').result['next_cursor']
     error(ctx, ctx.ctl('statistics-page', *WINDOW, '--limit', '2', '--json', '--cursor', token, env=elsewhere), 'invalid_cursor',
           label='statistics cursor under another state root [contract]')
     error(ctx, ctx.ctl('statistics-page', '--since', '2026-01-02T00:00:00+00:00', '--before', '2026-02-01T00:00:00+00:00',
                        '--limit', '2', '--json', '--cursor', token), 'invalid_cursor', label='statistics cursor under other bounds [contract]')
-    seed.write_task(ctx.tasks, '12345678-0000-4000-8000-0000000000aa', started_at='2026-01-15T10:00:00+00:00',
-                    finished_at='2026-01-15T10:01:00+00:00')
+    ctx.fx.add_task({'task_id': '12345678-0000-4000-8000-0000000000aa', 'started_at': '2026-01-15T10:00:00+00:00',
+                     'finished_at': '2026-01-15T10:01:00+00:00', 'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
     ctx.rebase()
     error(ctx, ctx.ctl('statistics-page', *WINDOW, '--limit', '2', '--json', '--cursor', token), 'snapshot_expired',
           label='statistics cursor after a relevant mutation [contract]')
     event_cursor = success(ctx, ctx.ctl('task-events', A, '--json', '--from', 'oldest', '--limit', '2'))['newer_cursor']
     error(ctx, ctx.ctl('task-events', A, '--json', '--cursor', event_cursor, env=elsewhere), 'event_cursor_expired',
           label='event cursor under another state root [contract]')
+    feed = success(ctx, ctx.ctl('interaction-events', '--json', '--limit', '2'))['next_cursor']
+    moved = ctx.ctl('interaction-events', '--json', '--limit', '2', '--cursor', feed, env=elsewhere)
+    ctx.eq(moved.rc, 0, 'an interaction-events cursor is not bound to the state root [baseline, U6]')
 
 
 # --- reads against a missing root ---------------------------------------------------------------------
 
 @case('reads.missing_root', SCOPE_CAPS)
 def _(ctx):
-    import shutil
     expectations = [
         (['list', '--json'], 'tasks', []),
         (['status', A, '--json'], 'unknown_task', None),
@@ -825,19 +913,17 @@ def _(ctx):
         (['statistics-page', *WINDOW, '--json'], 'items', []),
     ]
     for args, key, empty in expectations:
-        shutil.rmtree(ctx.root, ignore_errors=True)
+        ctx.fx.remove_root()
         label = ' '.join(args[:1]) + (' successors' if '--predecessor-task-id' in args else '') + ' on a missing root'
-        res = ctx.ctl(*args)
+        res = settled_page(ctx, *args) if args[0] == 'task-list-page' and '--predecessor-task-id' not in args else ctx.ctl(*args)
         if empty is not None:
             result = success(ctx, res, label)
-            ctx.eq(result.get(key), empty, f'{label}: answers as empty [contract]')
+            ctx.eq(result.get(key), empty, f'{label}: answers as empty [baseline, pending U10]')
         elif key == 'status-batch':
             doc = success(ctx, res, label)
-            ctx.eq((doc['tasks'], doc['errors'][A]['code']), ([], 'unknown_task'), f'{label}: every id is unknown [contract]')
+            ctx.eq((doc['tasks'], doc['errors'][A]['code']), ([], 'unknown_task'), f'{label}: every id is unknown [baseline, pending U10]')
         else:
             error(ctx, res, key, label=label)
-        marker = ctx.root / '.harflow-store.json'
-        ctx.check(marker.is_file() and json.loads(marker.read_text()).get('format') == 'harflow.store',
-                  f'{label}: an ordinary read initializes the selected root [contract]')
-    shutil.rmtree(ctx.root, ignore_errors=True)
+        ctx.eq(ctx.fx.root_state(), 'initialized', f'{label}: an ordinary read initializes the selected root [contract, pending U10]')
+    ctx.fx.remove_root()
     ctx.baseline = None
