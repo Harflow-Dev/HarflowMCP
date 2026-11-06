@@ -266,3 +266,20 @@ engine, fail against the double for the stated reason, and the double must have 
 Passing against Python 0.0.11 establishes the scenarios, not any other engine. The S08 and S09
 profiles cannot be rerun on their old 0.0.7 manifest digest until the E2 port gives them a per-source
 digest.
+
+## Lifecycle conformance (generic pinned target)
+
+`conformance/lifecycle` re-expresses the S08 cases `refusals`, `complete`, `nonzero`, `detached-resume`, `cancel` and
+`owner-death` for a pinned release binary (`--engine-bin/--engine-sha256`, re-hashed before every operation) with a
+closed engine environment (no selector can be added), public commands only, and OS-level observation (kernel peer
+PID, ancestry rendezvous, kqueue watches on the participant and its ancestors) instead of hooks inside the engine.
+A case that needs a running agent on a seam without one is `blocked`, never passed; the exit status is zero only when
+every selected case passed. `--seam none` runs `refusals` for real and blocks the rest; `--seam python-injection`
+re-uses the S08 profile only to prove the case logic on Python and is never acceptance evidence. The fake-backend
+seam is an open design item: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
+
+```sh
+.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.11^{commit})" \
+  --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json --seam none --output /path/to/new-dir
+.venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
+```

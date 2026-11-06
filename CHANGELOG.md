@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add C1 candidates under `contracts/candidates/` (`task-result-v1`, `task-survivors-v1`, `permission-mode-report-v1`) with specifications in `docs/decisions/`, hand-authored specimens, an independent checker (`scripts/generate-c1-candidate-fixtures.py --check`) and reserved capability names that nothing advertises. No existing contract or Python behaviour changes.
+- Add `conformance/lifecycle`, a generic pinned-target adapter for the S08 lifecycle cases with a closed engine environment and OS-level observers; the fake-backend seam is an open design item (`docs/decisions/E2-lifecycle-conformance-seam.md`).
 - Repin the S07 conformance oracles to the 0.0.11 contract manifest (291 fixtures, digest `cd58a5ef…`) and add `conformance/e1`: independent read scenarios for `list`, `status`, `status-batch`, `task-list-page`, `task-events`, `task-prompt`, `task-artifacts`, `recovery-activity`, `interaction-events` and `statistics-page`, including caller and scoped-read refusals. They create and inspect engine state only through a fixture port, with a Python 0.0.11 adapter and a hash-pinned external adapter option. No product behaviour or wire contract changes.
 - The S08 and S09 conformance profiles snapshot 0.0.7 sources whose manifest digest differs; `verify_manifest` accepts only the pinned 0.0.11 digest, so those profiles cannot be rerun on their old digest until the E2 port gives them a per-source digest.
 - Add `docs/decisions/C1-caller-and-scoped-reads.md`, the specification of Python 0.0.11 caller identification and scoped-read rules for the Rust engine, with open questions.

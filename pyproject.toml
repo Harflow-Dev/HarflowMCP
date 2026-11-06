@@ -29,7 +29,7 @@ packages = ["src/harflow_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests", "conformance/tests_e1", "conformance/tests_c1"]
+testpaths = ["tests", "conformance/tests_e1", "conformance/tests_c1", "conformance/tests_lifecycle"]
 pythonpath = ["."]
 markers = [
     "integration: spawns a real agent CLI; spends real tokens. Opt in with HARFLOW_INTEGRATION=1",
