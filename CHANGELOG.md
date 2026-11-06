@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.0.11
 
 - Add explicit builder, orchestrator and qualified worker conversational steering through ctl and agent MCP. Prose waits for the caller; strict current role frames commit only configured actions. Each explicit message grants one finite response, preserving actual permissions and normal execution allowances. Epoch-scoped rolling history can expire with explicit gaps and retained ownership proofs.
-- Add exact prestart withdrawal and a same-assignment linked retry for root workers configured headless with fixed Fresh sessions and a finite original cap. Generation-bound withdrawal never authorizes a late signal; issued work and uncertain spawn remain ineligible for replacement. Consumer adoption, real-backend qualification and release remain separate gates.
+- Add exact prestart withdrawal and a same-assignment linked retry for root workers configured headless with fixed Fresh sessions and a finite original cap. Generation-bound withdrawal never authorizes a late signal; issued work and uncertain spawn remain ineligible for replacement. Consumer adoption and real-backend qualification remain separate gates.
+
+- Production poststart worker withdrawal and replacement remain unsupported. Private ST04 helper qualification and measurement artifacts are candidates only; this release does not enable that runtime path.
 
 ## 0.0.10
 

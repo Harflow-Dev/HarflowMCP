@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import partial
 import importlib.util
 import json
 import os
@@ -185,7 +186,7 @@ def test_resource_slot_contract_fixtures_cover_aggregate_semantics():
     assert generic["code"] == "slot_refused"
 
 
-def test_resource_slot_fixture_generation_matches_canonical_and_preserves_other_fixtures(tmp_path):
+def test_resource_slot_fixture_generation_matches_canonical_and_preserves_other_fixtures(tmp_path, monkeypatch):
     repository = Path(__file__).parents[1]
     script = repository / "scripts" / "generate-resource-slot-fixtures.py"
     spec = importlib.util.spec_from_file_location("resource_slot_fixture_generator", script)
@@ -195,9 +196,6 @@ def test_resource_slot_fixture_generation_matches_canonical_and_preserves_other_
 
     first = tmp_path / "first"
     second = tmp_path / "second"
-    generator.generate(first)
-    generator.generate(second)
-
     manifest = json.loads((repository / "contracts" / "v1" / "manifest.json").read_text())
     names = {
         "ctl-phase-slot-not-enabled.json",
@@ -208,6 +206,17 @@ def test_resource_slot_fixture_generation_matches_canonical_and_preserves_other_
         "ctl-phase-slot-status-truncated.json",
         "ctl-resources-mixed.json",
     }
+    # Reproduce the historical specimens with their original envelope identity.
+    # Current runtime identity is independently checked above and by package smoke.
+    versions = {manifest["cases"][name]["expected_product_version"] for name in names}
+    assert len(versions) == 1
+    fixture_version = versions.pop()
+    with monkeypatch.context() as historical:
+        historical.setattr(generator, "PRODUCT_VERSION", fixture_version)
+        historical.setattr(generator.ctl, "envelope",
+                           partial(generator.ctl.envelope, product_version=fixture_version))
+        generator.generate(first)
+        generator.generate(second)
     for name in names:
         canonical = repository / "contracts" / "v1" / name
         assert (first / name).read_bytes() == canonical.read_bytes()
