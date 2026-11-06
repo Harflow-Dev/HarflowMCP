@@ -1,111 +1,69 @@
-# Python contract and baseline migration checklist
+# Python baseline and public-contract migration checklist
 
-Dispatchable work packages: [migration sessions](migration-sessions.md).
+Revised 2026-11-04. Governing [revision 3](../../HARFLOW_MIGRATION_PLAN_V3.md),
+[workspace gates](../../HARFLOW_MIGRATION_CHECKLIST.md) and [current sessions](migration-sessions.md).
 
-Status: reconciled 2026-11-04. Delivered evidence and outstanding acceptance are
-distinguished below; aggregate migration gates remain pending.
+Keep canonical contracts and independent Python baseline evidence until O04 transfer.
+S01/S03/S04(+follow-up)/S05/S07/S08 evidence is delivered with its original limits;
+S02/S06 Mac evidence remains separate. S09 bounded evidence is delivered, not accepted.
 
-Own the authoritative Python engine and public contracts until explicit
-transfer. Inputs are reproducible current behavior and reviewed v1 requirements;
-outputs are the frozen baseline, contract fixtures, conformance scenarios and
-pinned Python development runtime. Freeze does not require ticket closure or a
-prescribed version bump.
+- [x] C0-MC-01 Bounded public-read implementation delivered in S04/follow-up;
+  receipt acceptance/design/release/adoption remain separate.
+- [x] B0-MC-03 Bounded source/native baseline qualified in S02, with recorded limits.
+- [ ] B0-MC-01/02 Accept inventory and scope dispositions from S01/S03.
+- [ ] C0-MC-02/03 Accept S05 handshake/unknown/run-resume/MCP schema evidence.
+- [ ] C0-MC-05 Accept S06 fixture/decoder evidence with its bounded failure waiver.
+- [ ] C0-MC-04 Complete/adjudicate S07–S09 external-oracle conformance and missing
+  faults/runtime closure; synthetic source profiles do not establish full qualification.
+- [ ] M03/M12 Support native public-only flows and exact intended 0.0.8 runtime
+  qualification; existing 0.0.7 evidence is not 0.0.8 acceptance.
+- [ ] R14 Compare Rust conformance against reviewed contract/Python baseline.
+- [ ] O04 Transfer canonical ownership once and retire Python only with explicit
+  authorization and archive/registration evidence; HarflowMac stays.
 
-## Redesign target and intent
+S03's exact 47/eight candidate MCP partition and other Proposed/Undecided scope remain
+unaccepted. Freeze permits essential maintenance and explicitly assigned contracts.
+Use existing development/contract guidance for assigned validation.
 
-The approved baseline is [HarflowDesign v2 at commit `3643d083700be4032c93237813b573d04bab6ab1`](https://github.com/Harflow-Dev/HarflowDesign/tree/3643d083700be4032c93237813b573d04bab6ab1/v2), including the owner-approved Mac connector amendment. Consult the optional workspace [coverage and intent ledger](../../HarflowDesign/v2/docs/migration-coverage.md); it is not a build dependency. Own public engine contracts and audit retained behavior; a UI removal does not remove engine APIs or history. Missing required states need a v2 design and explicit owner approval with exact commit, path and state before dependent implementation. Approval of visuals does not authorize new authority, public contract changes, backends or deferred features. Core execution safety and observability remain required.
+## Product engine API
 
-## Dispatch and boundaries
+The native app uses **harflow-ctl as its engine API**. MCP is agent-facing only:
+no native MCP client or fallback. Existing harflow-setup acquisition/registration
+tasks remain separate from product operations. If required app functionality lacks
+a ctl operation, first scope additive work in the current canonical contract owner:
+HarflowMCP before accepted O04 transfer, HarflowEngine afterward. Specify provenance,
+authority, bounds and unknown/refusal semantics, capability, fixtures and tests;
+then coordinate byte-identical fixture vendoring and consumer adapters. Pre-transfer
+native work starts in Python; Rust implements that same accepted ctl contract.
+After transfer, later Web work does not depend on retired Python. Missing API is not
+permission to read persistence, invoke agent MCP or invent semantics. M03 may split
+bounded suffix sessions.
 
-Work only on the assigned item. Read the workspace AGENTS.md, this repository's AGENTS.md if present, and
-applicable package instructions first; preserve concurrent edits and use primary checkouts.
-The orchestrator delegates unit tests under the current workflow. A checkbox is
-not authorization to start runtimes, mutate real roots, register clients, push,
-release, clean up, or expand scope. Use disposable roots and workspaces where
-needed. Report a blocker with concrete evidence; task status is not proof of
-completion. Repository builds and tests must not depend on sibling checkouts.
+## Parallel-track coordination
 
-The optional [workspace coordination index](../../HARFLOW_MIGRATION_CHECKLIST.md)
-uses B0 (baseline), C0 (contracts and design), E0 (client and Electron on
-Python), R0 (Rust parity), I0 (integrated stack), and O0 (owner cutover and
-publication). It is not a build dependency. Freeze and qualify the reproducible existing baseline without waiting for open
-feature tickets. Use the v2 intent ledger to decide retained and simplified scope;
-legacy UI parity and open tickets do not independently mandate inclusion. Unchecked items retain outstanding acceptance or contributions; checked items
-record the bounded evidence stated below, not blanket gate acceptance. Early-use gates and defaults remain
-subject to evidence and explicit authorization for root registration. Use fresh
-Rust state; archive historical task, run and event records rather than importing
-them. Import only definitions, configuration and preferences, with an explicit
-registration backup and handoff. No engine may share a writable root.
+M01 shared readiness follows S09 coverage disposition and the native capability,
+code/private-read inventory, with ratified initial ctl/capability/fixture baseline,
+exact identities, explicit blocking gaps and canonical change owner. M02+ native
+and R01/R02+ Rust work may then run concurrently with disjoint files/isolated roots.
+Pin each accepted subset, serialize canonical changes under MCP before O04 (Engine
+afterward), coordinate consumer fixture deltas and carry forward affected conformance.
+Both accepted M12 and R14 are required before I01; missing baseline/fault evidence
+is not automatically waived. Read-only research remains separately assignable.
 
-Stage dependencies: B0 → C0 → E0 → R0 → I0 → O0.
+## Boundaries and evidence
 
-## B0 — establish baseline
+This plan authorizes no implementation by itself. Follow workspace/child/package
+AGENTS.md and the current session brief; preserve concurrent work in primary
+checkouts. Use isolated roots/fixtures. No implicit live-state, install, registration,
+paid-probe, signing, push, publication, retirement or deletion authority. Record exact
+commit/contract/design/runtime/profile identities, actual checks/reviews, missing
+coverage and owner decisions in the lead receipt. Delivery and acceptance differ.
+Builds/tests must not depend on sibling source checkouts. Documentation-only plan
+changes need link/consistency checks, not product test reruns.
 
-- [ ] B0-MC-01 Record current commits, runtime selection, fixture digest, ctl
-      inventory, MCP schema and supported backend qualification evidence.
-      [S01](migration-receipts/S01.md) inventory is delivered; receipt acceptance
-      remains outstanding and qualification limits are retained.
-- [ ] B0-MC-02 Review a v1 parity ledger against specification and observed
-      behavior; record discrepancies as defects rather than adopting them blindly.
-      The [S03 receipt](migration-receipts/S03.md) supplies the final contribution,
-      pending acceptance.
-- [x] B0-MC-03 Qualify the reproducible baseline and document failures and
-      limits without waiting for unrelated feature tickets. S01 and the
-      [S02 qualified baseline receipt](../../HarflowMac/docs/migration-receipts/S02.md)
-      supply the final evidence; recorded limitations remain.
+## Conversational steering scope amendment — 2026-11-05
 
-## C0 — contract and conformance foundations
-
-- [x] C0-MC-01 Specify and fixture necessary additive event paging, status and
-      read gaps, including bounded pages, cursor expiry, retention gaps, drain
-      and change semantics. The [S04 receipt](migration-receipts/S04.md) supplies
-      the initial evidence; the [S04 follow-up](migration-receipts/S04-gaps.md)
-      implements G-DIFF, successor discovery, live workflow activity and statistics
-      cost/observed model. This check records delivered work; receipt acceptance,
-      design states, release and consumer adoption remain pending.
-- [ ] C0-MC-02 Specify version handshake and validate compatibility and unknown
-      optional fields without breaking existing v1 consumers. S05 supplies
-      [delivered evidence](migration-receipts/S05.md); owner acceptance pending.
-- [ ] C0-MC-03 Fixture ctl unknown/exit behavior and run/resume payloads; capture
-      the included MCP tools schema and document deferred unsupported tools.
-      [S05](migration-receipts/S05.md) captures all 55 Python schemas and the
-      S03 Proposed subset without accepting it; receipt acceptance pending.
-- [ ] C0-MC-04 Build independent black-box conformance scenarios from the
-      reviewed contract with disposable roots and external oracles; run Python
-      first and record manifest hash and baseline defects. S07 supplies
-      [partial infrastructure evidence](migration-receipts/S07.md); S08 supplies
-      [controlled task/authority evidence](migration-receipts/S08.md) (9 cases,
-      198 infrastructure tests). Receipt/baseline acceptance and S09's final
-      workflow/resource/statistics contribution remain outstanding.
-- [ ] C0-MC-05 Coordinate byte-identical fixture re-vendoring and compatibility
-      checks with Mac before announcing a contract change complete.
-      [S06 evidence](../../HarflowMac/docs/migration-receipts/S06.md) vendors
-      S05 exactly and verifies scoped decoder/fallback behavior; three broad
-      native UI suite failures are preserved with the owner's S06 freeze waiver.
-      Receipt acceptance remains pending.
-
-## E0 / R0 / O0 — support migration
-
-- [ ] E0-MC-01 Support all accepted client flows through public operations on
-      the explicitly selected Python development runtime.
-- [ ] R0-MC-01 Run the same conformance suite against Rust and adjudicate
-      differences against the specification and reviewed baseline.
-- [ ] O0-MC-01 Preserve archive and registration handoff evidence until the owner
-      explicitly approves retirement and contract ownership transfer.
-
-## Validation
-
-Run `uv run pytest`, `scripts/check-private-refs.sh` and
-`uv run python scripts/check-legacy-names.py` as appropriate; see
-[development](development.md), [architecture](architecture.md) and
-[contracts](contracts.md). Real CLI or paid integration qualification requires
-separate authorization.
-
-## Handoff evidence
-
-For every assigned item report: item ID and result; repository and dependency
-commit IDs; fixture manifest hash where applicable; commands, environment,
-results and evidence locations; local, committed, pushed, CI-passed, packaged
-and released state, stated separately; approved design commit, path and state where
-applicable; deviations, blockers and remaining work. Record unrun checks and
-why. Do not infer passing gates from a dispatched task's status.
+Canonical ST01–ST04 specification/implementation and producer contracts, with native/Rust consumer handoffs. ST01 alone is currently assigned; exact schemas and later implementation need their own accepted decisions/assignments.
+See the [current ST session briefs](../../HARFLOW_MIGRATION_SESSIONS.md#conversational-steering-track--accepted-scope-2026-11-05)
+and [steering plan](../../HARFLOW_WORKFLOW_STEERING_PLAN.md). Scope acceptance does
+not pass prior gates, permit live control or authorize releases.
