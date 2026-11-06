@@ -86,10 +86,10 @@ def pending_shape(ctx, result, label):
               f'{label}: catalog_state exposes only status, source, reason [contract]')
 
 
-def page_ready(ctx, *args, attempts=40):
+def page_ready(ctx, *args, attempts=40, env=None):
     """Re-issue a page read while it reports bootstrap_pending, as the contract tells clients to."""
     for _ in range(attempts):
-        res = ctx.ctl(*args)
+        res = ctx.ctl(*args, env=env)
         result = success(ctx, res)
         if result.get('bootstrap_pending') is not True:
             return res
@@ -764,3 +764,72 @@ def _(ctx):
            ([], True, True, False, None), 'the page read withholds all items when authority is incomplete [contract]')
     ctx.check(isinstance(page.get('note'), str) and page['note'], 'the withheld page carries a safe note [contract]')
     ctx.check(set(page.get('catalog_state', {})) <= {'status', 'source', 'reason'}, 'withheld page exposes only the allowlisted catalog state [contract]')
+
+
+# --- cursor binding -----------------------------------------------------------------------------------
+
+@case('cursors.binding', CORE + EV + ST)
+def _(ctx):
+    ctx.seed_reads()
+    other = ctx.folder / 'state-other'
+    seed.seed_reads(other)
+    elsewhere = {'HARFLOW_STATE_ROOT': str(other)}
+    cursor = page_ready(ctx, 'task-list-page', '--json', '--limit', '2').result['next_cursor']
+    page_ready(ctx, 'task-list-page', '--json', env=elsewhere)
+    for label, extra, env in (('another state root', [], elsewhere), ('a different active filter', ['--active-only'], None),
+                              ('a different session filter', ['--session-id', 'x'], None),
+                              ('a different predecessor scope', ['--predecessor-task-id', A], None)):
+        error(ctx, ctx.ctl('task-list-page', '--json', '--limit', '2', '--cursor', cursor, *extra, env=env), 'invalid_params',
+              label=f'task-list-page cursor under {label} [baseline]')
+    ctx.eq(ids(success(ctx, ctx.ctl('task-list-page', '--json', '--limit', '3', '--cursor', cursor))['items']), [C, B, A],
+           'a page cursor survives a change of limit [baseline]')
+    token = stats_ready(ctx, 'statistics-page', *WINDOW, '--limit', '2', '--json').result['next_cursor']
+    error(ctx, ctx.ctl('statistics-page', *WINDOW, '--limit', '2', '--json', '--cursor', token, env=elsewhere), 'invalid_cursor',
+          label='statistics cursor under another state root [contract]')
+    error(ctx, ctx.ctl('statistics-page', '--since', '2026-01-02T00:00:00+00:00', '--before', '2026-02-01T00:00:00+00:00',
+                       '--limit', '2', '--json', '--cursor', token), 'invalid_cursor', label='statistics cursor under other bounds [contract]')
+    seed.write_task(ctx.tasks, '12345678-0000-4000-8000-0000000000aa', started_at='2026-01-15T10:00:00+00:00',
+                    finished_at='2026-01-15T10:01:00+00:00')
+    ctx.rebase()
+    error(ctx, ctx.ctl('statistics-page', *WINDOW, '--limit', '2', '--json', '--cursor', token), 'snapshot_expired',
+          label='statistics cursor after a relevant mutation [contract]')
+    event_cursor = success(ctx, ctx.ctl('task-events', A, '--json', '--from', 'oldest', '--limit', '2'))['newer_cursor']
+    error(ctx, ctx.ctl('task-events', A, '--json', '--cursor', event_cursor, env=elsewhere), 'event_cursor_expired',
+          label='event cursor under another state root [contract]')
+
+
+# --- reads against a missing root ---------------------------------------------------------------------
+
+@case('reads.missing_root', SCOPE_CAPS)
+def _(ctx):
+    import shutil
+    expectations = [
+        (['list', '--json'], 'tasks', []),
+        (['status', A, '--json'], 'unknown_task', None),
+        (['status-batch', '--task-ids', A, '--json'], 'status-batch', None),
+        (['task-list-page', '--json'], 'items', []),
+        (['task-list-page', '--json', '--predecessor-task-id', A], 'unknown_task', None),
+        (['task-events', A, '--json'], 'unknown_task', None),
+        (['task-prompt', A, '--json'], 'unknown_task', None),
+        (['task-artifacts', A, '--json'], 'artifact_error', None),
+        (['recovery-activity', A, '--json'], 'unknown_task', None),
+        (['interaction-events', '--json'], 'events', []),
+        (['statistics-page', *WINDOW, '--json'], 'items', []),
+    ]
+    for args, key, empty in expectations:
+        shutil.rmtree(ctx.root, ignore_errors=True)
+        label = ' '.join(args[:1]) + (' successors' if '--predecessor-task-id' in args else '') + ' on a missing root'
+        res = ctx.ctl(*args)
+        if empty is not None:
+            result = success(ctx, res, label)
+            ctx.eq(result.get(key), empty, f'{label}: answers as empty [contract]')
+        elif key == 'status-batch':
+            doc = success(ctx, res, label)
+            ctx.eq((doc['tasks'], doc['errors'][A]['code']), ([], 'unknown_task'), f'{label}: every id is unknown [contract]')
+        else:
+            error(ctx, res, key, label=label)
+        marker = ctx.root / '.harflow-store.json'
+        ctx.check(marker.is_file() and json.loads(marker.read_text()).get('format') == 'harflow.store',
+                  f'{label}: an ordinary read initializes the selected root [contract]')
+    shutil.rmtree(ctx.root, ignore_errors=True)
+    ctx.baseline = None
