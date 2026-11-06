@@ -743,6 +743,14 @@ def _(ctx):
     error(ctx, ctx.ctl('task-artifacts', A, '--json', env=env), 'artifact_error', label='task-artifacts with an unverifiable HARFLOW_TASK_ID')
     for args in (['status', A, '--json'], ['list', '--json']):
         success(ctx, ctx.ctl(*args, env={'HARFLOW_TASK_ID': None}), 'unset marker reads normally')
+    for env in ({'HARFLOW_DEPTH': '1'}, {'PB_TASK_ID': MISSING}):
+        label = ','.join(env)
+        for args in (['status', A, '--json'], ['list', '--json']):
+            success(ctx, ctx.ctl(*args, env=env), f'{args[0]} with only {label} set [baseline]')
+    live = '34343434-3434-4434-8434-343434343434'
+    agent_caller(ctx, live)
+    holder = ctx.ctl('status', A, '--json', env={'HARFLOW_TASK_ID': MISSING})
+    ctx.eq(holder.rc, 0, 'a marker naming an unknown task is overridden by a confirmed ancestry caller [baseline]')
 
 
 @case('scope.incompatible_metadata_fails_closed', SCOPE_CAPS)

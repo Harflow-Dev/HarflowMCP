@@ -73,8 +73,10 @@ class Ctx:
 
     # --- seeding and invariants -------------------------------------------------------------------
 
+    seeder = staticmethod(seed.seed_reads)  # the one seeding seam; replace to use another fixture tool
+
     def seed_reads(self):
-        seed.seed_reads(self.root)
+        self.seeder(self.root)
         self.rebase()
 
     def init_root(self):
