@@ -41,8 +41,8 @@ def validate_envelope(doc, format, expected_version='0.0.11'):
         raise ConformanceError('incompatible product line')
     return doc
 
-def validate_version_info(doc, root, required_capabilities=(), expected_os=None, expected_arch=None):
-    validate_envelope(doc, 'harflow.version-info')
+def validate_version_info(doc, root, required_capabilities=(), expected_os=None, expected_arch=None, expected_version='0.0.11'):
+    validate_envelope(doc, 'harflow.version-info', expected_version)
     if doc.get('component') != 'engine' or doc.get('state_root') != str(root) or not os.path.isabs(str(root)) or 'error' in doc:
         raise ConformanceError('incompatible engine/root')
     if not isinstance(doc.get('contracts'), dict):
@@ -122,3 +122,25 @@ def validate_fake_observation(observation, ledger):
     if observation.get('argv') != ledger.get('argv', [])[2:]:
         raise ConformanceError('fake observation argv mismatch')
     return observation
+
+
+# Capabilities a fresh handshake must show before each public command is run (shared by the controlled profiles).
+COMMAND_CAPABILITIES = {'task-events': 'task-event-page.v1', 'task-prompt': 'task-prompt.v1', 'send': 'messaging.v1',
+                        'cancel-message': 'messaging.v1'}
+
+
+def required_capabilities(argv):
+    caps = ['ctl.v1']
+    if argv and argv[0] in COMMAND_CAPABILITIES:
+        caps.append(COMMAND_CAPABILITIES[argv[0]])
+    if argv and argv[0] == 'approval-respond' and '--monitor' in argv:
+        caps.append('caller-approvals.monitor-respond.v1')
+    return tuple(caps)
+
+
+def validate_reply(argv, doc, expected_version='0.0.11'):
+    """Envelope and, for task-events, the embedded event-page checks every controlled profile applies."""
+    validate_envelope(doc, 'harflow.ctl', expected_version)
+    if argv and argv[0] == 'task-events' and 'error' not in doc:
+        validate_event_page(doc, expected_version)
+    return doc

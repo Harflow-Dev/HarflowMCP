@@ -34,3 +34,12 @@ def kill_parent(ack):
         return False
     os.kill(parent, signal.SIGKILL)
     return True
+
+
+def bound_lifetime(seconds):
+    """Hard lifetime bound: the participant exits by itself after `seconds` whatever else happens, so a failed
+    harness can never leave it running. (A fake should also exit when its engine pipes reach EOF.)"""
+    def expire(*_):
+        os._exit(70)
+    signal.signal(signal.SIGALRM, expire)
+    signal.alarm(int(seconds))

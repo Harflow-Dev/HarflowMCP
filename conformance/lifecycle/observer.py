@@ -6,6 +6,7 @@ non-harness ancestor *before* it acknowledges (the ancestry rendezvous), so a la
 owner process is observed without any hook inside the engine and without signalling a saved PID. Darwin
 only. LOCAL_PEERPID is kernel identity, not authentication against a hostile same-UID process.
 """
+import errno
 import json
 import os
 from pathlib import Path
@@ -38,18 +39,54 @@ def probe(pid):
 
 
 def chain_of(pid, stop_pid):
-    """Ancestors of `pid` up to (excluding) `stop_pid` or PID 1, nearest first, each with its identity."""
+    """Ancestors of `pid` up to (excluding) `stop_pid` or PID 1, nearest first, each with its identity.
+
+    Returns `(participant, chain, completeness)`. `completeness` is `complete` when the walk reached the harness
+    or PID 1/0, `truncated` when the hop bound stopped it, and `broken` when an ancestor vanished mid-walk."""
     chain, current = [], probe(pid)
     if current is None:
         raise RuntimeError('participant vanished before ancestry')
     parent = current['ppid']
-    while parent not in (0, 1, stop_pid) and len(chain) < MAX_CHAIN:
+    while parent not in (0, 1, stop_pid):
+        if len(chain) >= MAX_CHAIN:
+            return current, chain, 'truncated'
         row = probe(parent)
         if row is None:
-            break
+            return current, chain, 'broken'
         chain.append({'pid': parent, **row})
         parent = row['ppid']
-    return current, chain
+    return current, chain, 'complete'
+
+
+def process_table(limit=4 * 1024 * 1024):
+    """Every process as `{(pid, lstart): command}` from one bounded `ps`; raises when it cannot be read."""
+    done = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,lstart=,command='], capture_output=True, timeout=10,
+                          env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+    if done.returncode != 0 or len(done.stdout) > limit:
+        raise RuntimeError('process table unreadable or over its bound')
+    table = {}
+    for line in done.stdout.decode('utf-8', 'replace').splitlines():
+        fields = line.split(None, 7)
+        if len(fields) < 7 or not fields[0].isdigit():
+            continue
+        table[(int(fields[0]), ' '.join(fields[2:7]))] = fields[7] if len(fields) > 7 else ''
+    if not table:
+        raise RuntimeError('process table empty')
+    return table
+
+
+class ProcessWatch:
+    """Independent evidence that a refused request started nothing: processes that appeared during a window
+    and whose command line names one of the markers (the isolated case path or the pinned engine path)."""
+
+    def __init__(self, markers):
+        self.markers = tuple(m for m in markers if m)
+        self.before = process_table()
+
+    def new_matching(self):
+        now = process_table()
+        return sorted((pid, cmd[:200]) for (pid, lstart), cmd in now.items()
+                      if (pid, lstart) not in self.before and any(m in cmd for m in self.markers))
 
 
 class OsObserver:
@@ -93,6 +130,9 @@ class OsObserver:
             return [{**r, 'chain': [dict(c) for c in r['chain']]} for r in self._records.values()]
 
     def _arm(self, pid, lstart):
+        """Arm an exit watch, then re-probe the start identity so a reused PID cannot be watched by mistake.
+
+        Only ESRCH means "already gone", and that is logged. Any other failure is a failed observation."""
         key = (pid, lstart)
         if key in self._watched:
             return
@@ -101,15 +141,26 @@ class OsObserver:
                               fflags=select.KQ_NOTE_EXIT)
         try:
             self._queue.control([event], 0, 0)
-        except OSError:
-            self._watched[key]['exited'] = True  # gone before the watch armed: observed as exited
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                self._failed = True
+                self._append('watch-error', pid=pid, errno=exc.errno)
+                raise ValueError('exit watch could not be armed') from exc
+            self._watched[key]['exited'] = True
+            self._append('exit', pid=pid, lstart=lstart, via='esrch-at-arm')
+            return
+        again = probe(pid)
+        if again is not None and again['lstart'] != lstart:
+            self._failed = True
+            self._append('identity-changed', pid=pid, before=lstart, after=again['lstart'])
+            raise ValueError('process identity changed while arming its watch')
 
     def _register(self, conn, request):
         pid = struct.unpack('i', conn.getsockopt(0, 2, 4))[0]  # LOCAL_PEERPID
         if not isinstance(request, dict) or set(request) != {'nonce', 'role', 'pid'} or request['nonce'] != self.nonce \
                 or type(request['pid']) is not int or request['pid'] != pid or request['role'] not in ('fake',):
             raise ValueError('registration shape, nonce or claimed pid')
-        me, chain = chain_of(pid, self.controller_pid)
+        me, chain, completeness = chain_of(pid, self.controller_pid)
         with self._condition:
             if len(self._records) >= MAX_PARTICIPANTS:
                 raise ValueError('participant bound')
@@ -117,8 +168,7 @@ class OsObserver:
             self._arm(pid, me['lstart'])
             for hop in chain:
                 self._arm(hop['pid'], hop['lstart'])
-            record = {'token': token, 'pid': pid, 'role': request['role'], **me, 'chain': chain,
-                      'harness_parent': me['ppid'] == self.controller_pid or (not chain and me['ppid'] == self.controller_pid)}
+            record = {'token': token, 'pid': pid, 'role': request['role'], **me, 'chain': chain, 'chain_completeness': completeness}
             self._records[token] = record
             self._append('register', **{k: v for k, v in record.items() if k != 'chain'}, chain=chain)
             self._condition.notify_all()
@@ -160,6 +210,11 @@ class OsObserver:
                             buffers.pop(conn, None)
                 for event in self._queue.control(None, 64, 0):
                     with self._condition:
+                        if event.filter != select.KQ_FILTER_PROC or not event.fflags & select.KQ_NOTE_EXIT or event.flags & select.KQ_EV_ERROR:
+                            self._failed = True
+                            self._append('watch-error', pid=event.ident, filter=event.filter, fflags=event.fflags, flags=event.flags)
+                            self._condition.notify_all()
+                            continue
                         for watched in self._watched.values():
                             if watched['pid'] == event.ident and not watched['exited']:
                                 watched['exited'] = True
@@ -207,8 +262,9 @@ class OsObserver:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=4)
-        for conn in list(self._selector.get_map().values()):
-            pass
+        for key in list(self._selector.get_map().values()):
+            if key.fileobj is not self._listener:
+                key.fileobj.close()
         self._selector.close()
         self._listener.close()
         self._queue.close()

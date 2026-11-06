@@ -221,6 +221,9 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
   writes the documented private formats as literal bytes with the standard library. An external adapter
   is selected with `--fixture-adapter PATH --fixture-adapter-sha256 DIGEST` (invoked `ADAPTER OP --root ROOT`,
   JSON arguments on stdin, JSON result on stdout) and is never reachable from the public engine binary.
+- **Complete inputs.** Every task field and every artifact item the cases assert (`world.task`, `world.artifact`) is an
+  explicit input the adapter reads; an adapter has no defaults, and a reply to `add_live_caller` must carry an explicit
+  boolean `supported` (an empty or non-boolean answer fails the scenario).
 - **Oracle independence.** Expected values in `cases.py` are literals derived from `world.py` and
   `docs/contracts.md`. Nothing shares a codec with an engine, cursors are opaque, and error wording is
   never pinned (codes and identities only).
@@ -270,16 +273,25 @@ digest.
 ## Lifecycle conformance (generic pinned target)
 
 `conformance/lifecycle` re-expresses the S08 cases `refusals`, `complete`, `nonzero`, `detached-resume`, `cancel` and
-`owner-death` for a pinned release binary (`--engine-bin/--engine-sha256`, re-hashed before every operation) with a
-closed engine environment (no selector can be added), public commands only, and OS-level observation (kernel peer
-PID, ancestry rendezvous, kqueue watches on the participant and its ancestors) instead of hooks inside the engine.
-A case that needs a running agent on a seam without one is `blocked`, never passed; the exit status is zero only when
-every selected case passed. `--seam none` runs `refusals` for real and blocks the rest; `--seam python-injection`
-re-uses the S08 profile only to prove the case logic on Python and is never acceptance evidence. The fake-backend
-seam is an open design item: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
+`owner-death` for a pinned binary (`--engine-bin/--engine-sha256`, re-hashed before every operation) with a closed
+engine environment (no selector can be added), the product line carried in the target identity
+(`--product-version`), public commands only, and OS-level observation (kernel peer PID, ancestry rendezvous, kqueue
+watches on the participant and its ancestors) instead of hooks inside the engine. **Darwin only: lifecycle
+conformance is unavailable on Linux**, and the observer self-checks are skipped there.
+
+A case that needs a running agent on a seam without one is `blocked`, never passed. The report separates
+`no_failures`, `all_passed`, `subset` and `complete`; the exit status is zero only when `complete`. A run is
+`acceptance_eligible` only when the pinned binary equals a release digest and commit supplied independently
+(`--release-sha256`, `--release-commit`) and the seam is eligible. `refusals` also needs independent spawn evidence
+(a process-table diff) and is withheld when that evidence is unreadable. `--seam none` runs `refusals` for real and
+blocks the rest; `--seam python-injection` re-uses the S08 profile only to prove the case logic on Python and is
+never acceptance evidence (its extra environment keys are reported). The fake-backend seam and its conflict with
+D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 
 ```sh
 .venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.11^{commit})" \
-  --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json --seam none --output /path/to/new-dir
+  --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
+  --manifest-sha256 cd58a5ef8bae565513669dcf4d4ac9179ea327d5093de4461806d7be8dae1873 \
+  --product-version 0.0.11 --seam none --output /path/to/new-dir
 .venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
 ```
