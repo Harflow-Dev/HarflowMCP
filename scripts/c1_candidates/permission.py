@@ -8,6 +8,7 @@ NAME = 'permission-mode-report-v1'
 MODES = 'os_enforced tool_level'
 EVIDENCE_BINDING = ('binary_sha256', 'version', 'platform', 'probe_revision', 'grants_digest')
 AMBIENT_FIELDS = ('user_config_sha256', 'inherited_rules_digest')
+STRICT_ONLY = ('ambient.user_config_sha256', 'ambient.inherited_rules_digest', 'protected_paths_digest')
 
 
 def evidence(value, with_state=True):
@@ -15,10 +16,19 @@ def evidence(value, with_state=True):
     require(isinstance(value, dict), 'fields')
     require(token(value.get('binary_sha256'), 64) and token(value.get('grants_digest'), 64), 'fields')
     require(all(isinstance(value.get(key), str) and 0 < len(value[key]) <= 128 for key in ('version', 'platform', 'probe_revision')), 'fields')
+    if 'protected_paths_digest' in value:
+        require(token(value['protected_paths_digest'], 64), 'fields')
     if 'ambient' in value:
         require(isinstance(value['ambient'], dict) and all(token(value['ambient'].get(key), 64) for key in AMBIENT_FIELDS), 'fields')
     if with_state:
         enums(value, {'state': 'passed failed unknown unmeasured', 'mode': MODES})
+
+
+def strict_field(value, key):
+    """A strict-only binding field (configuration or protected paths), or None when the document does not carry it."""
+    if key.startswith('ambient.'):
+        return (value.get('ambient') or {}).get(key.split('.', 1)[1])
+    return value.get(key)
 
 
 def report(kind, value):
@@ -48,7 +58,15 @@ def admission(kind, value):
     enums(data, {'requested_mode': MODES}, ('tool_level_opt_in',))
     evidence(data.get('evidence'))
     evidence(data.get('current'), with_state=False)
-    stale = any(data['evidence'][key] != data['current'][key] for key in EVIDENCE_BINDING)  # ambient fields are never compared
+    # Tool-level policy is measured without the user's ambient configuration, which is disclosed as uncontrolled and
+    # never compared. An OS-enforced boundary is a stronger claim: it keeps the configuration and protected-path
+    # checks of the owner-runtime permission model, so for strict mode those fields are part of the binding and
+    # must be present on both sides.
+    strict = data['requested_mode'] == 'os_enforced'
+    stale = any(data['evidence'][key] != data['current'][key] for key in EVIDENCE_BINDING)
+    incomplete = strict and any(strict_field(data['evidence'], key) is None or strict_field(data['current'], key) is None for key in STRICT_ONLY)
+    if strict:
+        stale = stale or any(strict_field(data['evidence'], key) != strict_field(data['current'], key) for key in STRICT_ONLY)
     passed = data['evidence']['state'] == 'passed'
     if data['requested_mode'] == 'tool_level' and not data['tool_level_opt_in']:
         decision, reason = 'refuse', 'opt_in_required'
@@ -56,6 +74,8 @@ def admission(kind, value):
         decision, reason = 'refuse', 'evidence_mode_mismatch'
     elif data['requested_mode'] == 'os_enforced' and not passed:
         decision, reason = 'refuse', 'strict_unmeasured'
+    elif incomplete:
+        decision, reason = 'refuse', 'unqualified'
     elif stale:
         decision, reason = 'refuse', 'evidence_stale'
     elif not passed:
@@ -75,6 +95,9 @@ def evaluate(kind, value):
 
 DIGEST_A, DIGEST_B = 'a' * 64, 'b' * 64
 CURRENT = {'binary_sha256': DIGEST_A, 'version': '2.1.318', 'platform': 'darwin-arm64', 'probe_revision': 'r1', 'grants_digest': DIGEST_B}
+
+
+STRICT = {'ambient': {'user_config_sha256': '1' * 64, 'inherited_rules_digest': '2' * 64}, 'protected_paths_digest': '5' * 64}
 
 
 def ev(state='passed', mode='tool_level', **extra):
@@ -139,7 +162,16 @@ def cases():
     admit('admission-os-enforced-evidence-cannot-admit-tool-level', 'tool_level', True, 'passed', 'refuse', 'evidence_mode_mismatch', mode='os_enforced')
     admit('admission-strict-unmeasured', 'os_enforced', False, 'unmeasured', 'refuse', 'strict_unmeasured')
     admit('admission-strict-failed', 'os_enforced', False, 'failed', 'refuse', 'strict_unmeasured')
-    admit('admission-strict-qualified', 'os_enforced', False, 'passed', 'admit', 'qualified')
+    admit('admission-strict-qualified', 'os_enforced', False, 'passed', 'admit', 'qualified', {**CURRENT, **STRICT}, **STRICT)
+    # Strict mode keeps the configuration and protected-path binding that tool-level policy does not have.
+    admit('admission-strict-ambient-change-is-binding', 'os_enforced', False, 'passed', 'refuse', 'evidence_stale',
+          {**CURRENT, **STRICT, 'ambient': {'user_config_sha256': '3' * 64, 'inherited_rules_digest': '2' * 64}}, **STRICT)
+    admit('admission-strict-rules-change-is-binding', 'os_enforced', False, 'passed', 'refuse', 'evidence_stale',
+          {**CURRENT, **STRICT, 'ambient': {'user_config_sha256': '1' * 64, 'inherited_rules_digest': '4' * 64}}, **STRICT)
+    admit('admission-strict-protected-paths-change-is-binding', 'os_enforced', False, 'passed', 'refuse', 'evidence_stale',
+          {**CURRENT, **STRICT, 'protected_paths_digest': '6' * 64}, **STRICT)
+    admit('admission-strict-without-configuration-binding', 'os_enforced', False, 'passed', 'refuse', 'unqualified', {**CURRENT, **STRICT})
+    admit('admission-strict-without-protected-paths', 'os_enforced', False, 'passed', 'refuse', 'unqualified', CURRENT, ambient=STRICT['ambient'])
     for key, changed in (('binary_sha256', 'c' * 64), ('version', '2.1.319'), ('platform', 'linux-x86_64'), ('probe_revision', 'r2'), ('grants_digest', 'd' * 64)):
         admit('admission-stale-' + key.replace('_', '-'), 'tool_level', True, 'passed', 'refuse', 'evidence_stale', {**CURRENT, key: changed})
     admit('admission-unqualified', 'tool_level', True, 'unmeasured', 'refuse', 'unqualified')
@@ -157,6 +189,10 @@ def cases():
     crossed = specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'qualified'},
                        {'requested_mode': 'os_enforced', 'tool_level_opt_in': False, 'evidence': ev('passed', 'tool_level'), 'current': CURRENT})
     reject('admission-admits-cross-mode-evidence', crossed, 'invalid', 'projection_mismatch')
+    lax = specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'qualified'},
+                   {'requested_mode': 'os_enforced', 'tool_level_opt_in': False, 'evidence': ev('passed', 'os_enforced', **STRICT),
+                    'current': {**CURRENT, **STRICT, 'ambient': {'user_config_sha256': '3' * 64, 'inherited_rules_digest': '2' * 64}}})
+    reject('admission-strict-admits-changed-configuration', lax, 'invalid', 'projection_mismatch')
     reject('admission-future-mode', specimen(NAME, 'admission', {'decision': 'refuse', 'reason': 'x'},
                                               {'requested_mode': 'sandboxed', 'tool_level_opt_in': True, 'evidence': ev(), 'current': CURRENT}), 'unsupported', 'enum')
     reject('envelope-future-kind', {**specimen(NAME, 'report', block()), 'kind': 'future'}, 'unsupported', 'envelope')

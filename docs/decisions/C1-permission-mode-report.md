@@ -50,10 +50,17 @@ resume and continuation the check runs before effects, in this order:
 5. evidence not `passed`: refuse `unqualified`;
 6. otherwise admit `qualified`.
 
-The binding is exactly binary digest, version, platform, probe revision and grants digest. Optional
-`ambient` fields on the evidence and on the current observation (`user_config_sha256`,
-`inherited_rules_digest`) are validated but **never compared**: a specimen whose ambient values differ from
-qualification time is still admitted.
+The binding for a **tool-level** request is exactly binary digest, version, platform, probe revision and grants
+digest. Optional `ambient` fields (`user_config_sha256`, `inherited_rules_digest`) are validated but **never
+compared** there: a specimen whose ambient values differ from qualification time is still admitted, because
+ambient configuration is disclosed as uncontrolled and tool-level policy is measured without it.
+
+That exemption does **not** extend to an **OS-enforced** request. An OS boundary is a stronger claim, and the
+owner-runtime permission model keeps configuration and protected-path matches for it, so for `os_enforced` the
+binding additionally includes `ambient.user_config_sha256`, `ambient.inherited_rules_digest` and
+`protected_paths_digest`. They must be present on both sides (otherwise refuse `unqualified`) and equal
+(otherwise refuse `evidence_stale`). This is a minimal placeholder for a strict qualification model that does
+not exist yet; an alternative is to refuse every strict admission until it does, which is the owner's choice.
 
 Caller-supplied JSON is never evidence: the manifest states the specimens are hypothetical
 trusted-adapter observations.

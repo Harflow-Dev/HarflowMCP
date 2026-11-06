@@ -208,3 +208,18 @@ def test_110_candidate_documents_where_the_symptom_remains():
     assert (held['workflow'], held['reason']) == ('blocked', 'unsettled')
     undeclared = load(result.CANDIDATE, 'undeclared-requirement-failed-obligation-fails.json')['document']
     assert undeclared['background']['requirement'] == 'unknown' and undeclared['settlement']['workflow'] == 'failed'
+
+
+def test_d6_strict_mode_keeps_configuration_and_protected_path_binding():
+    p = permission.CANDIDATE
+    for name in ('admission-strict-ambient-change-is-binding', 'admission-strict-rules-change-is-binding',
+                 'admission-strict-protected-paths-change-is-binding'):
+        assert expected_of(p, name + '.json') == {'parse': 'valid', 'decision': 'refuse', 'reason': 'evidence_stale'}
+    for name in ('admission-strict-without-configuration-binding', 'admission-strict-without-protected-paths'):
+        assert expected_of(p, name + '.json')['reason'] == 'unqualified'
+    assert expected_of(p, 'admission-strict-qualified.json')['decision'] == 'admit'
+    assert expected_of(p, 'admission-strict-admits-changed-configuration.json')['reason'] == 'projection_mismatch'
+    # The tool-level exemption still holds for tool-level requests.
+    assert expected_of(p, 'admission-ambient-change-is-not-binding.json')['decision'] == 'admit'
+    changed = load(p, 'admission-strict-ambient-change-is-binding.json')['input']
+    assert changed['evidence']['ambient'] != changed['current']['ambient']

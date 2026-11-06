@@ -125,6 +125,25 @@
       "sha256": "230d6df0735f580e75823838dc6f070773f2b2b7dd60311db6fdb8299a7139ed"
     },
     {
+      "bytes": 1577,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "admission-strict-admits-changed-configuration.json",
+      "sha256": "ddaa8ad7df391ec8b158af67fd4b30e7b15a14e68fe573d108e7b5a135f32ace"
+    },
+    {
+      "bytes": 1583,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "evidence_stale"
+      },
+      "filename": "admission-strict-ambient-change-is-binding.json",
+      "sha256": "4359b6bbc15bf62b32e993140be41a6e045a335a97c4f451b7780470568960f6"
+    },
+    {
       "bytes": 932,
       "expected": {
         "decision": "refuse",
@@ -135,14 +154,34 @@
       "sha256": "9152768670a4688c6fed8c5b1b271865a7300bdf52cf58681133da05975da8c2"
     },
     {
-      "bytes": 923,
+      "bytes": 1583,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "evidence_stale"
+      },
+      "filename": "admission-strict-protected-paths-change-is-binding.json",
+      "sha256": "b368d1aff306bfc676744ada4260de166ff18533c46b6855825556fbdab48abd"
+    },
+    {
+      "bytes": 1577,
       "expected": {
         "decision": "admit",
         "parse": "valid",
         "reason": "qualified"
       },
       "filename": "admission-strict-qualified.json",
-      "sha256": "4bc22f5feee1874416dee9aea132c7d845f36431baa6f8bf1fe17b98b380ea25"
+      "sha256": "ce5304895762835c399ce8e2654b91d719b0ad3df06d30e4b8f691dbbf0d5cdc"
+    },
+    {
+      "bytes": 1583,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "evidence_stale"
+      },
+      "filename": "admission-strict-rules-change-is-binding.json",
+      "sha256": "18dbfab0ac64825043d1ce4bf81e3e8658f2d5c92bd7fd63ef3bddb910e96186"
     },
     {
       "bytes": 936,
@@ -153,6 +192,26 @@
       },
       "filename": "admission-strict-unmeasured.json",
       "sha256": "9fd07f0d6474671622684b23841dd5959727c536e819908ab01d9039100f761d"
+    },
+    {
+      "bytes": 1253,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "unqualified"
+      },
+      "filename": "admission-strict-without-configuration-binding.json",
+      "sha256": "afa8e467f8b7595d2e99fe8d941fac6741cdf467d6165a33059a0594c1c9f185"
+    },
+    {
+      "bytes": 1153,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "unqualified"
+      },
+      "filename": "admission-strict-without-protected-paths.json",
+      "sha256": "d10ddc93436b30d1160d5b9e078c1350e54654c8b614909bb3bbc0ef7af9c708"
     },
     {
       "bytes": 936,
@@ -367,7 +426,7 @@
   "specifications": [
     {
       "path": "docs/decisions/C1-permission-mode-report.md",
-      "sha256": "693f502ea1835d797d5f38c919f7d9ac36aaa55043503e0f77b9da85d041abd5"
+      "sha256": "64a9399caff0016c92d6a546aa64992035653271fbde3965614f9fe2e5643e4d"
     }
   ],
   "status": "specified_unimplemented",
