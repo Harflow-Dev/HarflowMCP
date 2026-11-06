@@ -69,7 +69,8 @@ def _size(value):
 
 def retained_text_bytes(run):
     ledger = run['steering']
-    return (sum(len(t.get('text', '').encode()) + len(t.get('final', '').encode()) for t in ledger['turns'])
+    from .conversation_workflows import extension_text_bytes
+    return (extension_text_bytes(run)+sum(len(t.get('text', '').encode()) + len(t.get('final', '').encode()) for t in ledger['turns'])
             + sum(len(h[key].encode()) for h in ledger['history'] for key in ('text','reason') if isinstance(h.get(key), str))
             + sum(len(r['reason'].encode()) for r in ledger.get('replans', [])))
 
@@ -82,6 +83,8 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
     Raises on protected-byte pressure; storage caller must discard failed mutation.
     """
     ledger = run["steering"]
+    from .conversation_workflows import compact_conversations
+    compact_conversations(run,reserve_text_bytes=reserve_text_bytes,reserve_metadata_bytes=128*1024,defer_pressure=True)
     if ledger["schema_version"] != 2:
         return
     protected = protected_turn_ids(run, settled_effect_turn_ids, protected_task_ids)
@@ -131,6 +134,13 @@ def compact(run, *, managed_task_ids=frozenset(), settled_effect_turn_ids=frozen
             if r["turn_id"] in remove:
                 r["retired_turn"] = True
         episodes = {t["episode_id"] for t in ledger["turns"]} | {r["episode_id"] for r in receipts.values()}
+        delivery_links={b['steering_episode_id'] for b in ledger.get('conversation_delivery',{}).values() if b.get('steering_episode_id')}
+        for episode in ledger['episodes']:
+            if episode['episode_id'] in delivery_links and episode['episode_id'] not in episodes and not episode['hold']:
+                # Role/ownership retirement above already proved that no inline
+                # turn remains necessary. Keep only the delivery handoff link.
+                episode['latest_reply_ref']=None
+        episodes |= delivery_links
         ledger["episodes"][:] = [ep for ep in ledger["episodes"] if ep["hold"] or ep["episode_id"] in episodes]
         for ep in ledger["episodes"]:
             if ep.get("supersedes_episode_id") not in {e["episode_id"] for e in ledger["episodes"]}:

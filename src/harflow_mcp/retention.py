@@ -211,6 +211,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     # task, and the successor a reservation names so a dead owner's reservation can still resolve.
     followups.reconcile_all(log_dir)  # crash leftovers and superseded messages must not pin a task
     protected.update(followups.protected_task_ids(log_dir))
+    from .conversation_runtime import protected_task_ids as conversation_pins
+    protected.update(conversation_pins(task_layout(log_dir)))
     protected.discard(None)
 
     # A compacted managed task cannot resume independently. Its closed-namespace
@@ -627,6 +629,13 @@ def _delete_task(
                 stats["kept_locked"] += 1
                 return
             if task_id in pinned_tasks(log_dir):
+                stats['kept_locked'] += 1
+                return
+            # Conversation admission holds this same native-session lock before
+            # publishing its leaf ledger. Recheck after taking it: an acknowledged
+            # message must retain its source/head even when it raced the sweep.
+            from .conversation_runtime import protected_task_ids as conversation_pins
+            if task_id in conversation_pins(task_layout(log_dir)):
                 stats['kept_locked'] += 1
                 return
 

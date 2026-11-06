@@ -184,6 +184,9 @@ def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
         record = record_type(**payload)
         if record.task_id != task_id:
             raise ValueError("Task document id does not match source id")
+        if record.conversation is not None:
+            from .conversation_descriptor import validate as validate_conversation
+            validate_conversation(record.conversation)
         for identity_key in ("owner", "dispatch_origin"):
             value = getattr(record, identity_key)
             if value is not None:

@@ -320,6 +320,10 @@ def invocation_request(invocation):
         request_invocation['system_guidance_root'] = invocation.system_guidance_root
     if invocation.control_context is not None:
         request_invocation['control_context'] = invocation.control_context
+    if invocation.conversation_context is not None:
+        # Descriptive only. Detached execution refuses this mapping unless its
+        # own trusted qualifier independently reconstructs the exact profile.
+        request_invocation['conversation_context'] = invocation.conversation_context
     if invocation.identity_markers is not None:
         request_invocation['identity_markers'] = list(invocation.identity_markers)
     for name in ('group_report_directory', 'group_report_identity', 'group_report_runtime', 'group_report_configuration', 'group_report_qualification'):

@@ -528,8 +528,13 @@ async def start_task(
     resources: list[StrictStr] | None = None,
     resource_wait_seconds: StrictInt | None = None,
     worktree: dict[str, StrictStr | StrictBool | None] | None = None,
+    conversation_profile: StrictStr | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
+
+    `conversation_profile` explicitly requests a qualified native control
+    transport (`native` or `shipped-medium35-high`). Missing runtime/profile
+    qualification refuses before launch; this does not enable caller approvals.
 
     Args:
         prompt: Instructions for the agent. Be specific about the desired end state. Write it in
@@ -829,6 +834,7 @@ async def start_task(
             model=model,
             max_turns=max_turns,
             background_idle_seconds=background_idle_seconds,
+            **({"conversation_profile": conversation_profile} if conversation_profile is not None else {}),
             reasoning_effort=reasoning_effort,
             network=network,
             caller_approvals=caller_approvals,
@@ -1682,6 +1688,7 @@ async def resume_task(
     network: StrictBool | None = None,
     allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
     fetch: StrictBool | list[StrictStr] | None = None, fetch_required: StrictBool = False,
+    conversation_profile: StrictStr | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -1771,6 +1778,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(parent.backend), parent.freedom, Path(parent.repo_path), allowed_commands)
             task = await _reg().resume(
                 parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
+                **({"conversation_profile": conversation_profile} if conversation_profile is not None else {}),
                 consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
             )
         else:
@@ -1789,6 +1797,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), allowed_commands)
             task = await _reg().resume_record(
                 record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
+                **({"conversation_profile": conversation_profile} if conversation_profile is not None else {}),
                 consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'fetch': fetch} if fetch is not None else {}), **({'fetch_required': True} if fetch_required else {}),
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
@@ -2241,6 +2250,82 @@ async def send_message(task_id: str, text: str, delivery: str = "queue", interac
         raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (ValueError, store.InvalidTaskId) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def prepare_task_conversation(task_id: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Prepare a qualified same-conversation delivery target and its exact witness.
+
+    This explicitly enrolls a qualified task. It does not send input or enable an
+    unsupported transport. Use the returned expected witness in the negotiated
+    conversation_delivery_v1 request; legacy queued follow-ups stay separate.
+    """
+    await _guard_mutation()
+    await _guard_message_sender(interaction_owner)
+    try:
+        resolution = await _resolve_task_id(store.validate_task_id(task_id))
+        from .conversation_api import prepare_task
+        return id_resolution.echo(await prepare_task(_reg(), resolution.id, interaction_owner=interaction_owner), primary=resolution)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": getattr(exc, "code", "invalid_params")}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def send_conversation_message(request: dict[str, Any], interaction_owner: str = "caller") -> dict[str, Any]:
+    """Send one exact Queue or Now request using conversation_delivery_v1.
+
+    Queue finishes the active response before automatic delivery. Now requires a
+    qualified native interruption route; unsupported targets refuse before input.
+    Requests include a UUID and exact conversation/head/turn/generation/epoch
+    witness. Acknowledged intent is distinct from native input consumption.
+    Repeat an uncertain call with the identical request, never a fresh UUID.
+    """
+    await _guard_mutation()
+    await _guard_message_sender(interaction_owner)
+    try:
+        from .conversation_api import send_task
+        return await send_task(_reg(), request, interaction_owner=interaction_owner)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": getattr(exc, "code", "invalid_params")}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def control_conversation_message(request: dict[str, Any], interaction_owner: str = "caller") -> dict[str, Any]:
+    """Cancel an unclaimed message or promote it to Now without duplicating input.
+
+    Use a distinct control request UUID, the existing message_request_id and the
+    exact current conversation witness. Promotion preserves the message's original
+    Queue admission identity. Cancellation never interrupts an issued response.
+    """
+    await _guard_mutation()
+    await _guard_message_sender(interaction_owner)
+    try:
+        from .conversation_api import control_task
+        return await control_task(_reg(), request, interaction_owner=interaction_owner)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": getattr(exc, "code", "invalid_params")}) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def commit_conversation_result(request: dict[str, Any], interaction_owner: str = "caller") -> dict[str, Any]:
+    """Explicitly request a capped same-session workflow result after conversation.
+
+    The source must physically exit and drain first. The request includes the
+    exact conversation witness and a complete existing steering open request with
+    allow_fresh_context=false. Only the issued framed commit can advance the
+    graph or propose a draft; applying/saving a draft stays explicit.
+    """
+    await _guard_mutation()
+    await _guard_message_sender(interaction_owner)
+    try:
+        from .conversation_api import commit_task
+        return await commit_task(_reg(), request, interaction_owner=interaction_owner)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": getattr(exc, "code", "invalid_params")}) from None
 
 
 async def _guard_message_sender(interaction_owner: str) -> None:

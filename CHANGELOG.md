@@ -2,6 +2,7 @@
 
 ## 0.0.11
 
+- Add negotiated native conversation delivery across standalone tasks, workflows and workflow creation/editing. Queue finishes the full active response and automatically delivers one FIFO message per response in the same context; Now interrupts supported streaming phases while preserving older queued messages. Known unqualified active tools refuse Now explicitly. Exact runtime/profile qualification, bounded status and replay receipts remain separate from workflow commit/apply authority and Rust adoption.
 - Add explicit builder, orchestrator and qualified worker conversational steering through ctl and agent MCP. Prose waits for the caller; strict current role frames commit only configured actions. Each explicit message grants one finite response, preserving actual permissions and normal execution allowances. Epoch-scoped rolling history can expire with explicit gaps and retained ownership proofs.
 - Add exact prestart withdrawal and a same-assignment linked retry for root workers configured headless with fixed Fresh sessions and a finite original cap. Generation-bound withdrawal never authorizes a late signal; issued work and uncertain spawn remain ineligible for replacement. Consumer adoption and real-backend qualification remain separate gates.
 

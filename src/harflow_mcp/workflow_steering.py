@@ -76,7 +76,8 @@ def semantic_changed(before, run):
 
 
 def held(run):
-    return any(ep["hold"] for ep in run.get("steering", {}).get("episodes", []))
+    from .conversation_workflows import held as delivery_held
+    return delivery_held(run) or any(ep["hold"] for ep in run.get("steering", {}).get("episodes", []))
 
 
 def _transport(storage, monitor):

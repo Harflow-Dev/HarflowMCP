@@ -213,7 +213,10 @@ async def _run_owned(supervisor, run_id):
             run, _, activation, node, token = _parts(supervisor.store, root, turn["commit_target"])
             candidate = turn["candidate"]
             backend = get_backend(candidate["backend"])
-            if not turn["allow_fresh_context"] or not backend.capabilities.supports_turn_cap:
+            linked=root.get('steering',{}).get('conversation_delivery',{}).get(turn['target']['activation_id'],{})
+            same_session_commit=(turn.get('previous_session') is not None and turn['allow_fresh_context'] is False
+                and linked.get('steering_episode_id')==turn['episode_id'])
+            if (not turn['allow_fresh_context'] and not same_session_commit) or not backend.capabilities.supports_turn_cap:
                 _capture(supervisor, tid, origin=turn, failure="steering_budget_unsupported")
                 commit_worker_result(supervisor, tid)
                 return
@@ -279,7 +282,20 @@ async def _run_owned(supervisor, run_id):
                 else:
                     kwargs["resources"] = names
             start_called = True
-            task = await supervisor.registry.start(prompt, Path(source.repo_path), backend=backend, **kwargs)
+            if turn.get('previous_session') is not None and turn.get('allow_fresh_context') is False:
+                previous=turn['previous_session']
+                if previous['task_id']!=source.task_id or previous['session_id']!=source.session_id:
+                    raise SteeringError('steering_source_unavailable','Exact commit source changed')
+                resume_keys={'max_turns','background_idle_seconds','network','task_id','display_prompt','allowed_commands','git_https_rewrite','group_report_output'}
+                resume_options={key:value for key,value in kwargs.items() if key in resume_keys}
+                from .conversation_workflows import commit_profile_options
+                profile_options=commit_profile_options(supervisor.run(refresh_atomic=True),turn)
+                from .conversation_workflows import bind_commit_input
+                bind_commit_input(supervisor,turn,prompt,profile_options,resume_options['max_turns'])
+                resume_options.update(profile_options)
+                task=await supervisor.registry.resume_record(source,prompt,require_unchanged_session=True,consume_followups=False,**resume_options)
+            else:
+                task = await supervisor.registry.start(prompt, Path(source.repo_path), backend=backend, **kwargs)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -324,6 +340,9 @@ def _finish_response(supervisor, tid, snapshot):
         _capture(supervisor, tid, origin=turn, failure="capture_unknown", unknown=True)
         return
     failure = captured_failure(snapshot, turn["task_id"])
+    from .conversation_workflows import commit_context_mismatch
+    if commit_context_mismatch(supervisor.run(refresh_atomic=True),turn,snapshot):
+        failure='steering_source_unavailable'
     _capture(supervisor, tid, snapshot, origin=turn, failure=failure, unknown=failure == "capture_unknown")
     if failure == "capture_unknown":
         return

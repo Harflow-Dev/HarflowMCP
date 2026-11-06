@@ -114,6 +114,8 @@ def admit(storage, run, principal, monitor, request, digest, binding, *, admitte
             if run.get("input_question") or run.get("pending_inputs") or run.get("orchestrator_usage_recovery"):
                 raise SteeringError("steering_question_pending", "Resolve the existing interaction first")
             from .steering_window import retained_text_bytes
+            from .conversation_workflows import compact_conversations
+            compact_conversations(run,reserve_text_bytes=2*len(request['text'].encode())+64*1024,reserve_metadata_bytes=128*1024,defer_pressure=True)
             retained = retained_text_bytes(run)
             if retained + 2 * len(request["text"].encode()) + 64 * 1024 > 1024 * 1024:
                 raise SteeringError("steering_queue_full", "Root retained conversation text capacity reached")
@@ -139,6 +141,12 @@ def admit(storage, run, principal, monitor, request, digest, binding, *, admitte
                 raise SteeringError("steering_budget_exhausted", "Legacy ledger requires explicit epoch-scoped upgrade")
             if not orchestration:
                 candidate = copy.deepcopy(run["definition"]["orchestrator"])
+            if candidate.get('conversation_profile') is not None:
+                from .conversation_workflows import same_session_commit_source
+                linked=run.get('steering',{}).get('conversation_delivery',{}).get(request['target'].get('activation_id'),{})
+                continuing=(request['action']=='reply' and linked.get('steering_episode_id')==request.get('episode_id'))
+                if request.get('allow_fresh_context') or not continuing and same_session_commit_source(run,request['target'].get('activation_id')) is None:
+                    raise SteeringError('steering_source_unavailable','Selected native profile requires an explicit same-session conversation commit; Fresh steering cannot substitute a classic profile')
             from .tasks import get_backend
             if (candidate.get("caller_approvals") and request["target"].get("role") != "worker") or not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
                 raise SteeringError("steering_budget_unsupported", "Selected builder adapter cannot enforce a finite harness-turn cap")

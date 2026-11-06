@@ -157,6 +157,12 @@ def fence(storage, run, event, detail=None):
         target = episode["target"]
         if target["role"] not in {"orchestrator", "worker"}:
             continue
+        linked=root.get('steering',{}).get('conversation_delivery',{}).get(target.get('activation_id'),{})
+        if (target['role']=='worker' and linked.get('steering_episode_id')==episode['episode_id']
+                and event in {'dispatch_reserved','native_reserved','native_batch_reserved','node_assignment_reserved'}
+                and isinstance(detail,dict) and detail.get('steering_role')=='node'
+                and detail.get('activation_id')!=target['activation_id']):
+            continue
         path = target["path"]
         # Block new root decisions and the exact target subtree, allowing already
         # issued unrelated effects and their observation/recovery to settle.
@@ -176,6 +182,10 @@ def scheduling_held(storage, run, token):
     root = run if rid == run["workflow_run_id"] else storage.get_run(rid, refresh_atomic=True)
     for ep in root.get("steering", {}).get("episodes", []):
         if not ep["hold"] or ep["target"]["role"] not in {"orchestrator", "worker"}:
+            continue
+        linked=root.get('steering',{}).get('conversation_delivery',{}).get(ep['target'].get('activation_id'),{})
+        if (ep['target']['role']=='worker' and linked.get('steering_episode_id')==ep['episode_id']
+                and run['workflow_run_id']==ep['target']['workflow_run_id'] and token['id']!=ep['target']['token_id']):
             continue
         if run["workflow_run_id"] == rid or ep["target"]["workflow_run_id"] in records(storage, root)[run["workflow_run_id"]][1]:
             # Existing native/worker/invocation work may be observed. A retained
@@ -697,7 +707,11 @@ async def run_turn(supervisor, root_id):
                               and record.reasoning_effort == candidate.get("reasoning_effort") and record.network == target.get("network"))
             async with CheckoutLease(supervisor.store, target["repo_path"], False, lambda: True, pool=None, owned_run_ids=set(records(supervisor.store, root))):
                 if compatible:
-                    task = await supervisor.registry.resume_record(record, prompt, max_turns=turn["harness_turn_cap"], task_id=turn["task_id"], display_prompt=turn["text"], require_unchanged_session=True, network=target.get("network"))
+                    from .conversation_workflows import commit_profile_options
+                    profile_options=commit_profile_options(supervisor.run(refresh_atomic=True), turn)
+                    from .conversation_workflows import bind_commit_input
+                    bind_commit_input(supervisor,turn,prompt,profile_options,turn["harness_turn_cap"])
+                    task = await supervisor.registry.resume_record(record, prompt, **profile_options, max_turns=turn["harness_turn_cap"], task_id=turn["task_id"], display_prompt=turn["text"], require_unchanged_session=True, network=target.get("network"))
                 else:
                     if not turn["allow_fresh_context"]:
                         raise SteeringError("steering_source_unavailable", "Pinned session is unavailable; explicit Fresh consent is required")
@@ -726,6 +740,9 @@ async def run_turn(supervisor, root_id):
             snapshot = task.snapshot()
     observed = {**snapshot, **{flag: snapshot.get(flag, False) for flag in ("output_drained", "timed_out", "outcome_unknown", "is_error")}}
     failure = captured_failure(observed, turn["task_id"])
+    from .conversation_workflows import commit_context_mismatch
+    if commit_context_mismatch(supervisor.run(refresh_atomic=True),turn,snapshot):
+        failure='steering_source_unavailable'
     capture(supervisor, tid, snapshot, failure=failure, unknown=failure == "capture_unknown")
     if failure == "capture_unknown":
         return

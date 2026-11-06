@@ -1344,3 +1344,143 @@ and 1 MiB in aggregate, charging overflow sentinel bytes and stopping after aggr
 characters per rule. Notices summarize source counts and effects, skipped candidates and
 tentative publishing overlap, rather than repeating rule text. They are bounded to 25 entries,
 4,096 characters per entry and 8 KiB total UTF-8 text, with explicit omission and uncertainty.
+
+## Native conversation transport profiles (2026-11-06)
+
+The native conversation adapters are launch-selected transports. An existing
+print/exec process cannot acquire native interruption retroactively. Their
+presence does not qualify a permission profile: production selection remains
+closed until an independently identified executable and exact launch profile
+have accepted evidence. Queue waits for a native response terminal; native
+interrupt acknowledgements do not establish an interrupted terminal or OS tool
+settlement. Partial writes and missing/contradictory terminal evidence are
+unknown and are never replayed automatically.
+
+Native literal-text probes established same-session response completion,
+interruption and subsequent context recall on Claude 2.1.318 stream JSON,
+Codex 0.166.0 app-server, Vibe 3.1.0 ACP, Antigravity 1.5.1 ACP and Cursor
+2026.10.22-27dcf5f ACP. Those probes did not qualify coding tools, permission
+grants, workflow bindings, crash recovery or descendant closure. Cursor's
+resolved default model was not disclosed. The Vibe default max-reasoning
+profile failed with HTTP 400; its successful probe used an explicitly declared
+child-only `mistral-medium-3.5` high-reasoning profile instead.
+
+Codex app-server configuration keys are raw TOML namespace paths. Quoting the
+whole namespace key changes the configuration and was rejected during native
+preflight. The obsolete `untrusted` approval policy was rejected by the runtime;
+`on-request` was accepted in the literal-text probe. Conversion preserves an
+existing `never` policy and does not silently enable caller approvals. Sandbox,
+network, model, permission policy and writable roots require matching native
+session evidence before a prompt is issued. Unsupported grant conversions
+refuse rather than omit flags.
+
+Installed Vibe 3.1.0 source distinguishes session mode from persistent model
+configuration. `vibe/acp/agent.py:set_config_option` routes `mode` through
+`resources.agents.switch`, but routes `model` through `resources.config.update`
+and `thinking` through `resources.config.set_thinking`. The session agent switch
+uses `session/agent/update`, replaces the in-memory agent profile layer, applies
+that derivation and persists session agent/reasoning pins. Conversation setup
+therefore uses only the session mode setter with a correlated echo; model and
+thinking must already match the explicitly selected child environment. It never
+calls their setters to repair a mismatch. Model/configuration option names and
+native current values must be advertised and verified before any prompt.
+
+ACP `session/cancel` is a notification while the original `session/prompt` RPC
+remains outstanding. The correlated original prompt response supplies the native
+terminal reason. ACP tool status updates describe protocol state, not positive
+OS closure. Interrupted or cancelled tools remain unresolved for successor
+issuance until separate trusted settlement evidence is supplied.
+
+Capped conversation transport is a separate qualification scope. The candidate
+Claude 2.1.318 mapping retains the original `--max-turns` value and every permission,
+model and guidance argument; it replaces only the validated positional/text-stdin
+prompt transport with stream JSON. Both small positional and large one-shot stdin
+prompts retain their exact text. This mapping requires its own native cap-stop and
+multi-response measurements; an uncapped success does not qualify it.
+
+Installed Vibe 3.1.0 `set_config_option("max_turns", ...)` applies
+`resources.sessions.update_settings(max_turns=int(raw))`, a session setting, before
+returning success. It does not use `resources.config.update`, and the response's
+`configOptions` omits `max_turns`. The candidate adapter therefore records a
+correlated setter acknowledgement, explicitly without claiming a native value
+echo, before issuing any prompt. The original cap remains in the exact profile
+fingerprint. Acknowledgement alone does not qualify enforcement: native cap-stop
+behavior and the actual candidate cap need separately accepted evidence.
+
+Vibe workspace trust is separate from tool permission mode. The 3.1.0 adapter
+requires `_meta.workspace_trust` before session readiness. Existing trusted or
+session-trusted workspaces and untrusted workspaces without detected project
+trust requirements (`details: null`) may proceed through mode/model/effort/cap
+validation. An untrusted workspace requiring a decision refuses explicitly with
+`workspace_trust_unqualified` before any user prompt. The adapter never sends
+`_trust/decision`, changes `VIBE_HOME`, or writes/restores user trust/configuration
+files. The original print `--trust` flag is retained as profile provenance, not
+promoted into authorization for a persistent ACP grant. Resume still requires
+the exact requested native session ID; a fresh context never substitutes for it.
+
+Conversation qualification may abstract engine-managed task/chain/group scratch
+paths only from the launch owner's actual allocation and final mapped grant
+slots. The scope retains their role/access topology. Native argv/config root
+slots and Invocation managed-grant fields use these typed roles; caller extra
+grants and arbitrary model, environment or guidance text remain literal, even
+when equal to a managed path. Saved private source evidence reconstructs the
+same proof from the exact bound allocation. Serialized role names alone never
+authorize a grant.
+
+The delivery contract gives each explicit Queue/Now input its own response under
+the unchanged configured response cap. It does not replenish workflow candidate
+attempts or retry allowances, and previous interrupted/completed usage remains
+charged. No guessed task-lifetime model counter replaces native response caps.
+Qualification distinguishes `session_operation: start` from `resume` while
+omitting only the concrete native context ID; a fresh-session measurement never
+implicitly qualifies retained-context loading. These are qualification-only
+scope dimensions and do not change the full launch descriptor fingerprint.
+
+The Vibe `_trust/decision` `trust_cwd` route writes the native trusted-folders
+store under `VIBE_HOME`; it is not ephemeral. Installed ACP does not expose the
+internal SDK's session-only `trust_workspace` option: its new/load methods discard
+extra arguments and create SessionOptions without that flag, while its trust
+decision API excludes `trust_session`. Consequently no persistent trust branch is enabled merely because a validated
+print Invocation carries `--trust`; print-mode grant persistence/equivalence still
+needs evidence or an explicitly accepted profile. Qualification probes must not edit or restore a
+user's global trust/configuration files to work around this limit. A child-only
+`VIBE_HOME` isolation changes the configuration/authentication profile and needs
+its own preserved-provenance qualification.
+
+Claude protocol parsing currently admits separate 2.1.318 and 2.1.319 candidates,
+with 2.1.319 the current candidate default. Native initialization must report the
+exact selected version. The earlier 2.1.318 traces remain historical evidence;
+they do not qualify 2.1.319. Production admission still requires an accepted row
+for the exact current runtime hash, version and full permission/cap/start-or-resume
+scope. Unknown versions refuse; candidate parser support never grants production
+qualification. New-version cap-stop, multi-response and retained-context evidence
+must precede its accepted rows.
+
+Runtime preflight also captures current launcher resolution. The final production
+and private-probe checks re-resolve the same bounded launcher names (including
+Vibe's separate ACP launcher) and reject a changed target even when the formerly
+resolved executable's inode, size and timestamps remain unchanged. This final
+step performs only bounded PATH lookup, symlink resolution and metadata checks;
+it neither reruns version/hash probes nor pins argv or PATH to a versioned Claude
+installation directory.
+
+Codex workspace-write conversion requires a fresh bounded model-free
+`initialize` / `config/read` observation under the original CLI `-c` pins and
+exact cwd, before managed scratch locks. The witness retains only effective
+workspace writable roots, network and both temporary-directory exclusion
+booleans plus their configuration source generations. Missing values/sources
+refuse; enforcement summaries are not configuration authority. The actual
+app-server repeats the same read before thread creation and refuses drift.
+Original configured roots remain literal authority; final validated `--add-dir`
+roots are added only to the thread configuration. Native writable-root echoes
+are compared as a union with the implicit cwd, and network/exclusions must
+match. These checks do not grant admission by themselves; exact accepted rows
+are maintained separately in the [internal Mac qualification matrix](decisions/conversation-delivery-qualification-v1.md).
+
+The conversation driver bounds individual pipe drains, startup, actual native
+interruption settlement and close acknowledgement. It does not impose a new
+wall-clock cap on a healthy issued response or ordinary tool/effect wait; task
+execution policy remains authoritative. Deterministic clock and blocked-writer
+fixtures cover long responses, deferred interruption, timeout and cancellation
+while durable unknown bookkeeping is blocked. No OS descendant containment is
+inferred from closing stdin or receiving a native cancellation acknowledgement.

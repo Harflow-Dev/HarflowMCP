@@ -1,10 +1,10 @@
 # Harflow public wire contracts
 
-HarflowMCP 0.0.8 is a pre-release. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership and registered schema-preserving migration are defined below. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+This specification targets the HarflowMCP 0.0.11 prerelease. It covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership and registered schema-preserving migration are defined below. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
-Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and `product_version: "0.0.8"`. Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
+Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and the writer's `product_version` (currently `"0.0.11"`). Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
 
 Validate identity and format before interpreting either a payload or an error. Missing or foreign product/format, unsupported versions and malformed product versions are rejected. Unknown optional fields and unknown normalized event kinds are additive. Payload fields cannot override the reserved common envelope fields.
 
@@ -2343,3 +2343,71 @@ the [workflow checkpoint conformance integration](decisions/ST04-workflow-checkp
 now exercises actual admission, result, scheduler and resource boundaries with
 explicit unpaid fixture scopes. Qualified production integration remains gated.
 Neither component adds a supported command, envelope or advertised capability.
+
+## Response-boundary Queue and Now
+
+`conversation-delivery.v1` advertises the additive command/schema protocol, not
+qualification of every installed native runtime or permission profile. The
+[conversation delivery guide](conversation-delivery.md) defines the caller
+requests; [the delivery decision](decisions/conversation-delivery-v1.md) defines
+response boundaries and activity authority. The canonical producer is Python;
+Rust adoption remains separate.
+
+`conversation-prepare TASK`, `conversation-send REQUEST.json`,
+`conversation-control REQUEST.json` and `conversation-commit REQUEST.json` use
+ordinary ctl v1 success/error envelopes. Caller files are bounded UTF-8 JSON,
+reject duplicate keys, and carry `contract: "conversation_delivery_v1"`.
+The exact five-field `expected` witness is `conversation_id`, `head_task_id`,
+`generation`, `turn_id`, `ledger_epoch`. A task target names exactly one task; a
+workflow target additionally names its run and activation. Unknown delivery does
+not permit retry with a new identity. An exact retry retains its original intent
+and epoch; expired old-epoch requests refuse before dispatch.
+
+Prepare responses expose `expected`, `closed`,
+`cumulative_issuances`, `accounting`, nullable `runtime_fault`, `progress` and a
+bounded `messages` list. Messages retain verbatim prose, immutable original and
+resolved source identities, sequence, delivery and status. Status is `queued`,
+`claimed`, `consumed`, `unknown` or `cancelled`. Optional destination, receipt,
+interrupt-intent, promotion and cancellation fields describe observed progress;
+claim or native acknowledgement alone is not consumption. Internal native
+session identifiers, launch profiles and process authority are excluded.
+
+Send returns a compact admission receipt: `contract`, `conversation_id`,
+`message_id`, source `task_id`, `resolved_task_id` and current message `status`.
+Native standalone receipts additionally include `delivery` and `sequence`;
+workflow receipts include `workflow_run_id` and `activation_id`. This reply is
+not a full prepare projection and does not prove consumption. Standalone control returns
+`contract`, its separate `request_id`, `message_id`, `operation`, command status,
+source and resolved task IDs, and the durable `control` receipt. Workflow control
+returns `contract`, `workflow_run_id`, `activation_id`, `conversation_id`,
+`operation` and the durable `receipt`. Commit returns `contract`, `request_id`,
+`operation: "commit"` and the existing steering `receipt`. Refresh prepare/status
+to observe subsequent progress instead of inferring it from an admission reply.
+
+An enrolled task's optional `conversation` status field is a bounded readback:
+`contract`, `available`, `conversation_id`, the same `expected` witness, `closed`,
+`progress`, `accounting`, nullable `runtime_fault`, per-status `message_counts`
+and `outstanding_count`. It contains no message bodies. Unavailable readback
+instead reports `available: false`, `code` and nullable `conversation_id`;
+physical task settlement is independent. Progress includes logical response
+identity, phase, native terminal and pending tool/approval/effect counts.
+
+Existing `user_message`, `assistant_delta`, `assistant_text`, tool and usage
+events may carry additive `conversation_generation` and `conversation_turn_id`.
+A subsequent explicit input's `user_message` has source `conversation_delivery`
+and `semantic_consumption: "unknown"`; it records issuance, never a delivery
+receipt. Native streamed block identities keep separate responses distinct.
+No new event kind is introduced.
+
+Known active tools whose cancellation is unqualified refuse Now with
+`tool_interruption_unqualified`. Queue still waits for the entire response.
+Unknown outcomes, stale targets, conflicting request identities and expired
+history use explicit error codes. Neither refusal nor a runtime mismatch falls
+back to Fresh, legacy input injection or process-kill replacement.
+
+`generate-conversation-fixtures.py` produces deterministic ctl specimens from
+actual pure transitions and public projections. Their manifest provenance marks
+synthetic receipts; these are contract fixtures, not provider qualification.
+Integration order is producer specification/fixtures, byte-identical Mac fixture
+vendoring and consumer adapters/version gate, then separate Rust adoption. Mac
+must use ctl and the advertised capability, never read the private ledger.

@@ -979,6 +979,9 @@ def record_retained_control_session(supervisor: Any, activation: dict[str, Any],
 def accept_decision_locked(supervisor, r, node, token, activation, decision, execute, raw, protocol_warnings):
     """Original role acceptance, revalidated inside the tree mutation boundary."""
     w = _w()
+    from .conversation_workflows import guard_outcome
+    if guard_outcome(r, activation['id'], {'summary': raw}) != 'accept':
+        return
     if r.get('poststart', {}).get('ledger', {}).get('intent') is not None:
         raise w.DispatchNotStarted('Poststart settlement holds ordinary root decisions')
     t = next(t for t in r["pending"] if t["id"] == token["id"])
@@ -1155,6 +1158,9 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                         supervisor.attention("Child Resume refused: " + str(exc))
                         return None
             if not outcome:
+                from .conversation_workflows import held as delivery_held
+                if delivery_held(supervisor.run(refresh_atomic=True),activation["id"]):
+                    return None
                 supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed"), "decision_interrupted")
                 return None
             raw = outcome.get("summary") or ""
@@ -1316,6 +1322,9 @@ def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, acti
     from .workflow_poststart import retired
     if retired(run, activation_id, outcome.get('task_id')):
         return
+    from .conversation_workflows import guard_outcome
+    if guard_outcome(run, activation_id, outcome) != 'accept':
+        return
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
     token = next(t for t in run["pending"] if t["id"] == token_id)
     if activation.get("worker_result_required"):
@@ -1431,6 +1440,9 @@ def protocol_repair_eligible(run: dict[str, Any], node: dict[str, Any], activati
 
 
 def prepare_protocol_repair(run: dict[str, Any], node: dict[str, Any], token_id: str, activation_id: str, *, root: Path | None = None) -> None:
+    from .conversation_workflows import held as delivery_held
+    if delivery_held(run,activation_id):
+        return
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
     token = next(t for t in run["pending"] if t["id"] == token_id)
     if not protocol_repair_eligible(run, node, activation):

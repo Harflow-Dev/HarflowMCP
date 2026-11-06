@@ -785,6 +785,11 @@ class Task:
     """Whether this run was spawned with a stdin pipe owned by the bridge for protocol frames only
     (approval answers, Harflow-originated frames) — taken from the run's own `Invocation`. It is
     independent of `live_input`: no inbox forwarding and no user-message delivery."""
+    conversation_context: dict[str, Any] | None = None
+    conversation: dict[str, Any] | None = None
+    conversation_driver: Any = None
+    conversation_responses_issued: int = 0
+    conversation_terminal: dict[str, Any] | None = None
 
     status: Status = "running"
     exit_code: int | None = None
@@ -965,12 +970,14 @@ class Task:
     @layout_operation
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
+        from .conversation_views import describe as conversation_view
         if self.persistence_error is None:
             store.read(self.log_path.parent, self.task_id, include_prompt=False)
         from . import artifacts
         from . import approvals
         denials, denial_categories = classified_denials(get_backend(self.backend), self.acc, self.freedom)
         snap = self.brief() | {
+            **({"conversation": conversation_view(self.log_path.parent, self)} if getattr(self, "conversation", None) is not None else {}),
             "caller_approvals": self.caller_approvals,
             "caller_write_approvals": self.caller_write_approvals,
             "interaction_owner": self.interaction_owner,
@@ -1057,10 +1064,14 @@ class TaskRegistry:
         caller_override: lineage.Caller | None = None,
         monitor_launcher: Callable[[str], Awaitable[int]] | None = None,
         execution_mode: str = "in_process",
+        conversation_launch_factory: Callable[..., Any] | None = None,
     ) -> None:
         if execution_mode not in {"in_process", "supervised"}:
             raise ValueError("Unknown task execution mode")
         self.execution_mode = execution_mode
+        # Internal trusted source/profile qualifier, installed independently in
+        # each launch owner. Never reconstructed from serialized metadata.
+        self._conversation_launch_factory = conversation_launch_factory
         self._attached = {}
         self._tasks: dict[str, Task] = {}
         self._caller_override = caller_override
@@ -1110,6 +1121,17 @@ class TaskRegistry:
         except Exception:
             log.debug("caller detection failed", exc_info=True)
             return None
+
+    def _validate_conversation_request(self, profile: str | None) -> None:
+        if profile is None:
+            return
+        from .backends.conversation import ConversationRefused
+        if type(profile) is not str or profile not in {"native", "shipped-medium35-high"}:
+            raise ConversationRefused("unknown native conversation profile")
+        if self._conversation_launch_factory is None:
+            from .backends.conversation_qualification import ACCEPTED_PROFILES
+            if not ACCEPTED_PROFILES:
+                raise ConversationRefused("no accepted native conversation coding/profile qualification")
 
     async def _detect_caller_detail(self) -> lineage.Detection:
         if self._caller_override is not None:
@@ -1354,6 +1376,7 @@ class TaskRegistry:
         backend: Backend,
         freedom: str = "write_in_repo",
         max_turns: int | None = None,
+        conversation_profile: str | None = None,
         background_idle_seconds: float | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
@@ -1387,6 +1410,7 @@ class TaskRegistry:
 
         `message_ids` are the queued follow-ups a continuation consumed; its `task_started` event
         carries them."""
+        self._validate_conversation_request(conversation_profile)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         if task_id is not None:
@@ -1509,6 +1533,7 @@ class TaskRegistry:
 
         return await self._spawn(
             invocation,
+            conversation_profile=conversation_profile,
             extra_path_grants=grants,
             observe_repos=observe_repos,
             backend=backend,
@@ -1666,6 +1691,7 @@ class TaskRegistry:
         followup_prompt: str | None,
         *,
         max_turns: int | None = None,
+        conversation_profile: str | None = None,
         background_idle_seconds: float | None = None,
         network: bool | None = None,
         task_id: str | None = None,
@@ -1685,10 +1711,11 @@ class TaskRegistry:
         `followup_prompt`, which may be omitted only when something is queued. It is a flag of its
         own, never inferred from `task_id`, which keeps marking supervisor-owned resumes.
         """
+        self._validate_conversation_request(conversation_profile)
         from .task_attachment import AttachedTask
         if isinstance(parent, AttachedTask):
             return await self.resume_record(parent.record(), followup_prompt,
-                max_turns=max_turns, background_idle_seconds=background_idle_seconds,
+                conversation_profile=conversation_profile, max_turns=max_turns, background_idle_seconds=background_idle_seconds,
                 network=network, task_id=task_id, display_prompt=display_prompt,
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
@@ -1786,6 +1813,7 @@ class TaskRegistry:
                         "task instead"
                     )
                 return await self._launch_resume(
+                    conversation_profile=conversation_profile,
                     backend=backend,
                     parent_task_id=parent.task_id,
                     session_id=parent.session_id,
@@ -1847,6 +1875,7 @@ class TaskRegistry:
         title: str | None,
         followup_prompt: str | None,
         max_turns: int | None,
+        conversation_profile: str | None = None,
         effective_network: bool | None,
         caller_approvals: bool,
         caller_write_approvals: bool,
@@ -1945,6 +1974,7 @@ class TaskRegistry:
             spawn_called = True
             task = await self._spawn(
                 invocation,
+                conversation_profile=conversation_profile,
                 extra_path_grants=grants,
                 observe_repos=observe_repos,
                 backend=backend,
@@ -1997,6 +2027,16 @@ class TaskRegistry:
 
     @layout_operation
     async def _spawn(self, invocation: Invocation, **kwargs) -> Task:
+        if invocation.conversation_context is not None:
+            from .backends.conversation import ConversationRefused
+            raise ConversationRefused("serialized conversation context is not launch authority")
+        if kwargs.get("conversation_profile") is None:
+            kwargs.pop("conversation_profile", None)
+        elif self._conversation_launch_factory is None:
+            from .backends.conversation_qualification import ACCEPTED_PROFILES
+            from .backends.conversation import ConversationRefused
+            if not ACCEPTED_PROFILES:
+                raise ConversationRefused("no accepted native conversation coding/profile qualification")
         # Disabled is the legacy execution shape; the prepared owner has no source from which
         # to inherit, so omission preserves old launch fingerprints without changing policy.
         if kwargs.get("group_report_output") is False:
@@ -2025,6 +2065,7 @@ class TaskRegistry:
         invocation: Invocation,
         *,
         shared_hold: shared_scratch.Hold,
+        conversation_profile: str | None = None,
         scratch_chain_id: str | None = None,
         shared_caller: str | None = None,
         extra_path_grants: tuple = (),
@@ -2079,6 +2120,9 @@ class TaskRegistry:
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
         from .background_idle import resolve
+        if invocation.conversation_context is not None:
+            from .backends.conversation import ConversationRefused
+            raise ConversationRefused("prepared conversation metadata requires owner-side requalification")
         background_idle_seconds = resolve(background_idle_seconds)
         from . import group_report_output as report_output
         group_report_output = report_output.effective(group_report_output)
@@ -2250,8 +2294,21 @@ class TaskRegistry:
             # Refuse malformed ambient Git config before allocating any scratch folders.
             from .state_layout import child_environment
             git_environment.configure({**child_environment(self.state_layout), **invocation.env}, git_https_rewrite)
+            conversation_policy = dict(freedom=freedom, network=network, prompt=prompt, repo_path=repo_path,
+                                       task_id=task_id, model=model, reasoning_effort=reasoning_effort,
+                                       max_turns=max_turns)
+            conversation_preflight = None
+            conversation_factory = self._conversation_launch_factory
+            if conversation_profile is not None:
+                from .conversation_task_transport import QualifiedConversationFactory
+                if conversation_factory is None:
+                    conversation_factory = QualifiedConversationFactory(self, profile_name=conversation_profile)
+            if conversation_factory is not None:
+                from .conversation_task_transport import preflight
+                conversation_preflight = await preflight(self, backend, invocation, conversation_policy, factory=conversation_factory)
             task_scratch = None
             allocation = None
+            conversation_attachment = None
             try:
                 scratch_allowed = not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)())
                 task_granted = False
@@ -2305,6 +2362,20 @@ class TaskRegistry:
                     from .merge_gate import apply_path, install, needs_gate
                     if needs_gate(allowed_commands):
                         apply_path(spawn_env, install(self._log_dir, task_id))
+
+                # Convert only the final validated execution profile. The
+                # trusted owner factory may refuse unmapped grants; it cannot
+                # erase them or turn serialized context into authority.
+                if conversation_factory is not None:
+                    from .conversation_task_transport import prepare
+                    from .conversation_managed_paths import from_allocation
+                    conversation_policy['managed_paths'] = from_allocation(
+                        self.state_layout, task_id, allocation, invocation)
+                    conversation_attachment = prepare(self, backend, invocation,
+                        conversation_policy, conversation_preflight, factory=conversation_factory)
+                    if conversation_attachment is not None:
+                        invocation = conversation_attachment.launch.invocation
+                        spawn_env.update(invocation.env)
 
             except BaseException:
                 shared_hold.release()
@@ -2375,7 +2446,7 @@ class TaskRegistry:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 cwd=str(repo_path),
-                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") or invocation.control_pipe else asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") or invocation.control_pipe or invocation.conversation_context is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=STREAM_LINE_LIMIT,
@@ -2448,13 +2519,13 @@ class TaskRegistry:
             group=group,
             title=title,
             lineage_detected=lineage_detected,
-            live_input=invocation.live_input,
+            live_input=invocation.live_input and invocation.conversation_context is None,
             control_pipe=invocation.control_pipe,
             background_idle_seconds=background_idle_seconds,
             # A live run owes one result for its initial prompt — plus, on a backend where each
             # written line is its own turn, one more per message the pump writes (see
             # `_note_input_written`). Non-live runs owe nothing: no pump ever runs for them.
-            results_owed=1 if invocation.live_input else 0,
+            results_owed=1 if invocation.live_input and invocation.conversation_context is None else 0,
         )
         if caller_approvals or allowed_commands:
             from .backends.qualification import identity_for
@@ -2471,6 +2542,31 @@ class TaskRegistry:
         # Written before anything can go wrong, so even a task whose server dies immediately is
         # discoverable by whichever process comes next.
         try:
+            if conversation_attachment is not None:
+                from .conversation_task_transport import bind
+                self._tasks[task_id] = task
+                try:
+                    bind(self, task, conversation_attachment)
+                except StateOwnershipError:
+                    raise
+                except Exception:
+                    # No initial native input has been issued. Still supervise
+                    # the spawned process through actual exit/drain rather than
+                    # leaking it when durable owner admission raced/refused.
+                    task.acc.is_error = True
+                    task.bridge_notices.append("Conversation owner binding failed before initial input; native outcome is unknown.")
+                    self._tasks[task_id] = task
+                    shared_hold.release()
+                    self.persist(task)
+                    for drain, name in [(_drain_stdout, f"harflow-stdout-{task_id}"),
+                                        (_drain_stderr, f"harflow-stderr-{task_id}")]:
+                        task.watchers.append(owned_job(self.state_layout, drain(task, self), name=name))
+                    task.monitor = owned_job(self.state_layout, _monitor(task, self), name=f"harflow-monitor-{task_id}")
+                    task.monitor.add_done_callback(lambda done: _close_events_after_writers(task))
+                    if (task._process_owner_pid == os.getpid() and task.proc is proc
+                            and proc.returncode is None and task.pgid == proc.pid):
+                        _signal_group(task, signal.SIGKILL)
+                    raise
             self.persist(task)
             # Durable now: from here a cleaner sees this task's record, so the per-folder locks end.
             shared_hold.release()
@@ -2484,6 +2580,11 @@ class TaskRegistry:
             task.monitor.add_done_callback(lambda done: _close_events_after_writers(task))
         except StateOwnershipError:
             _stop_failed_drainer(task)
+            if conversation_attachment is not None and not task.watchers:
+                from .conversation_task_transport import reap_failed_launch
+                cleanup = asyncio.create_task(reap_failed_launch(task), name=f"harflow-conversation-failed-launch-{task_id}")
+                self._control_jobs.add(cleanup)
+                cleanup.add_done_callback(self._control_jobs.discard)
             _close_events_after_writers(task)
             raise
 
@@ -2531,7 +2632,10 @@ class TaskRegistry:
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
         try:
-            if invocation.stdin_mode == "pipe_once":
+            if task.conversation_driver is not None:
+                task.pump = task.conversation_driver.start(task_factory=lambda coro, name:
+                    owned_job(self.state_layout, coro, name=f"{name}-{task_id}"))
+            elif invocation.stdin_mode == "pipe_once":
                 self._write_initial_input(task, invocation.initial_input or b"")
                 try:
                     await self._flush_stdin(task)
@@ -2569,6 +2673,9 @@ class TaskRegistry:
         # runs — `persist` always rebuilds from the in-memory `Task`, so this stays consistent with
         # whatever the monitor last wrote rather than clobbering it with stale spawn-time data.
         try:
+            if task.conversation_driver is not None:
+                from .conversation_task_transport import publish_source_profile
+                publish_source_profile(self, task)
             self.persist(task)
         except StateOwnershipError:
             _stop_failed_drainer(task)
@@ -3360,6 +3467,8 @@ class TaskRegistry:
         `task_finished`. That close is itself bounded (`EXIT_CLOSE_GIVE_UP_SECONDS`), so this waits
         for it; `PUMP_STOP_GRACE_SECONDS` only backstops a pump that is stuck somewhere else.
         Called by `_monitor` after the process exits."""
+        if task.conversation_driver is not None:
+            task.conversation_driver.eof()
         if task.caller_approvals:
             from . import approvals
             try:
@@ -3456,6 +3565,8 @@ class TaskRegistry:
             store.TaskRecord(
                 task_id=task.task_id,
                 backend=task.backend,
+                conversation=dict(task.conversation) if getattr(task, "conversation", None) is not None else None,
+                native_output=getattr(task, "conversation_driver", None) is not None,
                 session_id=task.session_id,
                 repo_path=str(task.repo_path),
                 freedom=task.freedom,
@@ -4582,6 +4693,7 @@ class TaskRegistry:
         followup_prompt: str | None,
         *,
         max_turns: int | None = None,
+        conversation_profile: str | None = None,
         background_idle_seconds: float | None = None,
         network: bool | None = None,
         task_id: str | None = None,
@@ -4595,6 +4707,7 @@ class TaskRegistry:
         fetch: bool | list[str] | None = None, fetch_required: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
+        self._validate_conversation_request(conversation_profile)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         if followup_prompt is None and not consume_followups:
@@ -4690,6 +4803,7 @@ class TaskRegistry:
                         "task instead"
                     )
                 return await self._launch_resume(
+                    conversation_profile=conversation_profile,
                     backend=backend,
                     parent_task_id=record.task_id,
                     session_id=record.session_id,
@@ -5145,6 +5259,12 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             if event is None:
                 task.acc.unparsable_lines += 1
                 continue
+            if task.conversation_driver is not None:
+                # Raw output is already retained above. Native conversation
+                # correlation/normalization belongs to its dedicated driver,
+                # never the legacy mid-turn input or caller-approval pump.
+                task.conversation_driver.observe(event)
+                continue
             # Native lifecycle persistence is authoritative and intentionally
             # precedes best-effort normalization. Failure invalidates native
             # settlement and stops the owning transport. Draining continues so
@@ -5251,6 +5371,8 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
         # Nobody is reading the pipe any more, so the run would hang forever. End it instead.
         _signal_group(task, signal.SIGKILL)
     finally:
+        if task.conversation_driver is not None:
+            task.conversation_driver.eof()
         try:
             if handle is not None:
                 try:
@@ -5532,8 +5654,21 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                                 log.warning('Native final observation barrier failed for %s', task.task_id, exc_info=True)
                     _release_task_resources(registry, task)
                     _touch_shared_scratch(registry, task)
+                    from .conversation_runtime import owns as conversation_owns
+                    conversation_unavailable = False
+                    try:
+                        conversation_owned = conversation_owns(registry, task)
+                    except StateOwnershipError:
+                        raise
+                    except Exception:
+                        # Uncertain delivery ownership suppresses all continuation,
+                        # but cannot discard observed physical exit/drain evidence.
+                        conversation_owned = True
+                        conversation_unavailable = True
+                        task.bridge_notices.append('Conversation state unavailable; automatic delivery is blocked. Reconcile before sending more input.')
+                        log.warning('task %s: conversation settlement ownership unavailable', task.task_id, exc_info=True)
                     launch_generation = getattr(registry, '_launch_generations', {}).get(task.task_id)
-                    if launch_generation and task.auto_continue and task.output_drained:
+                    if launch_generation and not conversation_owned and task.auto_continue and task.output_drained:
                         from .task_supervision import mark
                         mark(registry.log_dir, task.task_id, launch_generation,
                              continuation_scheduling='pending')
@@ -5557,7 +5692,13 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                             task.bridge_notices.append("Final task output file unavailable; use the task summary. Existing output files are never overwritten.")
                             registry.persist(task)
                             log.warning("task %s: output materialization unavailable", task.task_id, exc_info=True)
-                    if task.auto_continue and task.output_drained and task.latest_record_landed:
+                    # Only explicitly enrolled conversation_delivery_v1 ledgers use this
+                    # route. Its settlement owner drains one same-session response;
+                    # legacy follow-ups retain their explicit-consumption semantics.
+                    from .conversation_runtime import schedule_settled
+                    if conversation_owned and not conversation_unavailable:
+                        schedule_settled(registry, task)
+                    if not conversation_owned and task.auto_continue and task.output_drained and task.latest_record_landed:
                         from .task_continuation import schedule_automatic
                         schedule_automatic(registry, task)
                     else:
@@ -5702,6 +5843,12 @@ def _classify(task: Task, exit_code: int) -> Status:
     if task.drain_failed:
         # We stopped reading its output, so whatever the agent reported cannot be trusted.
         return "failed"
+    conversation_driver = getattr(task, "conversation_driver", None)
+    if conversation_driver is not None:
+        # Native response termination is distinct from physical settlement. The
+        # monitor calls this only after the actual exit/drain path; the port
+        # additionally refuses success with unresolved controls or tool effects.
+        return conversation_driver.port.classify(exit_code)
     if task.live_input and task.acc.result_count < task.results_owed:
         # Messages were written that the stream never answered: on a backend where each one is
         # its own turn, the run exiting after the first of several owed results leaves turns

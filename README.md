@@ -202,3 +202,6 @@ Messages to tasks, workflow runs and workflow nodes queue by default, preserving
 Use `send_message(..., delivery="now")` or `harflow-ctl send TASK TEXT --delivery now` to request
 immediate continuation; unsafe interruption returns a reason and leaves the message queued.
 See [queued messaging](docs/contracts.md#queued-task-and-workflow-messaging).
+The negotiated [conversation delivery contract](docs/conversation-delivery.md)
+defines automatic response-boundary Queue and native Now. Its qualified launch
+profiles are separate from legacy follow-up messages.

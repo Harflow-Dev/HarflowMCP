@@ -287,7 +287,11 @@ async def _run_builder_turn_owned(supervisor, run_id):
                               and record.network == current.get("network") and record.workflow_builder)
             if compatible:
                 try:
-                    task = await supervisor.registry.resume_record(record, prompt, max_turns=issuance["harness_turn_cap"], task_id=issuance["task_id"], display_prompt=issuance["text"], workflow_builder=True, require_unchanged_session=True, network=current.get("network"))
+                    from .conversation_workflows import commit_profile_options
+                    profile_options=commit_profile_options(supervisor.run(refresh_atomic=True), issuance)
+                    from .conversation_workflows import bind_commit_input
+                    bind_commit_input(supervisor,issuance,prompt,profile_options,issuance["harness_turn_cap"])
+                    task = await supervisor.registry.resume_record(record, prompt, **profile_options, max_turns=issuance["harness_turn_cap"], task_id=issuance["task_id"], display_prompt=issuance["text"], workflow_builder=True, require_unchanged_session=True, network=current.get("network"))
                 except SessionUnknownError:
                     if not issuance["allow_fresh_context"]:
                         raise
@@ -323,6 +327,9 @@ async def _run_builder_turn_owned(supervisor, run_id):
         return
     observed = {**snapshot, **{flag: snapshot.get(flag, False) for flag in ("output_drained", "timed_out", "outcome_unknown", "is_error")}}
     failure = captured_failure(observed, issuance["task_id"])
+    from .conversation_workflows import commit_context_mismatch
+    if commit_context_mismatch(supervisor.run(refresh_atomic=True),issuance,snapshot):
+        failure='steering_source_unavailable'
     if snapshot.get("task_id") != issuance["task_id"] or failure == "capture_unknown":
         _settle(supervisor, tid, snapshot, failure="capture_unknown", unknown=True)
         return

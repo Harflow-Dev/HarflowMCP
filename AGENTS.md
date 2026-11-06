@@ -217,7 +217,13 @@ Server restarts and recovered runs are explained in "When the client restarts th
 - Queued follow-ups for tasks without live input (`followups.py`) are a separate ledger that never
   touches the inbox, its flock or the close protocol. Follow-ups are consumed only via the
   explicit `consume_followups` flag, never inferred from `task_id`; automatic continuations and
-  workflow resumes never consume.
+  workflow resumes never consume. The separately negotiated
+  `conversation_delivery_v1` ledger has a narrow exception: its settlement owner
+  may issue one claimed message as a `queue_drain` response in the same native
+  conversation. That route never consumes this legacy follow-up ledger and never
+  substitutes a Fresh automatic continuation. Persist its destination before
+  issuance; native acceptance alone is not consumption, and unknown delivery
+  never authorizes replay.
 - Lock order: session lock (or the `continuation-<root>` chain lock), then the nonblocking `<id>.launch.lock`, `<id>.lock` and
   `<id>.followups.lock`; never the reverse. A deadlock-free order is the only thing keeping
   takeover, resume and retention from stalling each other.

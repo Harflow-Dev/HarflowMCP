@@ -199,9 +199,11 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "observe_repos", "git_https_rewrite", "group_report_output", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "observe_repos", "git_https_rewrite", "group_report_output", "fallbacks", "conversation_profile"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
+    if 'conversation_profile' in candidate and candidate['conversation_profile'] not in ('native','shipped-medium35-high'):
+        raise WorkflowError('conversation_profile must be native or shipped-medium35-high')
     if not isinstance(candidate.get("fallbacks", []), list):
         raise WorkflowError("Fallbacks must be an ordered array")
     backend = backends.get(candidate.get("backend", ""))
@@ -1376,6 +1378,8 @@ class WorkflowStore:
                 if held(run):
                     raise SteeringError("steering_active", "Conversation hold blocks ordinary recovery")
             mutator(run)
+            from .conversation_workflows import compact_conversations
+            compact_conversations(run)
             if event != "steering_replan_history_compacted":
                 semantic_changed(steering_before, run)
             if event.startswith("control:") and "steering" in run and run.get("kind") != "builder":
@@ -1383,6 +1387,8 @@ class WorkflowStore:
                 run["steering"]["checkpoint_revision"] += 1
             if event == "builder_draft_applied" and isinstance(detail, dict):
                 preview_witness(run, detail["task_id"])
+                from .conversation_workflows import own_builder_preview_applied
+                own_builder_preview_applied(run,detail["task_id"])
             from .workflow_messages import reconcile as reconcile_messages
             reconcile_messages(run)
             if attention_before[0] in {"needs_input", "needs_attention", "paused", "failed"} and run.get("status") in {"running", "building", "starting", "pending"}:
@@ -2161,8 +2167,10 @@ class WorkflowStore:
     @layout_operation
     def pinned_tasks(self) -> set[str]:
         pinned: set[str] = set()
+        from .conversation_delivery import protects_retention as conversation_pins
         for r in self.list_runs():
-            active = r["status"] not in TERMINAL or r.get("settling") or any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"])
+            conversation_pending=any(conversation_pins(b['state']) for b in r.get('steering',{}).get('conversation_delivery',{}).values())
+            active = conversation_pending or r["status"] not in TERMINAL or r.get("settling") or any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"])
             link = r.get("parent_link") or {}
             if not active and link:
                 # Every run in an active tree keeps its tasks pinned.
@@ -2717,6 +2725,8 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
     run_id = owner["workflow_run_id"]
     draft = validate_builder_preview(definition, storage.get_run(run_id)["name"])
     def apply(r: dict[str, Any]) -> None:
+        from .conversation_workflows import guard_preview
+        guard_preview(r, caller.record.task_id)
         current = r["activations"][-1] if r["activations"] else None
         record = task_store.read(storage.root / "tasks", caller.record.task_id)
         if r["kind"] != "builder" or r["status"] != "running" or not current or current["id"] != owner["activation_id"] or current["role"] != "builder" or current["status"] != "running" or not current["tasks"] or current["tasks"][-1]["task_id"] != caller.record.task_id or current["tasks"][-1]["status"] not in {"reserved", "running"} or record is None or record.status != "running":
@@ -3681,13 +3691,13 @@ class WorkflowSupervisor:
                         if use_resume:
                             parent = self.registry.get(previous["task_id"])
                             if parent:
-                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}), **git_launch)
+                                task = await self.registry.resume(parent, dispatch_prompt, **({"conversation_profile": candidate["conversation_profile"]} if "conversation_profile" in candidate else {}), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}), **git_launch)
                             else:
                                 from .task_supervision import read_task_record
                                 record = read_task_record(self.registry._log_dir, previous["task_id"])
                                 if record is None:
                                     raise SessionUnknownError("Previous resume session is unavailable")
-                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}), **git_launch)
+                                task = await self.registry.resume_record(record, dispatch_prompt, **({"conversation_profile": candidate["conversation_profile"]} if "conversation_profile" in candidate else {}), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}), **git_launch)
                         else:
                             if role == "builder":
                                 latest = self.run(refresh_atomic=True)
@@ -3698,7 +3708,7 @@ class WorkflowSupervisor:
                                 context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"observe_repos": list(candidate["observe_repos"])} if "observe_repos" in candidate else {}), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}", **git_launch)
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"observe_repos": list(candidate["observe_repos"])} if "observe_repos" in candidate else {}), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), **({"conversation_profile": candidate["conversation_profile"]} if "conversation_profile" in candidate else {}), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}", **git_launch)
                         if retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store):
                             return None
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
@@ -3713,6 +3723,9 @@ class WorkflowSupervisor:
                 if retired_execution(self.run(refresh_atomic=True), activation["id"], task_id, storage=self.store):
                     return None
                 self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"]), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
+                from .conversation_workflows import drain_observed
+                if await drain_observed(self, task, node, role, activation, reservation, snapshot):
+                    return None
                 if strict_child_resume and snapshot.get("session_id") != inherited["source_session_id"]:
                     child_resume_refused("Child Resume did not confirm the selected conversation identity; explicit Fresh selection required")
                     return None
@@ -4058,6 +4071,9 @@ class WorkflowSupervisor:
                 a = self._activation(node["id"], "orchestrator", token)
                 outcome = await self._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", a)
                 if not outcome:
+                    from .conversation_workflows import held as delivery_held
+                    if delivery_held(self.run(refresh_atomic=True),a['id']):
+                        return None
                     self.update(lambda rr: next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="failed"), "decision_interrupted")
                     return None
                 try:
@@ -4093,6 +4109,9 @@ class WorkflowSupervisor:
                             if node.get("role") != "implementation" or update["task_id"] not in token.get("completed_task_ids", []):
                                 raise WorkflowError("Task completion requires implementation evidence")
                     def record_decision(rr: dict[str, Any]) -> None:
+                        from .conversation_workflows import guard_outcome
+                        if guard_outcome(rr, a['id'], outcome) != 'accept':
+                            return
                         rr["decisions"].append({**decision, "node_id": node["id"], "activation_id": a["id"], "selected_join_id": selected_join})
                         next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="completed")
                         if action in {"continue", "complete"}:
@@ -4329,6 +4348,9 @@ class WorkflowSupervisor:
                 self.attention(f"Invalid {node['role']} result: {exc}")
                 return
         def finish(rr: dict[str, Any]) -> None:
+            from .conversation_workflows import guard_outcome
+            if guard_outcome(rr, a['id'], result) != 'accept':
+                return
             next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="completed", result=_bounded(result))
             next(t for t in rr["pending"] if t["id"] == token["id"]).update(execution_complete=True, execution_activation_id=a["id"], result=_bounded(result), completed_task_ids=completed_ids)
         self.update(finish, "node_result_ready", a["id"])
@@ -4535,6 +4557,9 @@ class WorkflowSupervisor:
                     busy = len([tid for tid in active if tid not in self.tree.executing_children])
                     recovering_tokens = {(a.get("token") or {}).get("id") for a in run["activations"] if a.get("invocation") or any(t.get("status") in {"reserved", "running", "uncertain"} for t in a["tasks"])}
                     for token in sorted(run["pending"], key=lambda t: t["id"] not in recovering_tokens):
+                        from .conversation_workflows import scheduling_blocked as delivery_blocked
+                        if delivery_blocked(run,token):
+                            continue
                         from .orchestrator_steering import scheduling_held
                         from .steering_lifecycle import scheduling_blocked
                         from .workflow_poststart import blocked_token
@@ -4701,6 +4726,13 @@ class WorkflowSupervisor:
             from .workflow_builder_finalization import finish_ordinary_builder
             finish_ordinary_builder(self, a, result)
         def stop(r: dict[str, Any]) -> None:
+            from .conversation_workflows import held as delivery_held
+            from .conversation_workflows import _bindings
+            from .workflow_steering import held as any_steering_held, pending_turn
+            if a['id'] in _bindings(r) and any_steering_held(r) and r['status'] not in {'cancelled','cancelling'}:
+                if pending_turn(r) is None:
+                    r.update(status='paused',attention_reason='Conversation response awaits an explicit framed result')
+                return
             next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed" if r["status"] == "completed" else "failed")
             if r["status"] == "cancelling":
                 if any(t["status"] in {"reserved", "running", "uncertain"} for activation in r["activations"] for t in activation["tasks"]):
@@ -4712,6 +4744,8 @@ class WorkflowSupervisor:
 
 def _candidate_key(candidate: dict[str, Any]) -> str:
     signature = {k: candidate.get(k) for k in ("backend", "model", "reasoning_effort", "max_turns")}
+    if "conversation_profile" in candidate:
+        signature["conversation_profile"] = candidate["conversation_profile"]
     if candidate.get("caller_approvals", False):
         signature["caller_approvals"] = True
     if candidate.get("caller_write_approvals", False):

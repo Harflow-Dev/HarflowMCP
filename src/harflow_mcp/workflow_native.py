@@ -52,7 +52,9 @@ async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str
     from .workflows import run_effective_freedom, _candidate_key
     run = supervisor.run()
     refuse = None
-    if run.get("scheduling_policy") != POLICY:
+    if node.get('agent',{}).get('conversation_profile') is not None:
+        refuse = 'Selected conversation profile requires its own headless native owner; native child control cannot substitute it'
+    elif run.get("scheduling_policy") != POLICY:
         refuse = "Historical runs retain their original scheduling policy"
     elif run.get("execution_contract") != "delegation" or run.get("runner_policy") != "guided":
         refuse = "Native execution requires a guided managed orchestrator"
@@ -66,6 +68,8 @@ async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str
     override = getattr(supervisor, "orchestrator_override", None)
     if override is not None:
         owner_run = supervisor.store.get_run(override[0])
+    if (owner_run.get('orchestrator_config') or owner_run['definition']['orchestrator']).get('conversation_profile') is not None:
+        return 'Native conversation owner cannot become a native child control transport; preserving the selected headless profile'
     owner = owner_run.get("sessions", {}).get("orchestrator", {})
     record = task_store.read(supervisor.registry._log_dir, owner.get("task_id", "")) if owner.get("task_id") else None
     if record is None or record.status != "completed" or not record.session_id or record.repo_path != run["repo_path"]:

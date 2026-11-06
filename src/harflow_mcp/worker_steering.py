@@ -144,8 +144,22 @@ def validate_turn(turn, run):
             _id(item[key], "worker boundary " + key)
         _require(item["workflow_run_id"] == turn["target"]["workflow_run_id"] and item["activation_id"] == turn["target"]["activation_id"], "worker boundary scope")
     _require(turn["boundary_task_id"] == (boundary[-1]["task_id"] if boundary else None), "worker primary boundary")
-    if turn.get("previous_session") is not None or turn.get("allow_fresh_context") is not True:
-        raise ValueError("Worker steering requires explicitly consented finite Fresh response")
+    previous=turn.get('previous_session')
+    if previous is not None or turn.get('allow_fresh_context') is not True:
+        binding=run.get('steering',{}).get('conversation_delivery',{}).get(turn['target']['activation_id'])
+        if binding is None and turn['state']=='settled' and turn.get('outcome')=='committed':
+            from .conversation_workflows import _retired
+            retired=_retired(run,turn['target']['activation_id'])
+            if retired:
+                binding={'steering_episode_id':retired['steering_episode_id'],'state':{'head_task_id':retired['head_task_id'],'native_context_id':retired['native_context_id']}}
+            elif turn.get('conversation_commit_input'):
+                proof=turn['conversation_commit_input']
+                binding={'steering_episode_id':turn['episode_id'],'state':{'head_task_id':proof['source_task_id'],'native_context_id':proof['source_session_id']}}
+        if (turn.get('allow_fresh_context') is not False or previous is None or not binding
+                or binding.get('steering_episode_id')!=turn['episode_id']
+                or previous['task_id']!=binding['state']['head_task_id']
+                or previous['session_id']!=binding['state']['native_context_id']):
+            raise ValueError('Worker same-session commit lacks exact conversation episode link')
 
 
 def admission(storage, root, request):
@@ -166,8 +180,14 @@ def admission(storage, root, request):
     latest = tasks[-1]
     if latest.get("execution_kind") == "native_subagent":
         raise SteeringError("steering_budget_unsupported", "Native worker lacks qualified finite per-response cap")
-    if not request.get("allow_fresh_context"):
-        raise SteeringError("steering_budget_unsupported", "Resume per-response scope is unqualified; explicitly consent to Fresh context")
+    previous=None
+    if not request.get('allow_fresh_context'):
+        from .conversation_workflows import same_session_commit_source
+        source=same_session_commit_source(root,a['id'])
+        if source is None or source.task_id!=latest['task_id'] or not source.session_id:
+            raise SteeringError('steering_budget_unsupported','Same-session commit requires an exact physically settled conversation source')
+        from .workflows import _candidate_key
+        previous={'candidate':'orchestrator:'+_candidate_key(latest['candidate']),'task_id':source.task_id,'session_id':source.session_id}
     candidate = copy.deepcopy(latest["candidate"])
     from .tasks import get_backend
     if not get_backend(candidate["backend"]).capabilities.supports_turn_cap:
@@ -178,7 +198,7 @@ def admission(storage, root, request):
             raise SteeringError("steering_delivery_unknown", "Existing worker generation requires positive settlement")
         if task["status"] in ACTIVE:
             boundary.append({"workflow_run_id": run["workflow_run_id"], "activation_id": a["id"], "task_id": task["task_id"]})
-    return candidate, None, boundary, run["workflow_run_id"]
+    return candidate, previous, boundary, run["workflow_run_id"]
 
 
 def claim(storage, root, turn):

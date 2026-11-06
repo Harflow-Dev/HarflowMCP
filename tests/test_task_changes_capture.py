@@ -628,6 +628,7 @@ def test_continuations_are_launched_as_their_own_supervised_processes(world, mon
     owner. That owner's `run()` carries the capture hook, so a continuation is captured by its own
     supervisor after it settles; the parent's `registry._continuations` jobs only await the launch."""
     from harflow_mcp import disk_space, task_supervision
+    from harflow_mcp.backends.base import Invocation
     from harflow_mcp.tasks import TaskRegistry
     launched = []
 
@@ -637,7 +638,7 @@ def test_continuations_are_launched_as_their_own_supervised_processes(world, mon
     monkeypatch.setattr(task_supervision, "launch", fake_launch)
     monkeypatch.setattr(disk_space, "check_launch_space", lambda *a, **k: None)
     registry = TaskRegistry(log_dir=world.tasks, execution_mode="supervised")
-    assert asyncio.run(registry._spawn(object(), repo_path=world.root, continuation_of_task_id="parent")) == "child"
+    assert asyncio.run(registry._spawn(Invocation(["supervised-fixture"]), repo_path=world.root, continuation_of_task_id="parent")) == "child"
     assert launched == ["parent"]
     assert "execution_mode == \"supervised\"" in inspect.getsource(TaskRegistry._spawn)
     assert "_execute_prepared" not in inspect.getsource(TaskRegistry._spawn).split("supervised")[1].split("return await launch")[0]
@@ -1020,16 +1021,20 @@ def test_a_whole_listing_is_unchanged_by_partial_parsing():
 
 
 @pytest.mark.parametrize("keep", [30, 60, 83, 85, 95, 140])
-def test_a_listing_cut_by_the_deadline_keeps_its_rows_and_the_cause(repo, world, monkeypatch, keep):
-    path, base = repo
-    tip = commit(path, "many", **{f"file{index}": "x\n" for index in range(6)})
-    script = world.root / "cut.sh"
-    script.write_text(f'#!/bin/sh\ncase "$*" in *" --raw "*) git "$@" | head -c {keep}; sleep 5; exit 0;; esac\nexec git "$@"\n')
-    script.chmod(0o755)
-    monkeypatch.setattr(capture, "GIT", (str(script),))
-    committed = scopes(build([entry(path, base, tip)], budget_seconds=0.8))["committed_range"]
+def test_a_listing_cut_by_the_deadline_keeps_its_rows_and_the_cause(keep):
+    # Inject the runner's partial result at the listing boundary. A wall-clock
+    # deadline can otherwise expire during Git setup before any listing starts.
+    # Process termination itself is exercised by the separate _run tests.
+    class PartialListing:
+        def collect(self, argv):
+            assert argv == ["raw-listing"]
+            return _RAW[:keep], capture._Result(None, "capture_timeout")
+    committed = capture._diff_scope(PartialListing(), capture._Budget(0),
+        ["raw-listing"], ["statistics-must-not-run"], ["patch-must-not-run"],
+        untracked=None, working_tree=False)
     assert (committed["state"], committed["reason"]) == ("incomplete", "capture_timeout")
     assert committed["rows_truncated"] is True
+    assert [capture_row_path(row) for row in committed["rows"]] == (["one"] if keep >= _FIRST else [])
     assert all(row["content"]["reason"] == "capture_timeout" for row in committed["rows"])
 
 

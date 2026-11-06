@@ -152,6 +152,10 @@ class TaskRecord:
     """Execution/output-capture owner, distinct from the agent and responding server."""
     dispatch_origin: dict[str, Any] | None = None
     """Server process that requested execution; absent on older task records."""
+    conversation: dict[str, Any] | None = None
+    """Descriptive native delivery linkage, never launch or interruption authority."""
+    native_output: bool = False
+    """Presentation grammar marker, including sealed responses without a delivery ledger."""
     base_commit: str | None = None
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran — None if the repo had no
     commit yet, or the probe failed or timed out."""
@@ -964,7 +968,11 @@ def _resolve(
             False,
         )
 
-    state, tail = (_replay_provider or replay_log)(log_dir, record.task_id, record.backend)
+    if record.conversation is not None or record.native_output:
+        from .conversation_readback import replay as native_readback
+        state, tail = native_readback(log_dir, record)
+    else:
+        state, tail = (_replay_provider or replay_log)(log_dir, record.task_id, record.backend)
     if record.failure_diagnostic is not None:
         state.failure_diagnostic = record.failure_diagnostic
     if record.input_after_result is not None and state.result_count <= record.input_after_result:
@@ -1136,6 +1144,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, responding_server=None, ctl_observation: bool = False, parent_observer=None) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts, recovery_activity
+    from .conversation_views import describe as conversation_view
     from .phase_slots import task_view
     qualified = read(log_dir, record.task_id, include_prompt=False)
     if qualified is None:
@@ -1189,6 +1198,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "pending_messages": pending,
         "queued_followups": queued_followups,
         "queued_followup_count": followups.count_outstanding(queued_followups),
+        **({"conversation": conversation_view(log_dir, record)} if record.conversation is not None else {}),
         **({"prompt_source": record.prompt_source, "prompt_truncated": record.prompt_truncated, **({"prompt_error": record.prompt_error} if record.prompt_error else {})} if record.prompt_source or record.prompt_error else {}),
         "task_id": record.task_id,
         **supervision_fields,

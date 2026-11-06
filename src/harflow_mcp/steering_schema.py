@@ -127,6 +127,14 @@ def _observation(turn):
 
 def validate_ledger(value, run):
     required = set("schema_version control_revision checkpoint_revision sequence episodes requests turns commits history owner".split())
+    if type(value) is dict and "conversation_delivery" in value:
+        required.add("conversation_delivery")
+        from .conversation_workflows import validate_bindings
+        validate_bindings(value["conversation_delivery"], run)
+    if type(value) is dict and 'conversation_retention' in value:
+        required.add('conversation_retention')
+        from .conversation_workflows import validate_retention
+        validate_retention(value['conversation_retention'],run)
     modern = type(value) is dict and value.get("schema_version") == 2
     if modern:
         from .steering_window import WINDOW_FIELDS
@@ -178,8 +186,15 @@ def validate_ledger(value, run):
     per_episode = {}
     for turn in value["turns"]:
         required_turn = set("turn_id task_id episode_id request_id state target commit_target commit_target_ref candidate text created_at allow_fresh_context usage previous_session steering_revision preview_receipts harness_turn_cap boundary_task_id".split())
-        optional = {"revoked_by_replan_id", "witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id", "response_deadline"}
+        optional = {"revoked_by_replan_id", "witness_stale", "observation", "final", "final_loss", "outcome", "dispatch_error", "not_started", "boundary_tasks", "session_owner_run_id", "handoff", "action_commit", "context_delivery", "observed_task_id", "response_deadline", "conversation_commit_input"}
         _require(required_turn <= set(turn) and not set(turn) - required_turn - optional, "turn fields")
+        if 'conversation_commit_input' in turn:
+            proof=turn['conversation_commit_input']
+            _require(type(proof) is dict and set(proof)=={'sha256','bytes','source_task_id','source_session_id','cap','profile_name'},'commit input proof')
+            _require(type(proof['sha256']) is str and re.fullmatch(r'[a-f0-9]{64}',proof['sha256']),'commit prompt digest')
+            _counter(proof['bytes'],'commit prompt bytes',True);_counter(proof['cap'],'commit response cap',True)
+            _require(proof['bytes']<=1024*1024 and proof['cap']<=turn['harness_turn_cap'] and proof['profile_name'] in {'native','shipped-medium35-high'},'commit input bounds')
+            _id(proof['source_task_id'],'commit source task');_id(proof['source_session_id'],'commit source session')
         _id(turn["turn_id"], "turn_id"); _id(turn["task_id"], "task_id")
         _require(turn["turn_id"] not in turns and turn["task_id"] not in tasks, "duplicate turn/task")
         turns[turn["turn_id"]] = turn; tasks.add(turn["task_id"])

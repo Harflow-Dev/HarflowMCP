@@ -11,6 +11,7 @@ branches on a backend's name.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -87,8 +88,19 @@ class Invocation:
     allowed_commands_version: str | None = None
     native_settings: dict[str, Any] | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    # Descriptive native conversation transport metadata. The launch owner separately
+    # validates/qualifies the original Invocation; this mapping is never grant authority.
+    # Independent of control_pipe: the dedicated conversation pump owns stdin.
+    conversation_context: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.conversation_context is not None:
+            try:
+                if type(self.conversation_context) is not dict or json.loads(json.dumps(
+                        self.conversation_context, allow_nan=False)) != self.conversation_context:
+                    raise ValueError("conversation_context requires JSON-safe mapping")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("conversation_context requires JSON-safe mapping") from exc
         if self.control_context is not None and not self.control_pipe:
             raise ValueError("control_context requires control_pipe")
         if self.control_pipe and (self.stdin_mode != STDIN_DEVNULL or self.initial_input is not None):

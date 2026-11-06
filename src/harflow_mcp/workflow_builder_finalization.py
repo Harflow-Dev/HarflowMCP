@@ -15,6 +15,12 @@ def finish_ordinary_builder(supervisor, activation, result):
         current = self.run(refresh_atomic=True)
         if current["status"] != "running":
             return
+        from .conversation_workflows import _bindings, guard_outcome
+        if a['id'] in _bindings(current):
+            choice=[]
+            self.update(lambda run: choice.append(guard_outcome(run,a['id'],result)), 'builder_conversation_result')
+            if choice != ['accept']:
+                return
         if held(current):
             def superseded(run):
                 old = next(item for item in run["activations"] if item["id"] == a["id"])

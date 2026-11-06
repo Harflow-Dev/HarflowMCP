@@ -251,6 +251,22 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     send_p.add_argument("--json", action="store_true")
     send_p.add_argument("--delivery", choices=("queue", "now"), default="queue")
     send_p.add_argument("--monitor", action="store_true")
+    conversation_prepare = sub.add_parser("conversation-prepare", help="prepare a qualified same-conversation message target")
+    conversation_prepare.add_argument("task_id")
+    conversation_prepare.add_argument("--monitor", action="store_true")
+    conversation_prepare.add_argument("--json", action="store_true")
+    conversation_send = sub.add_parser("conversation-send", help="send an exact conversation_delivery_v1 request")
+    conversation_send.add_argument("request_file", help="UTF-8 JSON request file, at most 64 KiB")
+    conversation_send.add_argument("--monitor", action="store_true")
+    conversation_send.add_argument("--json", action="store_true")
+    conversation_control = sub.add_parser("conversation-control", help="cancel or promote an exact queued conversation message")
+    conversation_control.add_argument("request_file", help="UTF-8 JSON control request file, at most 64 KiB")
+    conversation_control.add_argument("--monitor", action="store_true")
+    conversation_control.add_argument("--json", action="store_true")
+    conversation_commit = sub.add_parser("conversation-commit", help="explicitly commit a physically settled workflow conversation")
+    conversation_commit.add_argument("request_file", help="UTF-8 JSON commit request file, at most 64 KiB")
+    conversation_commit.add_argument("--monitor", action="store_true")
+    conversation_commit.add_argument("--json", action="store_true")
     cancel_message_p = sub.add_parser("cancel-message", help="withdraw a queued task or workflow-node message")
     cancel_message_p.add_argument("task_id")
     cancel_message_p.add_argument("message_id")
@@ -421,6 +437,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--model", default=None)
     run_p.add_argument("--max-turns", type=int, default=None)
     run_p.add_argument("--background-idle-seconds", type=float, help="live-input background wait bound (0 < seconds <= 21600)")
+    run_p.add_argument("--conversation-profile", choices=("native", "shipped-medium35-high"), help="require an independently qualified native conversation transport")
     run_p.add_argument("--auto-continue", type=int, default=0, help="0–10 fresh successors after certified cutoffs; standalone tasks only")
     run_p.add_argument("--reasoning-effort", default=None)
     run_p.add_argument("--network", choices=("true", "false"), default=None)
@@ -482,6 +499,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("text", nargs="?", default=None)
     resume_p.add_argument("--max-turns", type=int, default=None)
     resume_p.add_argument("--background-idle-seconds", type=float)
+    resume_p.add_argument("--conversation-profile", choices=("native", "shipped-medium35-high"))
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--group-report-output", action=argparse.BooleanOptionalAction, default=None, help="Opt in to qualified read-only repository plus group-scoped report output; resumes inherit, --no-group-report-output disables")
     resume_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Configure process-local GitHub SSH prefix rewriting to HTTPS for this run (default: server setting; resumes inherit)")
@@ -1518,6 +1536,7 @@ def _run_action(args: argparse.Namespace):
             freedom=freedom,
             model=args.model,
             max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}),
+            **({'conversation_profile': args.conversation_profile} if getattr(args, 'conversation_profile', None) is not None else {}),
             reasoning_effort=args.reasoning_effort,
             network=network,
             group=args.group,
@@ -1566,6 +1585,7 @@ def _resume_action(args: argparse.Namespace):
             server._check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), args.allowed_command)
         return await registry.resume_record(
             record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True,
+            **({'conversation_profile': args.conversation_profile} if getattr(args, 'conversation_profile', None) is not None else {}),
             **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}), **({"group_report_output": args.group_report_output} if getattr(args, "group_report_output", None) is not None else {}),
             **_git_dispatch(args),
         )
@@ -2018,7 +2038,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 
-    mutation_commands = {"run", "resume", "continue", "send", "cancel-message", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact", "qualify"}
+    mutation_commands = {"run", "resume", "continue", "send", "conversation-prepare", "conversation-send", "conversation-control", "conversation-commit", "cancel-message", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact", "qualify"}
     from .workflow_reads import READ_ONLY_CLI_COMMANDS
     if args.command in mutation_commands or args.command.startswith("workflow-") and args.command not in READ_ONLY_CLI_COMMANDS or args.command == "mcp-allowlist" and (args.allow is not None or args.remove is not None):
         from .caller_policy import require_mutation
@@ -2200,6 +2220,29 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_qualify(args)
     if args.command == "send":
         return _cmd_send(args)
+    if args.command in {"conversation-prepare", "conversation-send", "conversation-control", "conversation-commit"}:
+        from . import server
+        server.install_cli_registry()
+        try:
+            owner = "monitor" if args.monitor else "caller"
+            if args.command == "conversation-prepare":
+                result = asyncio.run(server.prepare_task_conversation(args.task_id, owner))
+            elif args.command == "conversation-send":
+                from .conversation_requests import load_send
+                request = load_send(Path(args.request_file))
+                result = asyncio.run(server.send_conversation_message(request, owner))
+            elif args.command == "conversation-control":
+                from .conversation_requests import load_control
+                request = load_control(Path(args.request_file))
+                result = asyncio.run(server.control_conversation_message(request, owner))
+            else:
+                from .conversation_requests import load_commit
+                request = load_commit(Path(args.request_file))
+                result = asyncio.run(server.commit_conversation_result(request, owner))
+        except Exception as exc:
+            return _fail(args, _error_code(exc, "invalid_params"), str(exc), getattr(getattr(exc, "error", None), "data", None))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
     if args.command == "cancel-message":
         from . import server
         server.install_cli_registry()

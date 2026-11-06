@@ -648,6 +648,7 @@ def test_ctl_workflow_notifications_resolve_the_run(home: Path, capsys: pytest.C
 ID_PARAMETER = re.compile(r"(^|_)(task_ids?|run_ids?|source_run_id|related_run_id|workflow_run_id|predecessor_task_id)$")
 
 MCP_RESOLVED = {
+    ("prepare_task_conversation", "task_id"),
     ("get_task_status", "task_id"), ("wait_for_task", "task_id"), ("wait_for_tasks", "task_ids"),
     ("continue_task", "task_id"), ("resume_task", "task_id"), ("cancel_task", "task_id"),
     ("get_task_events", "task_id"), ("get_task_event_page", "task_id"), ("send_message", "task_id"),
@@ -670,12 +671,14 @@ MCP_RESOLVED = {
     ("get_workflow_artifacts", "task_id"), ("workflow_limit_hits", "root_workflow_run_id"),
 }
 MCP_EXEMPT: dict[tuple[str, str], str] = {
+    ("replan_workflow_steering", "workflow_run_id"): "replan binds the exact steering root, assignment and withdrawal generation; prefixes are unsupported",
     ("get_workflow_steering", "workflow_run_id"): "steering v1 binds exact root/target identity; prefixes are unsupported",
     ("get_workflow_steering_history", "workflow_run_id"): "steering v1 history is bound to the exact root identity",
     ("steer_workflow", "workflow_run_id"): "steering v1 request identity binds the full root id; prefixes are unsupported",
 }
 
 CTL_RESOLVED = {
+    ("conversation-prepare", "task_id"),
     ("approval-get", "task_id"), ("approval-list", "--task-id"), ("approval-list", "--workflow-run-id"),
     ("approval-respond", "task_id"), ("cancel", "task_id"), ("cancel-message", "task_id"), ("continue", "task_id"),
     ("launch-settle", "--task-id"), ("recovery-activity", "task_id"), ("resume", "task_id"), ("send", "task_id"),
@@ -695,6 +698,7 @@ CTL_RESOLVED = {
     ("workflow-status", "workflow_run_id"), ("workflow-wait", "workflow_run_id"),
 }
 CTL_EXEMPT = {
+    ("workflow-steering-replan", "workflow_run_id"): "replan binds the exact steering root, assignment and withdrawal generation; prefixes are unsupported",
     ("workflow-steering-status", "workflow_run_id"): "steering v1 binds exact root/target identity; prefixes are unsupported",
     ("workflow-steering-history", "workflow_run_id"): "steering v1 history is bound to the exact root identity",
     ("workflow-steer", "workflow_run_id"): "steering v1 request identity binds the full root id; prefixes are unsupported",
