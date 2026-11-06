@@ -235,6 +235,14 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
   need workflow run documents and are listed for E6 in C1 section 6.1.
 - **Read-only.** After each case the digest of all authoritative state must equal the seed's. The digest
   must be non-empty and must differ from an empty store's, so an adapter that hashes nothing fails.
+- **Skips gate acceptance.** Only `legacy_*` identity states may be skipped by an adapter. `alive`, `reused`,
+  `unknown` and a terminal observed state are required: unsupported means failure. The `recovery-activity`
+  capture-loss branch is an `unverified` skip: the printed summary lists it and `complete` stays false unless
+  it is excluded by name with `--exclude-unverified NAME`, which the report records. The exit status is zero
+  only when `ok` and `complete`.
+- **Delta profiles.** `--delta interim-6.1` and `--delta U10` replace the Python baseline expectations with
+  the proposed alternatives of C1 section 6.1 and U10 (tagged `[proposed, ...]`) and are recorded in the
+  report. Python fails them on purpose.
 - **Bounds.** Paging walks fail when the bound is exhausted. Re-issuing a read that reports preparation
   follows a harness bootstrap policy (40 attempts, 250 ms), not the contract.
 - **Framework identity.** `conformance/*.py` and `conformance/e1/**` are hashed before the run, checked

@@ -14,7 +14,8 @@ import time
 from datetime import datetime
 
 from . import harness
-from .world import A, B, C, D, E, MISSING, BROKEN, LONG_PROMPT, PREVIEW_CHARS, WORLD_READS
+from .world import (A, B, C, D, E, MISSING, BROKEN, LONG_PROMPT, PREVIEW_CHARS, WORLD_READS, BACKEND, REPO_PATH, FREEDOM,
+                    artifact_path, session_id, settled)
 
 CASES = {}
 CORE = ('ctl.v1',)
@@ -77,10 +78,24 @@ def own_marker():
 def agent_caller(ctx, task_id, identity='alive', status='running'):
     """Register the test process itself as a live task's process: the engine, being its descendant,
     is run by a verified agent caller (detected by ancestry). Returns whether the adapter supports it."""
-    marker = own_marker() if identity in ('alive_with_markers', 'legacy_markers_seen') else None
+    marker = own_marker() if identity in ('legacy_alive_with_markers', 'legacy_markers_seen') else None
     result = ctx.fx.add_live_caller(task_id, os.getpid(), identity=identity, status=status, marker=marker) or {}
     ctx.rebase()
     return bool(result.get('supported', True))
+
+
+def delta(ctx, name):
+    return name in ctx.deltas
+
+
+def agent_read(ctx, res, label, code):
+    """A read an agent caller with unresolved workflow ownership makes. Baseline: Python answers it normally
+    (pending U2). Under `--delta interim-6.1` (C1 section 6.1, proposed) it is refused with `code`.
+    Returns the success payload, or None when refused."""
+    if delta(ctx, 'interim-6.1'):
+        error(ctx, res, code, label=f'{label} [proposed, interim-6.1]')
+        return None
+    return success(ctx, res, f'{label} [baseline, pending U2]')
 
 
 def pending_shape(ctx, result, label):
@@ -131,7 +146,7 @@ def _(ctx):
     ctx.eq(doc.get('history_incomplete'), False, 'history_incomplete [contract]')
     ctx.eq(doc.get('refused_tasks'), [], 'refused_tasks [contract]')
     rows = {row['task_id']: row for row in doc['tasks']}
-    subset(ctx, rows[A], {'backend': 'claude', 'status': 'completed', 'repo_path': '/workspace/repo',
+    subset(ctx, rows[A], {'backend': BACKEND, 'status': 'completed', 'repo_path': REPO_PATH,
                           'started_at': '2026-01-10T10:00:00+00:00', 'title': 'First task'}, 'list[A]')
     subset(ctx, rows[B], {'status': 'failed', 'title': 'Second task'}, 'list[B]')
     subset(ctx, rows[C], {'status': 'completed', 'title': 'Third task'}, 'list[C]')
@@ -142,7 +157,7 @@ def _(ctx):
     ctx.seed_reads()
     recent = '77777777-7777-4777-8777-777777777777'
     stamp = datetime.fromtimestamp(time.time() - 3600).astimezone().isoformat()
-    ctx.fx.add_task({'task_id': recent, 'started_at': stamp, 'finished_at': stamp, 'prompt': 'recent', 'status': 'completed', 'exit_code': 0})
+    ctx.fx.add_task(settled(recent, started_at=stamp, finished_at=stamp, prompt='recent'))
     ctx.rebase()
     doc = success(ctx, ctx.ctl('list', '--json', '--since', '7d'))
     ctx.eq([row['task_id'] for row in doc['tasks']], [recent], 'only a task started within the window is listed [contract]')
@@ -156,7 +171,9 @@ def _(ctx):
     ctx.eq(ctx.fx.root_state(), 'missing', 'precondition: no state root')
     doc = success(ctx, ctx.ctl('list', '--json'))
     ctx.eq(doc['tasks'], [], 'an empty store lists no tasks')
-    ctx.eq(ctx.fx.root_state(), 'initialized', 'an ordinary read initializes a missing root [contract, pending U10]')
+    ctx.eq(ctx.fx.root_state(), 'missing' if delta(ctx, 'U10') else 'initialized',
+           'an ordinary read of a missing root creates nothing [proposed, U10]' if delta(ctx, 'U10')
+           else 'an ordinary read initializes a missing root [contract, pending U10]')
 
 
 @case('list.foreign_root_refused')
@@ -175,10 +192,10 @@ def _(ctx):
 def _(ctx):
     ctx.seed_reads()
     task = success(ctx, ctx.ctl('status', A, '--json'))['task']
-    subset(ctx, task, {'task_id': A, 'status': 'completed', 'exit_code': 0, 'backend': 'claude',
-                       'session_id': 'session-aaaaaaaa', 'repo_path': '/workspace/repo',
+    subset(ctx, task, {'task_id': A, 'status': 'completed', 'exit_code': 0, 'backend': BACKEND,
+                       'session_id': session_id(A), 'repo_path': REPO_PATH,
                        'started_at': '2026-01-10T10:00:00+00:00', 'title': 'First task', 'group': 'g1',
-                       'model': 'model-a', 'freedom': 'write_in_repo', 'duration_seconds': 300.0,
+                       'model': 'model-a', 'freedom': FREEDOM, 'duration_seconds': 300.0,
                        'output_drained': True, 'continuation_of_task_id': None}, 'status')
     ctx.check('resolved_from' not in task, 'a full id carries no resolved_from [contract]')
     task = success(ctx, ctx.ctl('status', 'aaaaaaaa', '--json'))['task']
@@ -194,8 +211,7 @@ def _(ctx):
 def _(ctx):
     ctx.seed_reads()
     for name in ('abababab-0000-4000-8000-000000000001', 'abababab-1111-4111-8111-111111111111'):
-        ctx.fx.add_task({'task_id': name, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
-                         'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
+        ctx.fx.add_task(settled(name, prompt='p'))
     ctx.rebase()
     err = error(ctx, ctx.ctl('status', MISSING, '--json'), 'unknown_task')
     ctx.eq((err.get('data') or {}).get('input'), MISSING, 'unknown id is echoed in data.input [contract]')
@@ -266,7 +282,7 @@ def _(ctx):
     error(ctx, ctx.ctl('task-list-page', '--json', '--limit', '101'), 'invalid_params')
     row = success(ctx, ctx.ctl('task-list-page', '--json', '--limit', '100'))['items']
     ctx.eq(ids(row), [E, D, C, B, A], 'limit 100 returns the whole short history')
-    subset(ctx, [r for r in row if r['task_id'] == A][0], {'status': 'completed', 'title': 'First task', 'backend': 'claude',
+    subset(ctx, [r for r in row if r['task_id'] == A][0], {'status': 'completed', 'title': 'First task', 'backend': BACKEND,
                                                           'continuation_of_task_id': None}, 'header[A]')
 
 
@@ -281,7 +297,7 @@ def _(ctx):
     ctx.eq((err.get('data') or {}).get('reason'), 'no_prefix_match', 'a missing non-canonical id is reported [contract]')
     result = success(ctx, ctx.ctl('task-list-page', '--json', '--active-only'))
     ctx.eq((ids(result['items']), result.get('total_active_count')), ([], 0), '--active-only lists no settled task')
-    result = success(ctx, ctx.ctl('task-list-page', '--json', '--session-id', 'session-cccccccc'))
+    result = success(ctx, ctx.ctl('task-list-page', '--json', '--session-id', session_id(C)))
     ctx.eq(ids(result['items']), [C], '--session-id filters by recorded session')
 
 
@@ -386,8 +402,7 @@ def _(ctx):
            ([], None, None, None, False, False), 'a task without a log is unavailable with no cursors [contract]')
     ctx.eq(result['log']['state'], 'unavailable', 'log.state unavailable [contract]')
     gappy = '12345678-0000-4000-8000-000000000001'
-    ctx.fx.add_task({'task_id': gappy, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:05:00+00:00',
-                     'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
+    ctx.fx.add_task(settled(gappy, finished_at='2026-01-10T10:05:00+00:00', prompt='p'))
     ctx.fx.append_event(gappy, 0, 'task_started', '2026-01-10T10:00:00+00:00', {})
     ctx.fx.append_event(gappy, 1, 'assistant_text', '2026-01-10T10:00:01+00:00', {'text': 'a'})
     ctx.fx.append_malformed_line(gappy)
@@ -455,8 +470,7 @@ def _(ctx):
     tampered = '12345678-0000-4000-8000-0000000000f1'
     foreign = '12345678-0000-4000-8000-0000000000f2'
     for task_id, store in ((tampered, 'sidecar_verified'), (foreign, 'sidecar_foreign_name')):
-        ctx.fx.add_task({'task_id': task_id, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
-                         'status': 'completed', 'exit_code': 0, 'prompt': LONG_PROMPT, 'prompt_store': store})
+        ctx.fx.add_task(settled(task_id, prompt=LONG_PROMPT, prompt_store=store))
     ctx.fx.tamper_prompt(tampered)
     ctx.rebase()
     result = success(ctx, ctx.ctl('task-prompt', A, '--json'))
@@ -514,7 +528,7 @@ def _(ctx):
     first = success(ctx, ctx.ctl('task-artifacts', A, '--json', '--limit', '1'))
     ctx.eq((first['count'], first['has_more'], [i['artifact_id'] for i in first['items']]), (2, True, [ART1]), 'first artifact page')
     item = first['items'][0]
-    subset(ctx, item, {'path': '/workspace/repo/out/a.txt', 'kind': 'report', 'note': 'n', 'task_id': A,
+    subset(ctx, item, {'path': artifact_path(REPO_PATH, 'a.txt'), 'kind': 'report', 'note': 'n', 'task_id': A,
                        'registered_observation': {'device': 1, 'inode': 2, 'size': 3, 'mtime_ns': 4}}, 'artifact item [contract]')
     ctx.eq(item['availability']['state'], 'deleted', 'a reference whose target is absent is deleted [contract]')
     ctx.check(isinstance(first['next_cursor'], str) and first['next_cursor'], 'continuing page carries a cursor [contract]')
@@ -537,8 +551,7 @@ def _(ctx):
 @case('task-artifacts.availability_and_prefixes')
 def _(ctx):
     ctx.seed_reads()
-    ctx.fx.add_task({'task_id': PRESENT, 'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:01:00+00:00',
-                     'status': 'completed', 'exit_code': 0, 'prompt': 'p', 'real_workspace': True})
+    ctx.fx.add_task(settled(PRESENT, prompt='p', real_workspace=True))
     ctx.fx.write_artifacts(PRESENT, [{'artifact_id': ART1, 'name': 'a.txt', 'target': 'present'},
                                      {'artifact_id': ART2, 'name': 'b.txt', 'target': 'absent'}])
     ctx.rebase()
@@ -569,7 +582,8 @@ def _(ctx):
                        'has_more': False, 'reset': False}, 'without confirmed capture loss the page is empty [baseline]')
     ctx.check(isinstance(page.get('notices'), list) and page['notices'] and all(isinstance(n, str) for n in page['notices']),
               'the empty page carries at least one explanatory notice')
-    ctx.skip('recovery-activity with confirmed capture loss is not seedable through the fixture port; transcript paging is unverified')
+    ctx.skip('recovery-activity with confirmed capture loss is not seedable through the fixture port; transcript paging is unverified',
+             kind='unverified', name='recovery-activity.capture_loss')
     doc = success(ctx, ctx.ctl('recovery-activity', 'aaaaaaaa', '--json'))
     ctx.eq(doc.get('resolved_from'), {'input': 'aaaaaaaa', 'task_id': A}, 'prefix echo [contract]')
     error(ctx, ctx.ctl('recovery-activity', MISSING, '--json'), 'unknown_task')
@@ -657,7 +671,7 @@ def _(ctx):
     ctx.eq(set(rows), ALL_IDS, 'every finished standalone execution starting in the window is one item [contract]')
     elapsed = {A: 300.0, B: 180.0, C: 120.0, D: 120.0, E: 120.0}
     for task_id, row in rows.items():
-        subset(ctx, row, {'kind': 'execution', 'elapsed_seconds': elapsed[task_id], 'requested_harness': 'claude', 'workflow_run_id': None},
+        subset(ctx, row, {'kind': 'execution', 'elapsed_seconds': elapsed[task_id], 'requested_harness': BACKEND, 'workflow_run_id': None},
                f'statistics item {task_id[:8]} [contract]')
     subset(ctx, rows[A], {'status': 'completed', 'title': 'First task', 'requested_model': 'model-a', 'execution_kind': 'initial',
                           'started_at': epoch('2026-01-10T10:00:00+00:00'), 'finished_at': epoch('2026-01-10T10:05:00+00:00')}, 'statistics[A]')
@@ -741,24 +755,38 @@ def _(ctx):
            'authority precedes the task lookup: known and unknown ids refuse with the same code [contract]')
     ctx.eq((unknown.error or {}).get('message'), (known.error or {}).get('message'),
            'authority precedes the task lookup: known and unknown ids refuse identically [contract]')
-    # Reads that managed workflow callers are scoped on stay open to a standalone task caller (pending U2).
-    task = success(ctx, ctx.ctl('status', A, '--json'))['task']
-    ctx.eq(task['task_id'], A, 'a standalone agent caller reads another task through status [baseline, pending U2]')
-    exposed = ('last_output_tail', 'summary', 'raw_stream_log', 'events_log', 'resume_command', 'messages', 'recovery_activity')
-    ctx.eq([key for key in exposed if key not in task], [], 'status exposes output tail, summary, log paths, resume command, messages and recovery activity to it [baseline, pending U2]')
-    ctx.eq({row['task_id'] for row in success(ctx, ctx.ctl('list', '--json'))['tasks']} >= ALL_IDS, True,
-           'list shows every task to a standalone agent caller [baseline, pending U2]')
-    ctx.eq(success(ctx, ctx.ctl('recovery-activity', A, '--json')).get('task_id'), A, 'recovery-activity is open to it [baseline, pending U2]')
-    ctx.eq([row['task_id'] for row in success(ctx, ctx.ctl('status-batch', '--task-ids', A, '--json'))['tasks']], [A],
-           'status-batch is open to it [baseline, pending U2]')
-    own = success(ctx, ctx.ctl('task-artifacts', CALLER, '--json'))
-    ctx.eq((own['task_id'], own['state'], own['count']), (CALLER, 'available', 0), 'a task caller reads its own artifacts [contract]')
-    byprefix = success(ctx, ctx.ctl('task-artifacts', CALLER[:8], '--json'))
-    ctx.eq((byprefix['task_id'], byprefix.get('resolved_from')), (CALLER, {'input': CALLER[:8], 'task_id': CALLER}),
-           'a prefix resolves inside the caller\'s own singleton set [contract]')
+    # Error precedence is usage, then authority: a malformed request is a usage error even for a refused caller.
+    error(ctx, ctx.ctl('task-events', A, '--json', '--limit', '0'), 'usage', rc=2, label='a usage error precedes the authority refusal [contract]')
+    ctx.eq(ctx.ctl('task-prompt', A).rc, 2, 'a missing --json is a usage error even for a refused caller [contract]')
+    # Reads that managed workflow callers are scoped on: open to a standalone task caller at baseline (pending U2).
+    task = agent_read(ctx, ctx.ctl('status', A, '--json'), 'status by a standalone agent caller', 'workflow_read_refused')
+    if task is not None:
+        task = task['task']
+        ctx.eq(task['task_id'], A, 'a standalone agent caller reads another task through status [baseline, pending U2]')
+        exposed = ('last_output_tail', 'summary', 'raw_stream_log', 'events_log', 'resume_command', 'messages', 'recovery_activity')
+        ctx.eq([key for key in exposed if key not in task], [],
+               'status exposes output tail, summary, log paths, resume command, messages and recovery activity to it [baseline, pending U2]')
+    listing = agent_read(ctx, ctx.ctl('list', '--json'), 'list by a standalone agent caller', 'workflow_read_refused')
+    if listing is not None:
+        ctx.eq({row['task_id'] for row in listing['tasks']} >= ALL_IDS, True, 'list shows every task to a standalone agent caller [baseline, pending U2]')
+    recovery = agent_read(ctx, ctx.ctl('recovery-activity', A, '--json'), 'recovery-activity by a standalone agent caller', 'workflow_read_refused')
+    if recovery is not None:
+        ctx.eq(recovery.get('task_id'), A, 'recovery-activity is open to it [baseline, pending U2]')
+    batch = agent_read(ctx, ctx.ctl('status-batch', '--task-ids', A, '--json'), 'status-batch by a standalone agent caller', 'workflow_read_refused')
+    if batch is not None:
+        ctx.eq([row['task_id'] for row in batch['tasks']], [A], 'status-batch is open to it [baseline, pending U2]')
+    own = agent_read(ctx, ctx.ctl('task-artifacts', CALLER, '--json'), 'task-artifacts of its own task', 'artifact_error')
+    if own is not None:
+        ctx.eq((own['task_id'], own['state'], own['count']), (CALLER, 'available', 0), 'a task caller reads its own artifacts [contract]')
+    byprefix = agent_read(ctx, ctx.ctl('task-artifacts', CALLER[:8], '--json'), 'task-artifacts of its own task by prefix', 'artifact_error')
+    if byprefix is not None:
+        ctx.eq((byprefix['task_id'], byprefix.get('resolved_from')), (CALLER, {'input': CALLER[:8], 'task_id': CALLER}),
+               'a prefix resolves inside the caller\'s own singleton set [contract]')
     error(ctx, ctx.ctl('task-artifacts', A, '--json'), 'artifact_error', label='a task caller may not read another task\'s artifacts')
-    page = page_ready(ctx, 'task-list-page', '--json')
-    ctx.eq(set(ids(page.result['items'])), ALL_IDS | {CALLER}, 'a standalone task caller sees the unscoped page [baseline, pending U2]')
+    page = settled_page(ctx, 'task-list-page', '--json')
+    shown = agent_read(ctx, page, 'task-list-page by a standalone agent caller', 'invalid_params')
+    if shown is not None:
+        ctx.eq(set(ids(shown['items'])), ALL_IDS | {CALLER}, 'a standalone task caller sees the unscoped page [baseline, pending U2]')
 
 
 @case('scope.environment_markers', SCOPE_CAPS)
@@ -789,27 +817,33 @@ def _(ctx):
     for env in ({'HARFLOW_DEPTH': '1'}, {'PB_TASK_ID': MISSING}):
         label = ','.join(env)
         for args in (['status', A, '--json'], ['list', '--json']):
-            success(ctx, ctx.ctl(*args, env=env), f'{args[0]} with only {label} set')
+            agent_read(ctx, ctx.ctl(*args, env=env), f'{args[0]} with only {label} set', 'workflow_read_refused')
     agent_caller(ctx, '34343434-3434-4434-8434-343434343434')
-    ctx.eq(ctx.ctl('status', A, '--json', env={'HARFLOW_TASK_ID': MISSING}).rc, 0,
-           'a marker naming an unknown task is overridden by a confirmed ancestry caller')
+    agent_read(ctx, ctx.ctl('status', A, '--json', env={'HARFLOW_TASK_ID': MISSING}),
+               'status with a marker naming an unknown task and a confirmed ancestry caller', 'workflow_read_refused')
 
 
-IDENTITY_AGENT = (('alive', 'running'), ('alive_with_markers', 'running'), ('alive', 'failed_unobserved'))
-IDENTITY_DIRECT = (('reused', 'running'), ('legacy_markers_unseen', 'running'), ('alive', 'completed_observed'))
-IDENTITY_UNDECIDABLE = (('markers_missing', 'running'), ('legacy_markers_seen', 'running'), ('legacy_no_markers', 'running'))
+IDENTITY_AGENT = (('alive', 'running'), ('alive', 'failed_unobserved'), ('legacy_alive_with_markers', 'running'))
+IDENTITY_DIRECT = (('reused', 'running'), ('alive', 'completed_observed'), ('legacy_markers_unseen', 'running'))
+IDENTITY_UNDECIDABLE = (('unknown', 'running'), ('legacy_markers_missing', 'running'), ('legacy_markers_seen', 'running'),
+                        ('legacy_no_markers', 'running'))
 
 
 @case('scope.identity_verdicts', SCOPE_CAPS)
 def _(ctx):
-    """Fail-closed identity branches. Each variant registers this process under a different identity state."""
+    """Fail-closed identity branches. Each variant registers this process under a different identity state.
+    `alive`, `reused`, a terminal observed record and `unknown` are required of every adapter; only `legacy_*`
+    states may be skipped."""
     for expectation, variants in (('agent', IDENTITY_AGENT), ('direct', IDENTITY_DIRECT), ('undecidable', IDENTITY_UNDECIDABLE)):
         for identity, status in variants:
             tag = f'{identity}/{status}'
             ctx.fx.remove_root()
             ctx.seed_reads()
             if not agent_caller(ctx, CALLER, identity=identity, status=status):
-                ctx.skip(f'the fixture adapter does not express the identity state {tag}')
+                if identity.startswith('legacy_'):
+                    ctx.skip(f'the fixture adapter does not express the legacy identity state {tag}', kind='legacy', name=tag)
+                else:
+                    ctx.check(False, f'the required identity state {tag} is expressible by the fixture adapter', tag='harness')
                 continue
             events = ctx.ctl('task-events', A, '--json')
             interaction = ctx.ctl('interaction-events', '--json')
@@ -821,9 +855,9 @@ def _(ctx):
             if expectation == 'agent':
                 error(ctx, events, 'agent_caller', label=f'task-events {label}')
                 error(ctx, interaction, 'unauthorized', label=f'interaction-events {label}')
-                success(ctx, status_res, f'status {label}')
-                success(ctx, listing, f'list {label}')
-                success(ctx, page, f'task-list-page {label}')
+                agent_read(ctx, status_res, f'status {label}', 'workflow_read_refused')
+                agent_read(ctx, listing, f'list {label}', 'workflow_read_refused')
+                agent_read(ctx, page, f'task-list-page {label}', 'invalid_params')
                 error(ctx, artifacts, 'artifact_error', label=f'task-artifacts of another task {label}')
             elif expectation == 'direct':
                 for res, name in ((events, 'task-events'), (interaction, 'interaction-events'), (status_res, 'status'),
@@ -882,8 +916,8 @@ def _(ctx):
           label='statistics cursor under another state root [contract]')
     error(ctx, ctx.ctl('statistics-page', '--since', '2026-01-02T00:00:00+00:00', '--before', '2026-02-01T00:00:00+00:00',
                        '--limit', '2', '--json', '--cursor', token), 'invalid_cursor', label='statistics cursor under other bounds [contract]')
-    ctx.fx.add_task({'task_id': '12345678-0000-4000-8000-0000000000aa', 'started_at': '2026-01-15T10:00:00+00:00',
-                     'finished_at': '2026-01-15T10:01:00+00:00', 'status': 'completed', 'exit_code': 0, 'prompt': 'p'})
+    ctx.fx.add_task(settled('12345678-0000-4000-8000-0000000000aa', started_at='2026-01-15T10:00:00+00:00',
+                            finished_at='2026-01-15T10:01:00+00:00', prompt='p'))
     ctx.rebase()
     error(ctx, ctx.ctl('statistics-page', *WINDOW, '--limit', '2', '--json', '--cursor', token), 'snapshot_expired',
           label='statistics cursor after a relevant mutation [contract]')
@@ -924,6 +958,8 @@ def _(ctx):
             ctx.eq((doc['tasks'], doc['errors'][A]['code']), ([], 'unknown_task'), f'{label}: every id is unknown [baseline, pending U10]')
         else:
             error(ctx, res, key, label=label)
-        ctx.eq(ctx.fx.root_state(), 'initialized', f'{label}: an ordinary read initializes the selected root [contract, pending U10]')
+        ctx.eq(ctx.fx.root_state(), 'missing' if delta(ctx, 'U10') else 'initialized',
+               f'{label}: an ordinary read creates nothing [proposed, U10]' if delta(ctx, 'U10')
+               else f'{label}: an ordinary read initializes the selected root [contract, pending U10]')
     ctx.fx.remove_root()
     ctx.baseline = None

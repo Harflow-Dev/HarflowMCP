@@ -28,11 +28,18 @@ Operations (all take the state root first):
 session_id, continuation_of, output_drained, prompt_store ('inline' | 'sidecar_verified' |
 'sidecar_missing' | 'sidecar_mismatch' | 'sidecar_foreign_name'), real_workspace (bool).
 
-`add_live_caller` identities: 'alive' (start identity matches, no markers), 'alive_with_markers',
-'reused' (the pid now has a different start identity), 'markers_missing', 'legacy_markers_seen',
-'legacy_markers_unseen', 'legacy_no_markers'. `status` is 'running', 'completed_observed' (terminal
-with an exit code) or 'failed_unobserved' (terminal without one). It returns `{'supported': bool}`;
-an adapter that cannot express an identity returns false and the case records a skip.
+`add_live_caller` identities. Required of every adapter: 'alive' (the pid's current start identity matches
+the record), 'reused' (the pid now has a different start identity, so the record is dead) and 'unknown'
+(the identity cannot be decided either way). Optional, Python-record forms: 'legacy_alive_with_markers',
+'legacy_markers_missing', 'legacy_markers_seen', 'legacy_markers_unseen', 'legacy_no_markers'. `status` is
+'running', 'completed_observed' (terminal with an exit code) or 'failed_unobserved' (terminal without one).
+It returns `{'supported': bool}`. An unsupported required state fails the scenario; an unsupported
+`legacy_*` state is a recorded skip.
+
+Every `add_task` spec is complete: `backend`, `repo_path`, `freedom`, `session_id`, `status`, `exit_code`,
+`started_at`, `finished_at`, `output_drained` and `prompt` are always present (see `world.task`); optional
+keys are `title`, `group`, `model`, `continuation_of`, `prompt_store` and `real_workspace`. An artifact
+target is `<repo_path>/out/<name>` (`world.artifact_path`). `seed_world` takes the argument `world`.
 
 An external adapter is an executable invoked as `ADAPTER OP --root ROOT` with the JSON arguments on
 stdin and one JSON result on stdout; it must be pinned by SHA-256 and is never reachable from the
@@ -41,12 +48,13 @@ public engine binary.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 
 from ..oracles import ConformanceError, read_regular
-from . import seed, world
+from . import seed, world as worldmod
 
 OPERATIONS = ('initialize_empty', 'remove_root', 'make_foreign_root', 'root_state', 'seed_world', 'add_task',
               'add_live_caller', 'damage_task', 'append_event', 'append_malformed_line', 'append_partial_line',
@@ -64,6 +72,9 @@ def _lstart(pid):
 class PythonLayoutAdapter:
     """Adapter for Python 0.0.11's file layout. The only place that knows these file names."""
     name = 'python-0.0.11-layout'
+
+    def identity(self):
+        return {'name': self.name}
 
     def _tasks(self, root):
         return Path(root) / 'tasks'
@@ -86,13 +97,15 @@ class PythonLayoutAdapter:
             marker = json.loads((root / '.harflow-store.json').read_text())
         except (OSError, ValueError):
             return 'other'
-        return 'initialized' if marker.get('format') == 'harflow.store' else 'other'
+        if marker.get('format') != 'harflow.store' or not (root / '.harflow-store.lock').is_file():
+            return 'other'
+        return 'initialized'
 
-    def seed_world(self, root, spec):
+    def seed_world(self, root, world):
         self.initialize_empty(root)
-        for task in spec['tasks']:
+        for task in world['tasks']:
             self.add_task(root, task)
-        for task_id, events in spec['events'].items():
+        for task_id, events in world['events'].items():
             for row in events:
                 self.append_event(root, task_id, row['seq'], row['kind'], row['observed_at'], row['fields'])
 
@@ -100,10 +113,12 @@ class PythonLayoutAdapter:
         spec = dict(spec)
         task_id = spec.pop('task_id')
         tasks = self._tasks(root)
-        fields = {'status': spec.get('status', 'completed'), 'exit_code': spec.get('exit_code'),
-                  'started_at': spec['started_at'], 'finished_at': spec.get('finished_at'),
-                  'output_drained': spec.get('output_drained', True), 'prompt': spec.get('prompt', '')}
-        for source, target in (('title', 'title'), ('group', 'group'), ('model', 'model'), ('session_id', 'session_id')):
+        # Every asserted value comes from the spec; a missing one is an error, never an adapter default.
+        fields = {'backend': spec['backend'], 'repo_path': spec['repo_path'], 'freedom': spec['freedom'],
+                  'session_id': spec['session_id'], 'status': spec['status'], 'exit_code': spec['exit_code'],
+                  'started_at': spec['started_at'], 'finished_at': spec['finished_at'],
+                  'output_drained': spec['output_drained'], 'prompt': spec['prompt']}
+        for source, target in (('title', 'title'), ('group', 'group'), ('model', 'model')):
             if source in spec:
                 fields[target] = spec[source]
         if spec.get('continuation_of'):
@@ -118,7 +133,7 @@ class PythonLayoutAdapter:
         if store != 'inline':
             text = fields['prompt']
             digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
-            fields['prompt'] = text[:world.PREVIEW_CHARS]
+            fields['prompt'] = text[:worldmod.PREVIEW_CHARS]
             fields['prompt_truncated'] = True
             if store == 'sidecar_foreign_name':
                 fields['prompt_source'] = 'bad-name.txt'
@@ -136,14 +151,15 @@ class PythonLayoutAdapter:
         fields = {'pid': pid, 'started_at': '2026-11-07T00:00:00+00:00', 'prompt': 'the caller'}
         table = {
             'alive': {'start_time': start, 'markers': []},
-            'alive_with_markers': {'start_time': start, 'markers': [marker]},
+            'legacy_alive_with_markers': {'start_time': start, 'markers': [marker]},
             'reused': {'start_time': 'Mon Jan  1 00:00:00 2001', 'markers': []},
-            'markers_missing': {'start_time': start, 'markers': ['no-such-marker-in-any-command-line']},
+            'unknown': {'start_time': start, 'markers': ['no-such-marker-in-any-command-line']},
+            'legacy_markers_missing': {'start_time': start, 'markers': ['no-such-marker-in-any-command-line']},
             'legacy_markers_seen': {'start_time': None, 'markers': [marker]},
             'legacy_markers_unseen': {'start_time': None, 'markers': ['no-such-marker-in-any-command-line']},
             'legacy_no_markers': {'start_time': None, 'markers': []},
         }
-        if identity not in table or (identity in ('alive_with_markers', 'legacy_markers_seen') and not marker):
+        if identity not in table or (identity in ('legacy_alive_with_markers', 'legacy_markers_seen') and not marker):
             return {'supported': False}
         fields.update(table[identity])
         states = {'running': dict(status='running', exit_code=None, finished_at=None, output_drained=False),
@@ -195,7 +211,7 @@ class PythonLayoutAdapter:
         repo = Path(meta['repo_path'])
         rows, paths = [], []
         for item in items:
-            path = repo / 'out' / item['name']
+            path = Path(worldmod.artifact_path(str(repo), item['name']))
             if item.get('target') == 'present':
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'artifact bytes')
@@ -237,12 +253,20 @@ class ExternalAdapter:
 
     def __init__(self, path, sha256):
         self.path = Path(path)
-        if not self.path.is_absolute() or hashlib.sha256(read_regular(self.path)).hexdigest() != sha256:
-            raise ConformanceError('fixture adapter must be an absolute path matching its pinned digest')
         self.sha256 = sha256
         self.name = 'external:' + sha256[:12]
+        self.verify()
+
+    def verify(self):
+        if not self.path.is_absolute() or not re.fullmatch('[a-f0-9]{64}', self.sha256 or '') \
+                or hashlib.sha256(read_regular(self.path)).hexdigest() != self.sha256:
+            raise ConformanceError('fixture adapter must be an absolute path matching its pinned digest')
+
+    def identity(self):
+        return {'name': self.name, 'path': str(self.path), 'sha256': self.sha256}
 
     def call(self, op, root, **arguments):
+        self.verify()
         done = subprocess.run([str(self.path), op, '--root', str(root)], input=json.dumps(arguments).encode(),
                               capture_output=True, timeout=120, env={'PATH': '/usr/bin:/bin'})
         if done.returncode != 0:

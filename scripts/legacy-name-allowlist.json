@@ -411,13 +411,13 @@
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",
     "literal": "PB_DEPTH",
     "reason": "Specify the legacy caller variables and the stable method name the engine still reports.",
-    "count": 2
+    "count": 3
   },
   {
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",
     "literal": "PB_TASK_ID",
     "reason": "Specify the legacy caller variables and the stable method name the engine still reports.",
-    "count": 6
+    "count": 7
   },
   {
     "file": "docs/decisions/C1-caller-and-scoped-reads.md",

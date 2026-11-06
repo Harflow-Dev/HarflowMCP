@@ -43,11 +43,32 @@ def _b_events():
     ]
 
 
+BACKEND = 'claude'
+REPO_PATH = '/workspace/repo'
+FREEDOM = 'write_in_repo'
+
+
+def session_id(task_id):
+    return 'session-' + task_id[:8]
+
+
+def artifact_path(repo_path, name):
+    """Where an artifact target lives: the task's repository path, an `out` directory, then the name."""
+    return f'{repo_path}/out/{name}'
+
+
 def task(task_id, **fields):
-    spec = {'task_id': task_id, 'status': 'completed', 'exit_code': 0, 'started_at': '2026-01-10T10:00:00+00:00',
-            'finished_at': '2026-01-10T10:05:00+00:00', 'prompt': 'Summarize the repo.', 'output_drained': True}
+    """A complete task spec. Every value a case asserts is an explicit field here, never an adapter default."""
+    spec = {'task_id': task_id, 'backend': BACKEND, 'repo_path': REPO_PATH, 'freedom': FREEDOM,
+            'session_id': session_id(task_id), 'status': 'completed', 'exit_code': 0,
+            'started_at': '2026-01-10T10:00:00+00:00', 'finished_at': '2026-01-10T10:05:00+00:00',
+            'prompt': 'Summarize the repo.', 'output_drained': True}
     spec.update(fields)
     return spec
+
+
+def settled(task_id, started_at='2026-01-10T10:00:00+00:00', finished_at='2026-01-10T10:01:00+00:00', **fields):
+    return task(task_id, started_at=started_at, finished_at=finished_at, **fields)
 
 
 WORLD_READS = {

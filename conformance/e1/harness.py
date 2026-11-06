@@ -22,7 +22,7 @@ OPERATION_TIMEOUT = 60
 # Harness policy for a cold index: how long a client re-issues a read that reports preparation.
 BOOTSTRAP_ATTEMPTS = 40
 BOOTSTRAP_INTERVAL_SECONDS = 0.25
-TAGS = ('[contract]', '[baseline', '[harness]', '[proposed')
+TAGS = ('[contract', '[baseline', '[harness', '[proposed')
 
 
 class Failure(Exception):
@@ -58,7 +58,8 @@ class Result:
 class Ctx:
     """One case: a fresh isolated root, a way to run the engine, and recorded checks."""
 
-    def __init__(self, name, folder, command, capabilities, probe=False, port=None, default_tag='baseline'):
+    def __init__(self, name, folder, command, capabilities, probe=False, port=None, default_tag='baseline', deltas=()):
+        self.deltas = frozenset(deltas)
         self.port = port or PythonLayoutAdapter()
         self.default_tag = default_tag
         self.skips = []
@@ -105,8 +106,10 @@ class Ctx:
         if self.baseline != self._empty_digest:
             self._nonvacuous = True
 
-    def skip(self, message):
-        self.skips.append(message)
+    def skip(self, message, kind='unverified', name=None):
+        """Record something that was not checked. `legacy` skips (a Python-record identity form the adapter
+        cannot express) are allowed; an `unverified` skip blocks `complete` unless excluded by name."""
+        self.skips.append({'kind': kind, 'name': name or self.name, 'message': message})
 
     # --- running the engine -----------------------------------------------------------------------
 

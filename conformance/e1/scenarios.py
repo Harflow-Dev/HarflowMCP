@@ -10,6 +10,7 @@ The source target is a Git archive of the exact commit, run from an isolated sna
 target is a caller-pinned digest. Neither selects an editable checkout or searches PATH.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,12 +34,15 @@ def framework_identity():
     return {str(p.relative_to(root)): digest(read_regular(p)) for p in paths}
 
 
-def run_cases(command, identity, check, output, selected=None, probe=False, port=None):
+DELTAS = ('interim-6.1', 'U10')
+
+
+def run_cases(command, identity, check, output, selected=None, probe=False, port=None, deltas=()):
     results = []
     for name, (capabilities, function, tag) in case_module.CASES.items():
         if selected and name not in selected:
             continue
-        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe, port=port, default_tag=tag)
+        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe, port=port, default_tag=tag, deltas=deltas)
         try:
             function(ctx)
         except Exception as exc:  # a crashing case is a failure, never a pass
@@ -57,6 +61,20 @@ def run_cases(command, identity, check, output, selected=None, probe=False, port
     return results
 
 
+def assess(results, selected, exclusions):
+    """Acceptance rules over the case outcomes.
+
+    `ok`: every case ran and passed. `complete`: all cases were selected and no `unverified` skip remains
+    unless it is excluded by name in the recorded exclusions. `legacy` skips never block."""
+    skips = [dict(skip, case=row['name']) for row in results for skip in row.get('skips', [])]
+    unverified = sorted({skip['name'] for skip in skips if skip['kind'] == 'unverified'})
+    open_items = [name for name in unverified if name not in set(exclusions)]
+    ok = bool(results) and all(row['ok'] for row in results)
+    complete = not selected and len(results) == len(case_module.CASES) and not open_items
+    return {'ok': ok, 'complete': complete, 'skips': skips, 'unverified': unverified, 'unverified_unexcluded': open_items,
+            'exclusions': sorted(exclusions)}
+
+
 def run(args):
     output = Path(args.output).absolute()
     output.mkdir(exist_ok=False)
@@ -65,10 +83,12 @@ def run(args):
         raise ConformanceError('invalid invocation id')
     manifest = verify_manifest(args.manifest, args.manifest_sha256)
     port = ExternalAdapter(args.fixture_adapter, args.fixture_adapter_sha256) if args.fixture_adapter else PythonLayoutAdapter()
+    deltas = sorted(set(args.delta or ()))
+    exclusions = sorted(set(args.exclude_unverified or ()))
     framework_before = framework_identity()
     report = {'format': 'harflow.conformance.e1-report', 'v': 1, 'invocation_id': invocation_id, 'ok': False,
               'manifest_sha256': args.manifest_sha256, 'fixture_count': len(manifest['files']),
-              'framework_sha256': framework_before, 'fixture_adapter': port.name, 'platform': [sys.platform, platform.machine()], 'cases': []}
+              'framework_sha256': framework_before, 'fixture_adapter': port.identity(), 'deltas': deltas, 'platform': [sys.platform, platform.machine()], 'cases': []}
     try:
         if args.engine_bin:
             command, identity, check, _ = binary_target(args.engine_bin, args.engine_sha256)
@@ -76,7 +96,7 @@ def run(args):
             command, identity, check, _ = source_target(args.source_repo, args.commit, args.python, output)
         report['target'] = identity
         check()
-        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe, port)
+        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe, port, deltas)
         check()
         if framework_identity() != framework_before:
             raise ConformanceError('framework source changed during execution')
@@ -84,8 +104,9 @@ def run(args):
         missing = sorted(set(args.case or ()) - known)
         if missing:
             raise ConformanceError('unknown case: ' + ', '.join(missing))
-        report['ok'] = bool(report['cases']) and all(case['ok'] for case in report['cases'])
-        report['complete'] = not args.case and len(report['cases']) == len(known)
+        report.update(assess(report['cases'], args.case, exclusions))
+        if args.case:
+            report['complete'] = False
     except Exception as exc:
         report['error'] = type(exc).__name__ + ': ' + str(exc)
     publish_report(output / 'report.json', report)
@@ -100,6 +121,9 @@ def validate_report(path, expected_invocation_id):
         raise ConformanceError('report identity mismatch')
     if report.get('framework_sha256') != framework_identity():
         raise ConformanceError('framework source differs from the report')
+    adapter = report.get('fixture_adapter') or {}
+    if 'sha256' in adapter and hashlib.sha256(read_regular(adapter['path'])).hexdigest() != adapter['sha256']:
+        raise ConformanceError('fixture adapter differs from the recorded digest')
     root = path.parent
     for case in report['cases']:
         for operation in case['operations']:
@@ -128,6 +152,8 @@ def main(argv=None):
     parser.add_argument('--output', required=True)
     parser.add_argument('--fixture-adapter', help='absolute path of a pinned external fixture tool (default: the Python 0.0.11 layout adapter)')
     parser.add_argument('--fixture-adapter-sha256')
+    parser.add_argument('--delta', action='append', choices=DELTAS, help='expect a proposed delta profile instead of the Python baseline (recorded in the report); repeatable')
+    parser.add_argument('--exclude-unverified', action='append', metavar='NAME', help='record an owner-accepted exclusion of a named unverified item')
     parser.add_argument('--invocation-id')
     parser.add_argument('--case', action='append', help='run only this case; repeat for several (a subset is not the complete matrix)')
     parser.add_argument('--probe', action='store_true', help='print every command result while running')
@@ -145,11 +171,17 @@ def main(argv=None):
         parser.error('source selection requires --source-repo, a full --commit and --python')
     report = run(args)
     validate_report(Path(args.output).absolute() / 'report.json', report['invocation_id'])
-    print(json.dumps({'ok': report['ok'], 'complete': report.get('complete'), 'invocation_id': report['invocation_id'],
+    for skip in report.get('skips', []):
+        print(f"SKIP [{skip['kind']}] {skip['name']}: {skip['message']}", file=sys.stderr)
+    if report.get('unverified_unexcluded'):
+        print('UNVERIFIED (blocks complete unless excluded by name with --exclude-unverified): '
+              + ', '.join(report['unverified_unexcluded']), file=sys.stderr)
+    print(json.dumps({'ok': report.get('ok'), 'complete': report.get('complete'), 'deltas': report.get('deltas'),
+                      'unverified_unexcluded': report.get('unverified_unexcluded'), 'invocation_id': report['invocation_id'],
                       'report': str(Path(args.output).absolute() / 'report.json'),
                       'failed': [case['name'] for case in report['cases'] if not case['ok']],
                       **({'error': report['error']} if 'error' in report else {})}))
-    return 0 if report['ok'] and report.get('complete') else 1
+    return 0 if report.get('ok') and report.get('complete') else 1
 
 
 if __name__ == '__main__':

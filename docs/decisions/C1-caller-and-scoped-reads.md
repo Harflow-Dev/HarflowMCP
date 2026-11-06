@@ -34,7 +34,10 @@ foreign or incompatible one refuses with `state_incompatible` and is left untouc
 **[V]** `reads.missing_root`, `list.missing_root_initializes`, `list.foreign_root_refused`.
 The initialization half conflicts with the Engine's R01 rule that missing-root probes create nothing and
 that explicit store initialization is an internal fixture operation: **[U10]**. The scenarios tag it
-`[pending U10]`; the foreign-root refusal is not in question.
+`[pending U10]`; the foreign-root refusal is not in question. *Executable form:* `--delta U10` expects an
+ordinary read of a missing root to answer as empty (the same documents as the baseline) **without creating
+the root**, tagged `[proposed, U10]`; Python fails this profile. The alternative, refusing the read, has no
+profile until the owner chooses it.
 
 ## 2. Environment signals
 
@@ -90,9 +93,10 @@ Used to confirm that a task record still denotes a live process (`identity.py`).
 - Only `alive` confirms a caller. `undecidable` must never be read as either present or absent.
 
 **[V]** `scope.identity_verdicts` registers the test process under each identity state through the fixture
-port: `alive` (with and without markers), a reused pid (`dead`), missing markers (`undecidable`), the legacy
-no-start-time forms (`dead` or `undecidable`), and a terminal record with and without an exit code (excluded
-or kept as a candidate). Outcomes: alive → `agent_caller`; dead or observed-terminal → treated as direct;
+port: `alive`, a reused pid (`dead`), `unknown` (`undecidable`), a terminal record with an exit code (excluded
+as a candidate) and one without (kept), plus the Python-record forms `legacy_alive_with_markers`,
+`legacy_markers_missing`, `legacy_markers_seen`, `legacy_markers_unseen` and `legacy_no_markers`. Only the
+`legacy_*` states may be skipped by an adapter; an unsupported required state fails the scenario. Outcomes: alive → `agent_caller`; dead or observed-terminal → treated as direct;
 undecidable → `caller_undecidable` (direct-only reads), `workflow_read_refused` (`status`, `list`),
 `invalid_params` (page read), `unauthorized` (`interaction-events`), `artifact_error` (`task-artifacts`).
 `caller_process_titles` and `ps` failures are **[R]**.
@@ -170,7 +174,8 @@ not errors.
 then `detect_caller_detail` (4.4). Result: confirmed caller → `agent_caller` with the message
 "it was called from task ID (detected by METHOD)"; undecidable → `caller_undecidable` with the reason;
 otherwise allowed. Error precedence for these reads is **usage, then authority, then task, then
-cursor**; authority runs before the task id is resolved, so a refused caller cannot learn whether an
+cursor** (**[V]** the usage half: `scope.agent_caller_by_ancestry` sends a refused caller a malformed
+request and a missing `--json` and gets exit 2 `usage`, not the authority refusal); authority runs before the task id is resolved, so a refused caller cannot learn whether an
 id exists. **[V]** `scope.agent_caller_by_ancestry` asserts known and unknown ids refuse byte-for-byte
 identically.
 
@@ -252,6 +257,15 @@ marker-detected agent) whose workflow ownership is unresolved is refused on ever
 `invalid_params`; `task-artifacts` with `artifact_error`). A caller with no agent evidence is unaffected.
 This is stricter than Python for standalone agents and is a deliberate interim difference, to be replaced
 by the Python rule when E6 lands. It needs owner acceptance, together with U2.
+
+*Executable form.* `python -m conformance.e1.scenarios ... --delta interim-6.1` swaps the expectations of
+every agent-caller read in `scope.agent_caller_by_ancestry`, `scope.unverifiable_task_identity` and the
+`agent` class of `scope.identity_verdicts` to the refusals above (tagged `[proposed, interim-6.1]`), and
+the report records the active delta. Python stays on the baseline and fails this profile on purpose (a
+self-check proves it). Direct callers, the direct-only gate and undecidable callers are unchanged.
+*Markers under 6.1.* An agent is a confirmed caller, or a **non-empty** `HARFLOW_TASK_ID`, `PB_TASK_ID`,
+`HARFLOW_DEPTH` or `PB_DEPTH`. Empty values are treated as absent by the gated reads, exactly as the managed
+reader does today (truthiness), and so read normally; they still refuse the direct-only gate (presence).
 
 E6 managed-caller scenarios (not in E1): builder scope; orchestrator in a `delegation` run; worker node
 reading only its own execution; workers of non-delegation runs (U3); inherited ownership through ancestors
@@ -473,8 +487,15 @@ the deny-side check already gives. Not recommended; the choice is the owner's (r
 - `authoritative_digest` must be a non-empty digest of all authoritative state (derived caches excluded) and
   must differ between a seeded and an empty store; the harness fails a case whose digest is empty or constant,
   so another layout cannot make the "reads do not modify state" invariant vacuous.
-- `add_live_caller` takes semantic identity states, not `lstart` text; an adapter that cannot express one
-  returns unsupported and the case records a skip.
+- `add_live_caller` takes semantic identity states, not `lstart` text. `alive`, `reused`, `unknown` and a
+  terminal observed record are required; only `legacy_*` states may be reported unsupported (a recorded `legacy`
+  skip). An unsupported required state fails the scenario. The `recovery-activity` capture-loss branch is a
+  visible `unverified` skip that blocks `complete` unless excluded by name (`--exclude-unverified NAME`), and
+  the report records the exclusions.
+- Every task spec is complete (`backend`, `repo_path`, `freedom`, `session_id`, ...): the adapter has no
+  defaults for asserted values. An external adapter is re-hashed before every call, and its full digest is
+  recorded in the report and rechecked when the report is validated.
+- `root_state` reports `initialized` only when the marker and the store lock both exist.
 - `state-inspect` on a missing root must report `status: "missing"`, `reason: "missing_root"` and create
   nothing. Python decides this without creating any path; a Rust implementation should decide by
   `lstat`-style probing of the root and its ancestors (never following symlinks, never `mkdir`). The S07
