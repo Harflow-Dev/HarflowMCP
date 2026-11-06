@@ -205,3 +205,43 @@ Rust/platform/client qualification and full conformance remain unproven. See the
 [S09 coverage ledger](../docs/migration-receipts/S09-coverage.md) for required
 missing families and acceptance boundaries. S09 contributes evidence; it does not
 approve C0 or authorize the next migration session.
+
+## E1 read scenarios
+
+`conformance/e1` checks the bounded ctl reads from outside the engine: `list`, `status`,
+`status-batch`, `task-list-page` (including successor discovery), `task-events`, `task-prompt`,
+`task-artifacts`, `recovery-activity`, `interaction-events` and `statistics-page`, plus the caller and
+scoped-read refusals around them. It is a separate entry point from S07 and, like S07, imports no
+engine code.
+
+- **Oracle independence.** `seed.py` writes the documented private formats (store marker, task
+  metadata, normalized event lines, prompt sidecars, artifact manifests) as literal bytes with the
+  standard library, so an engine under test reads documents it did not write. Expected values in
+  `cases.py` are literals derived from the seed and `docs/contracts.md`. Nothing shares a codec with
+  an engine, and cursors are treated as opaque.
+- **Tags.** A check tagged `[contract]` follows the published text. A check tagged `[baseline]`
+  pins observed 0.0.11 behaviour that the contracts do not spell out; an engine that differs must
+  record a contract delta rather than diverge silently.
+- **Caller rules.** `agent_caller` is produced by registering the test process itself as a live
+  task, so the engine, as its descendant, is detected by ancestry; environment markers
+  (`HARFLOW_TASK_ID`, `PB_TASK_ID`, `HARFLOW_DEPTH`, `PB_DEPTH`) and unverifiable task history are
+  covered separately. Workflow-managed callers need workflow run documents and are not covered.
+- **Read-only.** After each case the marker, task metadata, event logs, prompt sidecars and
+  artifact manifests must be byte-identical to the seed (derived caches such as the listing index
+  are not compared).
+- **Targets.** `--source-repo/--commit/--python` runs a Git archive of an exact commit;
+  `--engine-bin/--engine-sha256` runs a caller-pinned binary. A subset (`--case`) is reported as
+  incomplete.
+
+```sh
+.venv/bin/python -m conformance.e1.scenarios \
+  --source-repo "$PWD" --commit "$(git rev-parse v0.0.11^{commit})" --python "$PWD/.venv/bin/python" \
+  --manifest "$PWD/contracts/v1/manifest.json" \
+  --manifest-sha256 cd58a5ef8bae565513669dcf4d4ac9179ea327d5093de4461806d7be8dae1873 \
+  --output /path/to/new-empty-dir
+.venv/bin/python -m pytest conformance/tests_e1 -q   # infrastructure self-checks
+```
+
+The self-checks include deviating-engine doubles (dropped fields, wrong status, missing authority
+refusal, state rewritten by a read) that must make the scenarios fail. Passing against Python 0.0.11
+establishes the scenarios, not any other engine.

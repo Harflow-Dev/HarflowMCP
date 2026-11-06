@@ -394,5 +394,29 @@
     "literal": "polybridge",
     "reason": "Documented deprecated publication-intent alias retained for one release.",
     "count": 1
+  },
+  {
+    "file": "conformance/README.md",
+    "literal": "PB_DEPTH",
+    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
+    "count": 1
+  },
+  {
+    "file": "conformance/README.md",
+    "literal": "PB_TASK_ID",
+    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
+    "count": 1
+  },
+  {
+    "file": "conformance/e1/cases.py",
+    "literal": "PB_DEPTH",
+    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
+    "count": 1
+  },
+  {
+    "file": "conformance/e1/cases.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Document and exercise the legacy caller variables the engine still honours as agent signals.",
+    "count": 1
   }
 ]
