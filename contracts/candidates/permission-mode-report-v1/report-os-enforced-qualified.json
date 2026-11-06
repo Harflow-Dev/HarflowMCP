@@ -1,0 +1,28 @@
+{
+  "candidate": "permission-mode-report-v1",
+  "document": {
+    "enforcement": {
+      "freedom": "write_in_repo",
+      "os_enforced": true,
+      "permission": {
+        "ambient_configuration": "uncontrolled",
+        "established_mode": "os_enforced",
+        "evidence": {
+          "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "platform": "darwin-arm64",
+          "probe_revision": "r1",
+          "state": "passed",
+          "version": "2.1.318"
+        },
+        "inherited_rules_may_change_behaviour": true,
+        "opt_in_source": "none",
+        "requested_mode": "os_enforced",
+        "tool_level_opt_in": false
+      }
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

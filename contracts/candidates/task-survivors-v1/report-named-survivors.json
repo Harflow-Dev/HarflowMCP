@@ -1,0 +1,37 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "survivors": {
+      "inventory": "complete",
+      "items": [
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 4001,
+            "start_microseconds": 5,
+            "start_seconds": 1700004001
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 4002,
+            "start_microseconds": 5,
+            "start_seconds": 1700004002
+          },
+          "name": "xcodebuild",
+          "state": "alive"
+        }
+      ],
+      "state": "present",
+      "truncated": false
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

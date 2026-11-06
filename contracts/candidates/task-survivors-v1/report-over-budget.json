@@ -1,0 +1,378 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "survivors": {
+      "inventory": "partial",
+      "items": [
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5000,
+            "start_microseconds": 5,
+            "start_seconds": 1700005000
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5001,
+            "start_microseconds": 5,
+            "start_seconds": 1700005001
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5002,
+            "start_microseconds": 5,
+            "start_seconds": 1700005002
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5003,
+            "start_microseconds": 5,
+            "start_seconds": 1700005003
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5004,
+            "start_microseconds": 5,
+            "start_seconds": 1700005004
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5005,
+            "start_microseconds": 5,
+            "start_seconds": 1700005005
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5006,
+            "start_microseconds": 5,
+            "start_seconds": 1700005006
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5007,
+            "start_microseconds": 5,
+            "start_seconds": 1700005007
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5008,
+            "start_microseconds": 5,
+            "start_seconds": 1700005008
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5009,
+            "start_microseconds": 5,
+            "start_seconds": 1700005009
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5010,
+            "start_microseconds": 5,
+            "start_seconds": 1700005010
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5011,
+            "start_microseconds": 5,
+            "start_seconds": 1700005011
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5012,
+            "start_microseconds": 5,
+            "start_seconds": 1700005012
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5013,
+            "start_microseconds": 5,
+            "start_seconds": 1700005013
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5014,
+            "start_microseconds": 5,
+            "start_seconds": 1700005014
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5015,
+            "start_microseconds": 5,
+            "start_seconds": 1700005015
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5016,
+            "start_microseconds": 5,
+            "start_seconds": 1700005016
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5017,
+            "start_microseconds": 5,
+            "start_seconds": 1700005017
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5018,
+            "start_microseconds": 5,
+            "start_seconds": 1700005018
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5019,
+            "start_microseconds": 5,
+            "start_seconds": 1700005019
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5020,
+            "start_microseconds": 5,
+            "start_seconds": 1700005020
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5021,
+            "start_microseconds": 5,
+            "start_seconds": 1700005021
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5022,
+            "start_microseconds": 5,
+            "start_seconds": 1700005022
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5023,
+            "start_microseconds": 5,
+            "start_seconds": 1700005023
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5024,
+            "start_microseconds": 5,
+            "start_seconds": 1700005024
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5025,
+            "start_microseconds": 5,
+            "start_seconds": 1700005025
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5026,
+            "start_microseconds": 5,
+            "start_seconds": 1700005026
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5027,
+            "start_microseconds": 5,
+            "start_seconds": 1700005027
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5028,
+            "start_microseconds": 5,
+            "start_seconds": 1700005028
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5029,
+            "start_microseconds": 5,
+            "start_seconds": 1700005029
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5030,
+            "start_microseconds": 5,
+            "start_seconds": 1700005030
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5031,
+            "start_microseconds": 5,
+            "start_seconds": 1700005031
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        },
+        {
+          "identity": {
+            "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+            "generation": "77777777777777777777777777777777",
+            "pid": 5032,
+            "start_microseconds": 5,
+            "start_seconds": 1700005032
+          },
+          "name": "gradle-daemon",
+          "state": "alive"
+        }
+      ],
+      "state": "present",
+      "truncated": true
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

@@ -1,0 +1,38 @@
+{
+  "candidate": "task-result-v1",
+  "document": {
+    "agent_result": "succeeded",
+    "background": {
+      "inventory": "complete",
+      "obligations": "satisfied",
+      "requirement": "required"
+    },
+    "settlement": {
+      "reason": "unsettled",
+      "release": "blocked",
+      "workflow": "blocked"
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "agent_result": "succeeded",
+    "capture": "lossless",
+    "claims": "reconciled",
+    "containment": "complete",
+    "execution": "healthy",
+    "exit": "zero",
+    "input": "reconciled",
+    "inventory": "complete",
+    "obligations": "satisfied",
+    "requirement": "required",
+    "result_binding": "matched",
+    "stderr": "eof",
+    "stdout": "open",
+    "sticky_failure": false,
+    "turn_open": false,
+    "watermark": "complete",
+    "writer": "settled"
+  },
+  "kind": "projection",
+  "v": 1
+}

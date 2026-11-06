@@ -1,0 +1,328 @@
+{
+  "advertised": false,
+  "candidate": "task-survivors-v1",
+  "capability": "task-survivors.v1",
+  "decision_basis": {
+    "bug_ledger": "MCP #118",
+    "plan_D12": "recommended_not_approved",
+    "release_route_D15": "undecided"
+  },
+  "files": [
+    {
+      "bytes": 258,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "envelope"
+      },
+      "filename": "envelope-future-version.json",
+      "sha256": "190fda2cd707a05beb5b200da36bbc958d5f1527abc99d9710264583a881f75f"
+    },
+    {
+      "bytes": 605,
+      "expected": {
+        "parse": "valid",
+        "state": "present"
+      },
+      "filename": "report-alive-beats-partial.json",
+      "sha256": "e19329d99540d451022d02add87ff2c6d88985c13931613fcbfda1d2a7e6bbac"
+    },
+    {
+      "bytes": 613,
+      "expected": {
+        "parse": "invalid",
+        "reason": "inconsistent_state"
+      },
+      "filename": "report-alive-claims-none.json",
+      "sha256": "a9fd1586469f8e3bbad2ed8d562725159a882a4509fd53c3cdc060d4f8b803da"
+    },
+    {
+      "bytes": 612,
+      "expected": {
+        "parse": "valid",
+        "state": "none_observed"
+      },
+      "filename": "report-all-dead.json",
+      "sha256": "6645e93b299f11f79c8693762a6e1fa820529886dac7ea8c2276ec261bfaa722"
+    },
+    {
+      "bytes": 257,
+      "expected": {
+        "parse": "invalid",
+        "reason": "inconsistent_state"
+      },
+      "filename": "report-empty-partial-claims-none.json",
+      "sha256": "3aafd1a47a387bb5f824409afd1cb08299c6ed419afcf08acec8745f7d3660cd"
+    },
+    {
+      "bytes": 608,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "enum"
+      },
+      "filename": "report-future-item-state.json",
+      "sha256": "6ba8c873571273fc6ce4682941c2e1f99373a7c56e2ecc41b339292b93ceb945"
+    },
+    {
+      "bytes": 545,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "report-identity-without-generation.json",
+      "sha256": "e2299711b95dc76366c3aaccaaaf7458d4d6167323b6ecb43090ed232657e55b"
+    },
+    {
+      "bytes": 953,
+      "expected": {
+        "parse": "valid",
+        "state": "present"
+      },
+      "filename": "report-named-survivors.json",
+      "sha256": "2548cb0cafa82fe415bade7bec3944030698972502e7cdc6b67a1e5a7f11528e"
+    },
+    {
+      "bytes": 258,
+      "expected": {
+        "parse": "valid",
+        "state": "none_observed"
+      },
+      "filename": "report-none-observed.json",
+      "sha256": "c662d6254d350f7c9954e2f5f14f4952dfb19b161de5c80e66c47a405dd120e7"
+    },
+    {
+      "bytes": 11773,
+      "expected": {
+        "parse": "invalid",
+        "reason": "budget"
+      },
+      "filename": "report-over-budget.json",
+      "sha256": "5b49fe5bc7ecec36080558b3e667f534613f31b81ac64fd8634c6858d4c706b7"
+    },
+    {
+      "bytes": 604,
+      "expected": {
+        "parse": "valid",
+        "state": "unknown"
+      },
+      "filename": "report-partial-inventory-is-unknown.json",
+      "sha256": "024b9c5848039f82576f733060cf85480cff15ddee9c732beca3e0f5779aa98b"
+    },
+    {
+      "bytes": 606,
+      "expected": {
+        "parse": "invalid",
+        "reason": "inconsistent_state"
+      },
+      "filename": "report-truncated-complete.json",
+      "sha256": "6edc07c51783f86b1eb3873229b57f3461b308205ee770c14327beccf33ced47"
+    },
+    {
+      "bytes": 956,
+      "expected": {
+        "parse": "valid",
+        "state": "unknown"
+      },
+      "filename": "report-unknown-item-is-unknown.json",
+      "sha256": "4808438f4b3b3f1bd6261f8246b98795f754d2e1aeaf8655589ae93883bdee57"
+    },
+    {
+      "bytes": 434,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "retention-boolean-as-number.json",
+      "sha256": "4e5d58d81a1092318b0f6c92a61e672cf8c9058ef03adbfaf23546da9e0f1fb4"
+    },
+    {
+      "bytes": 447,
+      "expected": {
+        "parse": "valid",
+        "reason": "no_survivors",
+        "replay": "not_applicable",
+        "settlement": "not_applicable",
+        "slot": "release_eligible"
+      },
+      "filename": "retention-clear-is-eligible.json",
+      "sha256": "2fb7be2a3b9cd8e0edbc759a1a523782de7a8fdbae051f376b4cd7b62aec8542"
+    },
+    {
+      "bytes": 441,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "retention-early-release-is-refused.json",
+      "sha256": "8f6449ff5543b5f0a337e8b3f8b8cbb0631e8bb53bee5fb620c7ee849b7e6d98"
+    },
+    {
+      "bytes": 428,
+      "expected": {
+        "parse": "valid",
+        "reason": "human_release",
+        "replay": "not_authorized",
+        "settlement": "not_implied",
+        "slot": "released"
+      },
+      "filename": "retention-human-release-unknown.json",
+      "sha256": "95bdd63659ead781e860e068b50e9b50ee3ab881b285562f29a927175357b63e"
+    },
+    {
+      "bytes": 429,
+      "expected": {
+        "parse": "valid",
+        "reason": "human_release",
+        "replay": "not_authorized",
+        "settlement": "not_implied",
+        "slot": "released"
+      },
+      "filename": "retention-human-release.json",
+      "sha256": "65fd97423ac991b74d8f7e5c8a67bcf49bf04f703de80ad6a2a6d40d64176ccf"
+    },
+    {
+      "bytes": 446,
+      "expected": {
+        "parse": "valid",
+        "reason": "survivors_unknown",
+        "replay": "not_applicable",
+        "settlement": "not_applicable",
+        "slot": "retained"
+      },
+      "filename": "retention-partial-holds-slot.json",
+      "sha256": "8ec5eb14f426a9aa0a1d77f5ebdd5749ff6485f828db97695bca6fb8e884c29a"
+    },
+    {
+      "bytes": 429,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "retention-release-cannot-authorize-replay.json",
+      "sha256": "a2b677883819d8fd92112ac95caf7dfed8cc9aa99a1b47da66cb4bfb5a7c4f14"
+    },
+    {
+      "bytes": 425,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "enum"
+      },
+      "filename": "retention-release-cannot-claim-settlement.json",
+      "sha256": "183ced3755aed910adb63b6579a6e63a787d87ba8efac8a6a498b4528b8c1285"
+    },
+    {
+      "bytes": 438,
+      "expected": {
+        "parse": "valid",
+        "reason": "confirmation_required",
+        "replay": "not_authorized",
+        "settlement": "not_implied",
+        "slot": "retained"
+      },
+      "filename": "retention-release-needs-confirmation.json",
+      "sha256": "81fe17cddf45e34d4e0988a5cfdddf384ddcfa68ca9c609453fe147c0f14a47f"
+    },
+    {
+      "bytes": 438,
+      "expected": {
+        "parse": "valid",
+        "reason": "survivors_present",
+        "replay": "not_applicable",
+        "settlement": "not_applicable",
+        "slot": "retained"
+      },
+      "filename": "retention-survivors-hold-slot.json",
+      "sha256": "24ffdd24427321ff090ba6037c367554f1ef5f0dd197bb089e8a354a1d65caed"
+    },
+    {
+      "bytes": 438,
+      "expected": {
+        "parse": "valid",
+        "reason": "survivors_unknown",
+        "replay": "not_applicable",
+        "settlement": "not_applicable",
+        "slot": "retained"
+      },
+      "filename": "retention-unknown-holds-slot.json",
+      "sha256": "73e567585b058d2521ef70e82ae99482f8beb48e230c9b31ac9de347c6a3cf30"
+    },
+    {
+      "bytes": 650,
+      "expected": {
+        "decision": "permit",
+        "parse": "valid",
+        "reason": "identity_current"
+      },
+      "filename": "signal-current-identity.json",
+      "sha256": "9bd74ad4247beb7b2d947ac96bc731aae5f780497ac0b5c6b7c225a4d0e304c3"
+    },
+    {
+      "bytes": 426,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "signal-missing-observed.json",
+      "sha256": "a64fff90030d6019d1735b05644b3f3d93ae047488ac5fc89e710e0f1d15db0f"
+    },
+    {
+      "bytes": 651,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "identity_mismatch"
+      },
+      "filename": "signal-other-boot.json",
+      "sha256": "b5e0d9431cc1958926000f77010e721cc2a62976c8099573e2af6e33b9bcf983"
+    },
+    {
+      "bytes": 641,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "signal-permit-after-reuse.json",
+      "sha256": "825da68e2d87bd274043adebf569625dcbe310cee32697ea66770058a938aadb"
+    },
+    {
+      "bytes": 651,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "identity_mismatch"
+      },
+      "filename": "signal-pid-reused.json",
+      "sha256": "7b8a40043d55bdc0780d4f99fe35adc75c2af72a4545d479e768829e4760b1df"
+    },
+    {
+      "bytes": 650,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "generation_stale"
+      },
+      "filename": "signal-stale-generation.json",
+      "sha256": "0f12bbeba960beb9b57ccea83f19646ffc6175ab825e468d76c6c79a0e9a474d"
+    },
+    {
+      "bytes": 448,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "identity_unknown"
+      },
+      "filename": "signal-unobservable.json",
+      "sha256": "0ae7122511442c3e0f7b5f5145509100f8a71c90d03aa411548c2470d461a052"
+    }
+  ],
+  "format": "harflow.c1.candidate.component",
+  "provenance": "synthetic_specification",
+  "python_runtime_support": false,
+  "specifications": [
+    {
+      "path": "docs/decisions/C1-task-survivors.md",
+      "sha256": "8523f24d156b6be35449a4d7559784a522c9cbbd25c50439dcd822142434e916"
+    }
+  ],
+  "status": "specified_unimplemented",
+  "v": 1
+}

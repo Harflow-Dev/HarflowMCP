@@ -1,0 +1,21 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "slot": {
+      "reason": "confirmation_required",
+      "replay": "not_authorized",
+      "settlement": "not_implied",
+      "state": "retained"
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "confirm_unsettled": false,
+    "human_release": true,
+    "inventory": "complete",
+    "slot": "held",
+    "survivors": "present"
+  },
+  "kind": "retention",
+  "v": 1
+}

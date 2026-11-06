@@ -1,0 +1,250 @@
+{
+  "advertised": false,
+  "candidate": "task-result-v1",
+  "capability": "task-result-separation.v1",
+  "decision_basis": {
+    "bug_ledger": "MCP #110",
+    "owner_runtime_decision_2": "approved"
+  },
+  "files": [
+    {
+      "bytes": 894,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "cancelled",
+        "release": "evidence_complete",
+        "workflow": "cancelled"
+      },
+      "filename": "cancelled.json",
+      "sha256": "196d27d050ac2731d03bf1d3db7a016b0a1e58263953802670fd8a47a197a5ce"
+    },
+    {
+      "bytes": 894,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "document-contradicts-input.json",
+      "sha256": "b605269241a8116bd7ecaf9967b157f47d24a71e788d8cf39d749ce34403836f"
+    },
+    {
+      "bytes": 890,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "enum"
+      },
+      "filename": "document-future-enum.json",
+      "sha256": "7d17a59ea48eb41b214a57a3a54cb12d7e7a79867427f953ca8d7f33f0cef5e6"
+    },
+    {
+      "bytes": 861,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "document-missing-inventory.json",
+      "sha256": "0c3272b03fbfd137da821359f887b2584ce24ebdcec44ecd455de21149ce41d5"
+    },
+    {
+      "bytes": 895,
+      "expected": {
+        "parse": "invalid",
+        "reason": "envelope"
+      },
+      "filename": "envelope-foreign-candidate.json",
+      "sha256": "f0c2ae8104a1399b6d3fffeebabbbf1bd6d09d5cf1bd06caf15b919bf4622651"
+    },
+    {
+      "bytes": 888,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "envelope"
+      },
+      "filename": "envelope-future-kind.json",
+      "sha256": "ec8c7dea0df19e7de08f611cc438f82d9c5bdd4c3d07bf5dac47d9d911b7ef29"
+    },
+    {
+      "bytes": 892,
+      "expected": {
+        "parse": "unsupported",
+        "reason": "envelope"
+      },
+      "filename": "envelope-future-version.json",
+      "sha256": "dbf717c3ebda93fc8c374162b388825f7c6d46b5571d1a5aa84b0ced652fe296"
+    },
+    {
+      "bytes": 903,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "execution_failed",
+        "release": "evidence_complete",
+        "workflow": "failed"
+      },
+      "filename": "execution-failure-not-hidden-by-incidental.json",
+      "sha256": "24edb29d4f6b2cf0172f224ccd0f31a61e917d760147923e15ec03f0cc81bc9a"
+    },
+    {
+      "bytes": 890,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "evidence_complete",
+        "workflow": "succeeded"
+      },
+      "filename": "incidental-failed-keeps-success.json",
+      "sha256": "f632b58239aef82fa87f1084223edf7f6634b68ae714411df86114aa4011eeb3"
+    },
+    {
+      "bytes": 888,
+      "expected": {
+        "parse": "invalid",
+        "reason": "projection_mismatch"
+      },
+      "filename": "incidental-failure-cannot-rewrite-result.json",
+      "sha256": "370730362a60bcb2bc4d98f71bceb09d88c5170badb16b8d1925d539985b4ec7"
+    },
+    {
+      "bytes": 882,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "blocked",
+        "workflow": "succeeded"
+      },
+      "filename": "incidental-pending-holds-release.json",
+      "sha256": "684b1cb782d11080cbb7594866be5724e8339b546ba0ae18ecc38af439fa7dde"
+    },
+    {
+      "bytes": 888,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "input-boolean-as-number.json",
+      "sha256": "6f98943839106d449d0db61acf2927707240b6c1683d4c3a2b470df5386a66d6"
+    },
+    {
+      "bytes": 881,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "open-pipe-is-unsettled.json",
+      "sha256": "8b76e2cec6ee352a3cd7f4ab167ba64a780fe6849ae387a496c9abb39dffb313"
+    },
+    {
+      "bytes": 877,
+      "expected": {
+        "agent_result": "unknown",
+        "parse": "valid",
+        "reason": "unsettled",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "open-turn-hides-success.json",
+      "sha256": "f05e402c7f3aab0de714a933b4a25a5d523cd8620ee394596cde37a8f8f86b5a"
+    },
+    {
+      "bytes": 880,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "partial-inventory-is-not-empty.json",
+      "sha256": "f970a60ddab85bceb24313155f162649a51ab18e72cb26748cb04f72dbabb666"
+    },
+    {
+      "bytes": 900,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "required_obligation_failed",
+        "release": "evidence_complete",
+        "workflow": "failed"
+      },
+      "filename": "required-failed.json",
+      "sha256": "c68d8e79b7b1ad1a0dfe17780a0927e319f58a94c3b863a09746802ec50837ba"
+    },
+    {
+      "bytes": 878,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "required-pending-blocks.json",
+      "sha256": "e7e56ef48aed269d97f02c3484af6df2505fdaee62103a1da18622998054d7c8"
+    },
+    {
+      "bytes": 892,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "succeeded",
+        "release": "evidence_complete",
+        "workflow": "succeeded"
+      },
+      "filename": "settled.json",
+      "sha256": "b0cb32bdcaefa2379800833a0d658003f74aa2ea0605ef7f4146f5f224ab700c"
+    },
+    {
+      "bytes": 886,
+      "expected": {
+        "agent_result": "unknown",
+        "parse": "valid",
+        "reason": "result_unknown",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "stale-result-is-unknown.json",
+      "sha256": "db5b9e1b7510b41dbe39b4b976fb45b59149c04ecc718db6393bf0e057e4b33c"
+    },
+    {
+      "bytes": 889,
+      "expected": {
+        "agent_result": "failed",
+        "parse": "valid",
+        "reason": "result_failed",
+        "release": "evidence_complete",
+        "workflow": "failed"
+      },
+      "filename": "sticky-failure-wins.json",
+      "sha256": "014fa098eb2e6a33ceb5cc05c5373c95d27735a7b7dfff3aae3bac20c4f4d060"
+    },
+    {
+      "bytes": 876,
+      "expected": {
+        "agent_result": "succeeded",
+        "parse": "valid",
+        "reason": "obligations",
+        "release": "blocked",
+        "workflow": "blocked"
+      },
+      "filename": "unknown-requirement-never-incidental.json",
+      "sha256": "073cbd67c34f39634b6c66a99d81175862cc4a1896e8deeb3a4709c7fc1bdb5d"
+    }
+  ],
+  "format": "harflow.c1.candidate.component",
+  "provenance": "synthetic_specification",
+  "python_runtime_support": false,
+  "specifications": [
+    {
+      "path": "docs/decisions/C1-task-result-separation.md",
+      "sha256": "ff8be0ac0da0db5f0418832a404b8e13363babb5a2423b7731fc169e31a1f3f8"
+    }
+  ],
+  "status": "specified_unimplemented",
+  "v": 1
+}

@@ -1,0 +1,26 @@
+{
+  "candidate": "task-survivors-v1",
+  "document": {
+    "decision": "permit",
+    "reason": "identity_current"
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "observed": {
+      "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+      "generation": "77777777777777777777777777777777",
+      "pid": 4001,
+      "start_microseconds": 5,
+      "start_seconds": 1
+    },
+    "recorded": {
+      "boot_uuid": "12345678-1234-1234-1234-123456789abc",
+      "generation": "77777777777777777777777777777777",
+      "pid": 4001,
+      "start_microseconds": 5,
+      "start_seconds": 1700004001
+    }
+  },
+  "kind": "signal",
+  "v": 1
+}
