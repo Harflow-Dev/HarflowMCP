@@ -20,10 +20,10 @@ S07_REPO="$PWD"
 S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
 .venv/bin/python -m conformance \
   --source-repo "$S07_REPO" \
-  --commit "$(git rev-parse v0.0.10^{commit})" \
+  --commit "$(git rev-parse v0.0.11^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 ceb336216b8e5b0938f101b2a8b2ba5f85e3d939e281c446461499a2ae5c4906 \
+  --manifest-sha256 cd58a5ef8bae565513669dcf4d4ac9179ea327d5093de4461806d7be8dae1873 \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```
@@ -38,9 +38,11 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 207-fixture 0.0.10 bundle. Earlier S07/S08/S09
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 291-fixture 0.0.11 bundle. Earlier S07/S08/S09
 receipts retain their original source and manifest identities; this repin does not requalify
-their scenarios, a managed runtime, or any consumer.
+their scenarios, a managed runtime, or any consumer. The S08 and S09 profiles still snapshot the older 0.0.7 sources
+(manifest `383ecf7a…`), which `verify_manifest` no longer accepts since the pinned digest moved
+with 0.0.10; rerunning them needs a per-source digest and is not part of this repin.
 
 ## Explicit binary target
 
