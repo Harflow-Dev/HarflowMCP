@@ -10,6 +10,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import select
 import selectors
@@ -58,26 +59,35 @@ def chain_of(pid, stop_pid):
     return current, chain, 'complete'
 
 
+PS_ROW = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s*(.*)$')
+
+
+def parse_process_table(text):
+    """Rows of `ps -axo pid=,ppid=,lstart=,command=` as `{(pid, lstart): command}`; tolerant of BSD and procps layouts."""
+    table = {}
+    for line in text.splitlines():
+        match = PS_ROW.match(line)
+        if match:
+            table[(int(match.group(1)), ' '.join(match.group(3).split()))] = match.group(4)
+    return table
+
+
 def process_table(limit=4 * 1024 * 1024):
     """Every process as `{(pid, lstart): command}` from one bounded `ps`; raises when it cannot be read."""
     done = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,lstart=,command='], capture_output=True, timeout=10,
                           env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
     if done.returncode != 0 or len(done.stdout) > limit:
         raise RuntimeError('process table unreadable or over its bound')
-    table = {}
-    for line in done.stdout.decode('utf-8', 'replace').splitlines():
-        fields = line.split(None, 7)
-        if len(fields) < 7 or not fields[0].isdigit():
-            continue
-        table[(int(fields[0]), ' '.join(fields[2:7]))] = fields[7] if len(fields) > 7 else ''
+    table = parse_process_table(done.stdout.decode('utf-8', 'replace'))
     if not table:
         raise RuntimeError('process table empty')
     return table
 
 
 class ProcessWatch:
-    """Independent evidence that a refused request started nothing: processes that appeared during a window
-    and whose command line names one of the markers (the isolated case path or the pinned engine path)."""
+    """Weak, text-based hint, **not** proof that a request started nothing: processes that appeared during a window
+    and whose command line names one of the markers. A detached process whose command line names neither (for
+    example `/bin/sleep 300`) is invisible to it, which is why it can never satisfy a no-spawn assertion."""
 
     def __init__(self, markers):
         self.markers = tuple(m for m in markers if m)
@@ -102,7 +112,6 @@ class OsObserver:
         self.controller_pid = os.getpid()
         self._condition = threading.Condition(threading.RLock())
         self._records, self._watched = {}, {}
-        self._conns = {}
         self._failed = False
         self._stop = threading.Event()
         self._queue = select.kqueue()

@@ -16,6 +16,12 @@ from .target import ENV_ALLOWLIST
 
 class SeamRequired(ConformanceError):
     """The case needs a running fake agent and the selected seam has none."""
+    partial = None
+
+
+class SpawnEvidenceUnavailable(SeamRequired):
+    """No independent evidence that a refused request started nothing can be collected, so the pass is withheld.
+    `partial` carries the checks that did succeed."""
 
 
 def require(condition, message, tag='baseline'):
@@ -54,16 +60,24 @@ class NoSeam:
         return [row['task_id'] for row in self.call(['list'])['tasks']]
 
     def watch_spawns(self):
-        """Independent OS evidence for a refusal: a `ps` snapshot diff for processes naming the isolated case or the
-        pinned engine. It sees only processes still alive at the end, so it complements (does not replace) the public
-        task listing. When the process table cannot be read, this raises and the refusal case cannot pass."""
-        watch = ProcessWatch(self.markers)
+        """No-spawn evidence for a refusal is **unavailable** without an observable agent.
+
+        A text-based process-table diff cannot see a detached process whose command line names neither marker
+        (for example `/bin/sleep 300`), and macOS offers no unprivileged descendant tracking (kqueue NOTE_TRACK
+        fails with EOPNOTSUPP, measured). The diff is therefore recorded only as a weak hint, and `verify`
+        always withholds the pass by raising `SpawnEvidenceUnavailable`."""
+        try:
+            watch = ProcessWatch(self.markers)
+        except Exception as exc:  # the hint is optional; its absence changes nothing
+            watch, hint_error = None, f'{type(exc).__name__}: {exc}'[:200]
+        else:
+            hint_error = None
 
         def verify():
-            started = watch.new_matching()
-            self.evidence['spawn_check'] = {'method': 'ps-snapshot-diff', 'markers': list(self.markers), 'new_matching': started,
-                                            'limits': 'processes that exited before the final snapshot are not seen'}
-            require(not started, f'a refused request left processes running: {started}', 'contract')
+            hint = watch.new_matching() if watch is not None else None
+            self.evidence['spawn_check'] = {'method': 'ps-snapshot-diff (weak hint, text-based)', 'markers': list(self.markers),
+                                            'new_matching': hint, 'hint_error': hint_error, 'proof': False}
+            raise SpawnEvidenceUnavailable('no independent descendant tracking: the no-spawn assertion is unverified and the pass is withheld')
         return verify
 
     def launch(self, *args, **kwargs):
@@ -129,8 +143,9 @@ class PythonInjectionSeam:
 
         def verify():
             ledgers = len(list((self.profile.output / 'fake-ledger').iterdir()))
-            self.evidence['spawn_check'] = {'method': 'observer-registrations', 'fakes_before': before, 'fakes_after': self.fakes_spawned(), 'ledgers': ledgers}
-            require(self.fakes_spawned() == before and ledgers == 0, 'a refused request spawned a fake or wrote fake evidence', 'contract')
+            self.evidence['spawn_check'] = {'method': 'observer-registrations (the fake agent only)', 'fakes_before': before,
+                                            'fakes_after': self.fakes_spawned(), 'ledgers': ledgers, 'proof': 'agents only'}
+            require(self.fakes_spawned() == before and ledgers == 0, 'a refused request started an agent (fake) or wrote fake evidence', 'contract')
         return verify
 
     def launch(self, mode='complete', **spec):

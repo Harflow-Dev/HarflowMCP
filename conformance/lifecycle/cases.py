@@ -8,7 +8,7 @@ reported as blocked, not passed. Each requirement carries a tag: `[contract]` fo
 import time
 
 from ..oracles import ConformanceError
-from .seams import require
+from .seams import SpawnEvidenceUnavailable, require
 
 FINAL_BOUND_SECONDS = 20
 
@@ -47,7 +47,7 @@ class Lifecycle:
 
 def refusals(c):
     seam = c.seam
-    verify = seam.watch_spawns()  # raises when independent spawn evidence is unavailable: the pass is withheld
+    verify = seam.watch_spawns()  # a seam without independent spawn evidence withholds the pass at the end
     attempts = [(['run', '--backend', 'nosuch', '--repo', str(seam.workspace), '--prompt', 'must not spawn'], 'unknown backend'),
                 (['resume', '99999999-9999-4999-8999-999999999999', 'must not spawn'], 'resume of an unknown task'),
                 (['cancel', '99999999-9999-4999-8999-999999999999'], 'cancel of an unknown task')]
@@ -59,8 +59,13 @@ def refusals(c):
     if usage is not None:
         require(usage['exit_code'] == 2 and usage['document']['error']['code'] == 'usage', 'an unknown option is not a usage error', 'contract')
     require(seam.task_ids() == [], 'a refused request left a task record', 'contract')
-    verify()
-    return {'refusals': len(attempts) + (1 if usage is not None else 0), 'spawn_check': seam.evidence.get('spawn_check')}
+    verified = {'refusals': len(attempts) + (1 if usage is not None else 0), 'codes_and_no_task_record': True}
+    try:
+        verify()
+    except SpawnEvidenceUnavailable as exc:
+        exc.partial = {**verified, 'spawn_check': seam.evidence.get('spawn_check'), 'no_spawn': 'unverified'}
+        raise
+    return {**verified, 'spawn_check': seam.evidence.get('spawn_check')}
 
 
 def complete(c):

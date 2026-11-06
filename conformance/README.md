@@ -282,9 +282,9 @@ conformance is unavailable on Linux**, and the observer self-checks are skipped 
 A case that needs a running agent on a seam without one is `blocked`, never passed. The report separates
 `no_failures`, `all_passed`, `subset` and `complete`; the exit status is zero only when `complete`. A run is
 `acceptance_eligible` only when the pinned binary equals a release digest and commit supplied independently
-(`--release-sha256`, `--release-commit`) and the seam is eligible. `refusals` also needs independent spawn evidence
-(a process-table diff) and is withheld when that evidence is unreadable. `--seam none` runs `refusals` for real and
-blocks the rest; `--seam python-injection` re-uses the S08 profile only to prove the case logic on Python and is
+(`--release-sha256`, `--release-commit`) and the seam is eligible. `refusals` verifies its codes and the empty task
+list, but "nothing was spawned" needs an observable agent, so without a fake it is `blocked` with its partial
+evidence (a command-text process diff cannot see a detached `/bin/sleep`). `--seam none` therefore blocks all six; `--seam python-injection` re-uses the S08 profile only to prove the case logic on Python and is
 never acceptance evidence (its extra environment keys are reported). The fake-backend seam and its conflict with
 D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 

@@ -219,17 +219,30 @@ def test_participant_lifetime_bound_ends_a_forgotten_fake():
     assert done.returncode == 70
 
 
-def test_process_watch_sees_a_lingering_process_naming_a_marker(tmp_path):
-    marker = f'marker-{os.getpid()}-{tmp_path.name}'
-    watch = observer_module.ProcessWatch([marker])
-    assert watch.new_matching() == []
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', marker])
+def test_process_table_parse_is_tolerant_of_bsd_and_procps_layouts():
+    text = """    1     0 Sat Nov  7 00:51:00 2026 /sbin/launchd
+ 4242     1 Sat Nov  7 00:52:01 2026 /bin/sleep 300
+12345  4242 Mon Jan 12 03:04:05 2026
+garbage line
+  77 1 Tue Nov  3 09:08:07 2026   padded   command  with   spaces
+"""
+    table = observer_module.parse_process_table(text)
+    assert table[(1, 'Sat Nov 7 00:51:00 2026')] == '/sbin/launchd'
+    assert table[(4242, 'Sat Nov 7 00:52:01 2026')] == '/bin/sleep 300'
+    assert table[(12345, 'Mon Jan 12 03:04:05 2026')] == ''
+    assert table[(77, 'Tue Nov 3 09:08:07 2026')].startswith('padded')
+    assert len(table) == 4
+
+
+def test_the_text_based_process_diff_misses_a_detached_sleep_so_it_cannot_prove_anything(tmp_path):
+    watch = observer_module.ProcessWatch([f'marker-{os.getpid()}-{tmp_path.name}'])
+    lingering = subprocess.Popen(['/bin/sleep', '300'], start_new_session=True)
     try:
-        found = watch.new_matching()
-        assert [pid for pid, _ in found] == [child.pid]
+        assert watch.new_matching() == []  # the process exists and is new, but its command line names no marker
+        assert any(pid == lingering.pid for pid, _ in observer_module.process_table())
     finally:
-        child.kill()
-        child.wait()
+        lingering.kill()
+        lingering.wait()
 
 
 # --- case gating --------------------------------------------------------------------------------------------
@@ -270,13 +283,27 @@ def test_refusals_pass_only_with_independent_evidence_and_no_side_effects(tmp_pa
         cases.refusals(cases.Lifecycle(started))
 
 
-def test_unreadable_process_evidence_withholds_the_refusal_pass(tmp_path, monkeypatch):
-    def unreadable(*_):
-        raise RuntimeError('process table unreadable or over its bound')
-    monkeypatch.setattr(observer_module, 'process_table', unreadable)
-    seam = seams.NoSeam(None, tmp_path)
-    with pytest.raises(RuntimeError, match='unreadable'):
-        seam.watch_spawns()
+def test_without_an_observable_agent_the_refusal_pass_is_withheld_but_the_rest_is_kept(tmp_path):
+    seam = seams.NoSeam(None, tmp_path, ['nothing-matches-this'])
+    seam.call, seam.task_ids = refuse_everything(seam), lambda: []
+    with pytest.raises(seams.SpawnEvidenceUnavailable) as raised:
+        cases.refusals(cases.Lifecycle(seam))
+    partial = raised.value.partial
+    assert partial['codes_and_no_task_record'] is True and partial['no_spawn'] == 'unverified'
+    assert partial['spawn_check']['proof'] is False and seam.evidence['spawn_check']['proof'] is False
+
+
+def _unavailable():
+    exc = seams.SpawnEvidenceUnavailable('unverified')
+    exc.partial = {'x': 1}
+    return exc
+
+
+def test_a_blocked_refusal_is_reported_blocked_with_its_partial_evidence(tmp_path):
+    def blocked(_):
+        raise _unavailable()
+    entry = runner.run_case('refusals', blocked, SimpleNamespace(seam='none'), tmp_path, make_target())
+    assert entry['status'] == 'blocked' and entry['partial_evidence'] == {'x': 1}
 
 
 def test_a_refusal_that_succeeds_fails_the_case(tmp_path):
@@ -344,12 +371,13 @@ def test_vocabulary_distinguishes_no_failures_all_passed_complete_and_subsets():
     assert not runner.assess(failed, None)['no_failures'] and not runner.assess([], None)['no_failures']
 
 
-def test_refusals_run_end_to_end_against_python_source_without_a_seam(tmp_path):
+def test_refusals_run_against_python_source_and_are_blocked_on_missing_spawn_evidence(tmp_path):
     from conformance.runner import isolated_environment
     folder = tmp_path / 'case'
     folder.mkdir()
     env = isolated_environment(folder)
     seam = seams.NoSeam(target.Engine(make_target(), env, folder / 'workspace', folder / 'ops'), folder / 'workspace', [str(folder)])
-    evidence = cases.refusals(cases.Lifecycle(seam))
-    assert evidence['refusals'] == 4 and evidence['spawn_check']['new_matching'] == []
+    with pytest.raises(seams.SpawnEvidenceUnavailable) as raised:
+        cases.refusals(cases.Lifecycle(seam))
+    assert raised.value.partial['refusals'] == 4 and raised.value.partial['codes_and_no_task_record'] is True
     assert [op['exit_code'] for op in seam.operations][:3] == [1, 1, 1]

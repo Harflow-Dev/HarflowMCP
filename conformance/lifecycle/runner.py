@@ -52,6 +52,8 @@ def run_case(name, function, args, output, target):
         entry['status'] = 'passed'
     except SeamRequired as exc:
         entry.update(status='blocked', reason=str(exc))
+        if exc.partial is not None:
+            entry['partial_evidence'] = exc.partial
     except Exception as exc:
         entry['failure'] = {'type': type(exc).__name__, 'message': str(exc)[:1500], 'trace': traceback.format_exc(limit=3)}
     finally:
