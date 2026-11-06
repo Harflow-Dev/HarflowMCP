@@ -979,6 +979,8 @@ def record_retained_control_session(supervisor: Any, activation: dict[str, Any],
 def accept_decision_locked(supervisor, r, node, token, activation, decision, execute, raw, protocol_warnings):
     """Original role acceptance, revalidated inside the tree mutation boundary."""
     w = _w()
+    if r.get('poststart', {}).get('ledger', {}).get('intent') is not None:
+        raise w.DispatchNotStarted('Poststart settlement holds ordinary root decisions')
     t = next(t for t in r["pending"] if t["id"] == token["id"])
     a = next(a for a in r["activations"] if a["id"] == activation["id"])
     selected, assignments, join = validate_decision(r, node, t, decision, execute, root=supervisor.store.root)
@@ -1311,6 +1313,9 @@ def worker_prompt(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
 
 
 def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, activation_id: str, value: dict[str, Any], outcome: dict[str, Any], error: str | None = None) -> None:
+    from .workflow_poststart import retired
+    if retired(run, activation_id, outcome.get('task_id')):
+        return
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
     token = next(t for t in run["pending"] if t["id"] == token_id)
     if activation.get("worker_result_required"):
@@ -1451,6 +1456,9 @@ def protocol_repair_prompt(node: dict[str, Any], token: dict[str, Any], source: 
 async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, Any]) -> None:
     w = _w()
     run = supervisor.run()
+    from .workflow_poststart import blocked_token, retired
+    if blocked_token(run, token) or retired(run, token.get('execution_activation_id')):
+        return
     if node.get("type") == "workflow":
         from .workflow_invocation import run_child
         await run_child(supervisor, node, token)
@@ -1494,6 +1502,8 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         raise w.WorkflowError("No accepted orchestrator assignment for node execution")
     activation = prior or supervisor._activation(node["id"], "node", copy.deepcopy(token))
     def reserve_assignment(r: dict[str, Any]) -> None:
+        if blocked_token(r, token) or retired(r, activation['id']):
+            raise w.DispatchNotStarted('Poststart control fences this assignment')
         current = next(t for t in r["pending"] if t["id"] == token["id"])
         current["execution_activation_id"] = activation["id"]
         execution = next(a for a in r["activations"] if a["id"] == activation["id"])
@@ -1521,7 +1531,7 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
             execution["resume_task_id"] = token["resume_task_id"]
         elif not execution.get("resume_question_id"):
             execution.pop("resume_task_id", None)
-    supervisor.update(reserve_assignment, "node_assignment_reserved")
+    supervisor.update(reserve_assignment, "node_assignment_reserved", {'activation_id': activation['id'], 'token_id': token['id']})
     from .workflow_prompt_delivery import optimized, worker_input_refs
     if optimized(run) and "authorized_input_refs" not in activation:
         authorized = worker_input_refs(run, supervisor.store.root, token)
@@ -1559,6 +1569,8 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         else:
             outcome = await supervisor._dispatch(dispatch_node, prompt, "node", activation)
     while outcome:
+        if retired(supervisor.run(refresh_atomic=True), activation['id'], outcome.get('task_id')):
+            return
         if next(a for a in supervisor.run(refresh_atomic=True)["activations"] if a["id"] == activation["id"]).get("worker_result_required"):
             return
         error = None
@@ -1586,6 +1598,8 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
 
         return
     # A question remains unresolved; preserve it instead of manufacturing a failure.
+    if retired(supervisor.run(refresh_atomic=True), activation['id']):
+        return
     current = next(a for a in supervisor.run()["activations"] if a["id"] == activation["id"])
     if current.get("pending_question_id"):
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="waiting_for_answer"), "answer_waiting")
@@ -1668,6 +1682,9 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
     """Reconnect proven outcomes; leave every ambiguous reservation uncertain."""
     nodes = {n["id"]: n for n in run["definition"]["nodes"]}
     for activation in run["activations"]:
+        from .workflow_poststart import controlled_activation
+        if controlled_activation(run, activation['id']):
+            continue
         if activation.get("worker_result_required"):
             continue  # Observe steering tasks in their dedicated runner; never restore ordinary output.
         if activation.get("on_demand_call_id"):

@@ -85,10 +85,12 @@ These controls do not impose a lifetime count quota on explicit conversation tur
 
 ## Integration and qualification gates
 
-The private synthetic ledger is not a production workflow record. Real workflow
+The standalone synthetic ledger is not a production workflow record. A separate
+[workflow-backed integration](ST04-workflow-checkpoints.md) now exercises actual
 admission, result acceptance, scheduler/join fences, resource transfer and launch
-integration remain undelivered. An accepting runtime must connect those checkpoints
-atomically and prove the adapter contract under its precise qualified profile.
+checkpoints under explicit unpaid fixture scopes. Qualified production integration
+remains gated: an accepting runtime must prove the adapter contract under its precise
+profile and cannot adopt fixture authority.
 The producer cannot be enabled by registering synthetic facts or selecting a flag.
 
 The original candidate bundle remains immutable and synthetic. The supported ctl

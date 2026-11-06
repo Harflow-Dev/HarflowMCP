@@ -54,6 +54,8 @@ def new_outer_job(supervisor, token, dispatcher_identity):
             return
         origins = tuple(copy.deepcopy(value) for value in context['origins'].values())
         try:
+            from .workflow_poststart_runtime import record_job_done as record_poststart_job_done
+            record_poststart_job_done(supervisor.store, run_id, context['job_id'], context['dispatcher_identity'], origins, task)
             record_job_done(supervisor.store, run_id, context['job_id'], context['dispatcher_identity'], origins, task)
         except Exception:
             import logging

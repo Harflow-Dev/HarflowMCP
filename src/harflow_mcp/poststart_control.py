@@ -21,7 +21,7 @@ class Handoff:
 
 class SyntheticCoordinator:
     def __init__(self, store, handle, adapter):
-        schema.require(type(store) is PoststartStore and getattr(adapter, 'synthetic', None) is True and getattr(adapter, 'adapter_id', None) == handle.adapter_id, 'synthetic_adapter_required')
+        schema.require(isinstance(store, PoststartStore) and getattr(adapter, 'synthetic', None) is True and getattr(adapter, 'adapter_id', None) == handle.adapter_id, 'synthetic_adapter_required')
         self.store = store.reopen(handle)
         self.handle = handle
         self.adapter = adapter

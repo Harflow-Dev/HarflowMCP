@@ -1325,6 +1325,8 @@ class WorkflowStore:
         status for an active one; a callable decides from the mutated run. Replays and no-ops never stamp.
         """
         observed, _ = self._read_run(run_id, refresh_atomic=True)
+        from . import workflow_poststart as poststart
+        poststart.prepare_update(self, observed, event, detail)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         # All tree mutations serialize with the human cancellation eligibility check.
         from .catalog import catalog_lock, Catalog
@@ -1333,6 +1335,8 @@ class WorkflowStore:
             current_root = (run.get("parent_link") or {}).get("root_workflow_run_id") or run_id
             if current_root != root_id:
                 raise WorkflowRunDocumentError(run_id, "Run root changed before mutation locks", code="workflow_run_unavailable")
+            poststart_before = copy.deepcopy(run) if 'poststart' in run or event.startswith('poststart:') else None
+            poststart.before_update(self, run, event, detail)
             from .orchestrator_steering import fence as steering_fence
             steering_fence(self, run, event, detail)
             from .steering_lifecycle import fence as worker_steering_fence
@@ -1415,6 +1419,8 @@ class WorkflowStore:
             run.pop("settling", None)
             run.pop("can_cancel_from_monitor", None)
             run.pop("monitor_cancel_reason", None)
+            if poststart_before is not None:
+                poststart.after_update(self, poststart_before, run, event, detail)
             from .workflow_run_documents import encode
             try:
                 from .replan_retention import qualify_references
@@ -2246,10 +2252,18 @@ class WorkflowStore:
         return result
 
     @layout_operation
-    def reconcile_run(self, run_id: str, *, resource_owner_dead: bool = False) -> dict[str, Any]:
+    def reconcile_run(self, run_id: str, *, resource_owner_dead: bool = False, fixture_scope=None) -> dict[str, Any]:
         """Recover recorded outcomes, or authoritative quota failures after confirmed death."""
+        observed=self.get_run(run_id,refresh_atomic=True)
+        if 'poststart' in observed:
+            if fixture_scope is None:
+                return observed  # Observation cannot reconstruct a fixture execution capability.
+            fixture_scope.check(self,run_id)
         def reconcile(r: dict[str, Any]) -> None:
             for activation in r["activations"]:
+                from .workflow_poststart import controlled_activation
+                if controlled_activation(r, activation['id']):
+                    continue
                 if activation.get("worker_result_required"):
                     # The dedicated owner observes exact original/steering generations;
                     # generic recovery cannot advance a steering question or result.
@@ -3238,6 +3252,10 @@ class WorkflowSupervisor:
         return True
 
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
+        from .workflow_poststart_runtime import fixture_dispatch
+        handled, fixture_result = await fixture_dispatch(self, node, prompt, role, activation)
+        if handled:
+            return fixture_result
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
@@ -3647,6 +3665,8 @@ class WorkflowSupervisor:
                         timeout_deadline = time.time() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
                         reservation["timeout_deadline"] = timeout_deadline
                         self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
+                        from .workflow_poststart_runtime import assert_ordinary_dispatch
+                        assert_ordinary_dispatch(self.run(refresh_atomic=True), activation['id'])
                         if role == "node" and freedom != "read_only":
                             from . import scratch
                             dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records. $HARFLOW_CHAIN_SCRATCH and $HARFLOW_GROUP_SCRATCH, when set, are shared folders that persist across resumes and sibling tasks."
@@ -3972,6 +3992,9 @@ class WorkflowSupervisor:
 
     def _task_update(self, aid: str, tid: str, values: dict[str, Any]) -> None:
         def update(r: dict[str, Any]) -> None:
+            from .workflow_poststart import retired
+            if retired(r, aid, tid):
+                return
             from .workflow_replan import retired_execution
             if retired_execution(r, aid, tid, storage=self.store):
                 return
@@ -4000,12 +4023,16 @@ class WorkflowSupervisor:
         return await self._legacy_decision(node, result, token)
 
     async def _node(self, token: dict[str, Any]) -> None:
+        from .workflow_poststart_runtime import require_fixture_scope
+        require_fixture_scope(self,self.run(refresh_atomic=True))
         if self.run().get("execution_contract") == "delegation":
             from .workflow_delegation import process_node
             return await process_node(self, token)
         return await self._legacy_node(token)
 
     async def _execute_node(self, node: dict[str, Any], token: dict[str, Any]) -> None:
+        from .workflow_poststart_runtime import require_fixture_scope
+        require_fixture_scope(self,self.run(refresh_atomic=True))
         if self.run().get("execution_contract") == "delegation":
             from .workflow_delegation import execute_node
             return await execute_node(self, node, token)
@@ -4160,6 +4187,9 @@ class WorkflowSupervisor:
         def advance(rr: dict[str, Any]) -> None:
             nonlocal token, selected_join
             current_token = next((t for t in rr["pending"] if t["id"] == token["id"]), None)
+            from .workflow_poststart import blocked_token
+            if current_token is not None and blocked_token(rr, current_token):
+                return
             if rr["status"] != "running" or current_token is None or current_token.get("node_id") != node["id"]:
                 return
             if any(current_token.get(key) != token.get(key) for key in ("execution_activation_id", "accepted_decision_id", "selected_connections", "decision_id")):
@@ -4316,6 +4346,9 @@ class WorkflowSupervisor:
 
     def _arrive_join(self, token: dict[str, Any]) -> bool:
         r = self.run()
+        from .workflow_poststart import blocked_token
+        if blocked_token(r, token):
+            return True
         node = next(n for n in r["definition"]["nodes"] if n["id"] == token["node_id"])
         stack = token.get("stack", [])
         if stack and stack[-1] in r.get("released_parallel_groups", {}):
@@ -4337,6 +4370,9 @@ class WorkflowSupervisor:
                 self.attention("Required failed parallel branch needs explicit recovery before its Parallel end")
                 return True
         def arrive(rr: dict[str, Any]) -> None:
+            current = next((t for t in rr['pending'] if t['id'] == token['id']), None)
+            if current is None or blocked_token(rr, current):
+                return
             stack = token.get("stack", [])
             if not stack:
                 raise WorkflowError("Join lacks an activation generation")
@@ -4369,7 +4405,9 @@ class WorkflowSupervisor:
     async def reconcile(self) -> bool:
         """Reconcile owner evidence; detached owners retain their pipes."""
         before = self.run(refresh_atomic=True)
-        self.store.reconcile_run(self.run_id, resource_owner_dead=not _supervisor_present(before))
+        from .workflow_poststart_runtime import require_fixture_scope
+        require_fixture_scope(self,before)
+        self.store.reconcile_run(self.run_id, resource_owner_dead=not _supervisor_present(before),fixture_scope=getattr(self,'poststart_fixture_scope',None))
         from .workflow_on_demand import reconcile as reconcile_on_demand
         reconcile_on_demand(self.store, self.run(refresh_atomic=True))
         if self.tree.slots is None:
@@ -4398,6 +4436,8 @@ class WorkflowSupervisor:
         require_dispatch_layout(self.registry.log_dir)
         self.run_id = run_id
         run = self.run(refresh_atomic=True)
+        from .workflow_poststart_runtime import require_fixture_scope
+        require_fixture_scope(self,run)
         from . import identity
         restoring_tree = self.tree.slots is None and run.get("kind") != "builder" and not run.get("parent_link")
         if not await self.reconcile() and self.run(refresh_atomic=True)["status"] != "cancelling":
@@ -4455,6 +4495,8 @@ class WorkflowSupervisor:
                         self.update(lambda r: r.update(status="cancelling"), "ancestor_terminal", {"root": root_id, "status": root_status})
                         run = self.run(refresh_atomic=True)
                 if run["status"] == "cancelling":
+                    if 'poststart' in run:
+                        raise DispatchNotStarted('Fixture poststart domains cannot fall back to ordinary provider cancellation')
                     cancellation = await self.tree.cancel_descendants(run_id, self.registry)
                     if cancellation["unresolved_runs"] or cancellation["errors"]:
                         self.update(lambda r: r.update(cancellation_errors=cancellation), "cancel_descendant_errors", cancellation)
@@ -4495,7 +4537,8 @@ class WorkflowSupervisor:
                     for token in sorted(run["pending"], key=lambda t: t["id"] not in recovering_tokens):
                         from .orchestrator_steering import scheduling_held
                         from .steering_lifecycle import scheduling_blocked
-                        if scheduling_held(self.store, run, token) or scheduling_blocked(self.store, run, token):
+                        from .workflow_poststart import blocked_token
+                        if scheduling_held(self.store, run, token) or scheduling_blocked(self.store, run, token) or blocked_token(run, token):
                             continue
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
@@ -4579,6 +4622,8 @@ class WorkflowSupervisor:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
         self.run_id = run_id
+        from .workflow_poststart_runtime import require_fixture_scope
+        require_fixture_scope(self,self.run(refresh_atomic=True))
         recovered_forwarding = False
         def recover_feedback(r: dict[str, Any]) -> None:
             nonlocal recovered_forwarding

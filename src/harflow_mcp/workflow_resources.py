@@ -322,6 +322,9 @@ def finish_attempt(supervisor: Any, aid: str, ra: dict[str, Any] | None) -> None
         return
     from .task_resources import ledger_for
     run = supervisor.run(refresh_atomic=True)
+    from .workflow_poststart_runtime import claim_protected
+    if claim_protected(run, aid):
+        return
     task = next((t for a in run["activations"] for t in a["tasks"] if t["task_id"] == ra.get("task_id")), None)
     if task is not None and task.get("status") not in TERMINAL:
         return
@@ -332,6 +335,9 @@ def finish_attempt(supervisor: Any, aid: str, ra: dict[str, Any] | None) -> None
 def abandon_attempt(supervisor: Any, aid: str, ra: dict[str, Any] | None) -> None:
     """Publication failed before a spawn request; no process can own this grant."""
     if ra is None:
+        return
+    from .workflow_poststart_runtime import claim_protected
+    if claim_protected(supervisor.run(refresh_atomic=True), aid):
         return
     from .task_resources import ledger_for
     try:
@@ -421,6 +427,8 @@ async def prepare_run(supervisor: Any) -> bool:
 
 
 def _unresolved(storage: Any, run: dict[str, Any], seen: set[str] | None = None) -> bool:
+    if run.get('poststart', {}).get('ledger', {}).get('intent') is not None:
+        return True
     seen = set() if seen is None else seen
     rid = run["workflow_run_id"]
     if rid in seen:
@@ -457,6 +465,9 @@ def reconcile(storage: Any, run: dict[str, Any], *, owner_dead: bool) -> dict[st
     released = []
     changes = []
     for activation in run.get("activations", []):
+        from .workflow_poststart_runtime import claim_protected
+        if claim_protected(run, activation['id']):
+            continue
         for ra in _attempts(activation):
             if ra.get("released"):
                 continue
@@ -507,6 +518,9 @@ def owner_resolvers(log_dir: Path) -> dict[str, Any]:
         from .workflows import WorkflowStore
         storage = WorkflowStore(log_dir.parent)
         run = storage.get_run(entry.owner.workflow_run_id, refresh_atomic=True)
+        from .workflow_poststart_runtime import protected_reservation
+        if protected_reservation(run, entry.reservation_id):
+            return resources.KEEP
         if entry.owner.kind == "workflow_run":
             return resources.SETTLED if run["status"] in TERMINAL and not _unresolved(storage, run) else resources.KEEP
         for activation in run["activations"]:
@@ -528,6 +542,10 @@ def collect_evidence(log_dir: Path) -> list[dict[str, Any]]:
     storage = WorkflowStore(log_dir.parent)
     specs = []
     for run in storage.list_runs(strict=True):
+        from .workflow_poststart_runtime import claim_protected, resource_specs
+        transferred=resource_specs(run)
+        specs.extend(transferred)
+        transferred_ids={spec['reservation_id'] for spec in transferred}
         held = run.get("resources") or {}
         if held.get("state") in {"granted", "held"}:
             spec = {"reservation_id": held["reservation_id"], "names": held["names"], "owner": {"kind": "workflow_run", "workflow_run_id": run["workflow_run_id"]}}
@@ -538,7 +556,11 @@ def collect_evidence(log_dir: Path) -> list[dict[str, Any]]:
                 spec["release_requested"] = True
             specs.append(spec)
         for activation in run["activations"]:
+            if claim_protected(run,activation['id']):
+                continue
             for ra in _attempts(activation):
+                if ra['reservation_id'] in transferred_ids:
+                    continue
                 if ra["state"] not in {"granted", "attached"}:
                     continue
                 spec = {"reservation_id": ra["reservation_id"], "names": ra["names"], "owner": {"kind": "workflow_attempt", "workflow_run_id": run["workflow_run_id"], "activation_id": ra["id"]}}

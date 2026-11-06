@@ -808,6 +808,35 @@ class ResourceLedger:
             return result
         return self._transact(action)
 
+    def transfer_owned_workflow_attempt(self, reservation_id: str, workflow_run_id: str,
+                                        old_attempt_id: str, new_attempt_id: str, *,
+                                        expected_names: Iterable[str], expected_generation: int) -> Entry:
+        """Atomically transfer one exact standalone grant, without admitting waiters."""
+        validate_reservation_id(reservation_id)
+        names = validate_names(expected_names)
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ResourceOwnerMismatch('Invalid expected resource generation')
+        old = Owner('workflow_attempt', workflow_run_id=workflow_run_id, activation_id=old_attempt_id).as_dict()
+        new = Owner('workflow_attempt', workflow_run_id=workflow_run_id, activation_id=new_attempt_id).as_dict()
+        _owner_from(old)
+        _owner_from(new)
+        if old == new:
+            raise ResourceOwnerMismatch('Transfer requires a distinct exact owner')
+        def action(transaction: _Transaction) -> Entry:
+            raw = transaction.find(reservation_id)
+            if (raw is None or tuple(raw['names']) != names or raw['state'] != 'held'
+                    or raw.get('borrows_from') is not None or transaction.borrowers_of(reservation_id)
+                    or raw.get('release_requested', False) or raw.get('purpose', 'whole_task') != 'whole_task'):
+                raise ResourceOwnerMismatch('Standalone exclusive grant is not positively held')
+            if raw['owner'] == new and raw['generation'] == expected_generation + 1:
+                return _entry_view(raw)
+            if raw['owner'] != old or raw['generation'] != expected_generation:
+                raise ResourceOwnerMismatch('Exact transfer owner or generation changed')
+            raw['owner'] = new
+            transaction.touch(raw)
+            return _entry_view(raw)
+        return self._transact(action)
+
     def get(self, reservation_id: str) -> Entry | None:
         for raw in self._read_only():
             if raw["reservation_id"] == reservation_id:

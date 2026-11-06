@@ -2339,5 +2339,7 @@ and release remain separate gates.
 The [durable synthetic producer](decisions/ST04-poststart-producer.md) implements
 private application transactions and restart/replay conformance separately from
 that immutable candidate bundle. Its production facade refuses before effects;
-real workflow admission, result acceptance and scheduler integration remain
-undelivered. It adds no supported command, envelope or advertised capability.
+the [workflow checkpoint conformance integration](decisions/ST04-workflow-checkpoints.md)
+now exercises actual admission, result, scheduler and resource boundaries with
+explicit unpaid fixture scopes. Qualified production integration remains gated.
+Neither component adds a supported command, envelope or advertised capability.

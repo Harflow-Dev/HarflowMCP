@@ -30,6 +30,10 @@ class Enrollment:
     immutable_digest: str
     initial_source_digest: str
 
+def initial_state(handle, identity, profile, effect_verifier, assignment, remaining_attempts, context):
+    """Build the shared closed ledger; callers publish it in their own atomic authority."""
+    return dict(format='harflow.poststart.synthetic', v=1, enrollment=asdict(handle), version=0, identity=copy.deepcopy(identity), profile=copy.deepcopy(profile), effect_verifier=copy.deepcopy(effect_verifier), assignment=copy.deepcopy(assignment), context=copy.deepcopy(context), remaining_attempts=remaining_attempts, original_charged=True, original_usage=None, model_decisions=0, control_issuances=0, result=None, siblings={}, accepted_decision='preserved', intent=None, history=[], retired_tasks=[], fence=False, future_issuance_fence=False, evidence_revision=0, evidence=None, certificate=None, release=None, replacement=None, commands={}, receipts={}, replacement_proofs={}, phase='running', reservation=0)
+
 class PoststartStore:
     RESERVE = 524288
     def __init__(self, workflow_store, *, before_replace=None, after_replace=None, metadata_limit=4194304):
@@ -95,7 +99,7 @@ class PoststartStore:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            state = dict(format='harflow.poststart.synthetic', v=1, enrollment=asdict(handle), version=0, identity=copy.deepcopy(identity), profile=copy.deepcopy(profile), effect_verifier=copy.deepcopy(effect_verifier), assignment=copy.deepcopy(assignment), context=copy.deepcopy(context), remaining_attempts=remaining_attempts, original_charged=True, original_usage=None, model_decisions=0, control_issuances=0, result=None, siblings={}, accepted_decision='preserved', intent=None, history=[], retired_tasks=[], fence=False, future_issuance_fence=False, evidence_revision=0, evidence=None, certificate=None, release=None, replacement=None, commands={}, receipts={}, replacement_proofs={}, phase='running', reservation=0)
+            state = initial_state(handle, identity, profile, effect_verifier, assignment, remaining_attempts, context)
             self._validate(state, handle)
             self._write(path, state)
         self.handle = handle
