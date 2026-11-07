@@ -50,8 +50,8 @@ def documents():
         ('direct-caller-refused', 'agent_caller', 'Task-list watch requires a verified direct caller: managed'),
     ):
         result[f'ctl-task-list-watch-{label}.json'] = (envelope(CTL_FORMAT, {'error': dict(code=code, message=message)}), 1)
-    # This is the shared run/resume parent serializer, not the detached launch.
-    for operation in ('run', 'resume'):
+    # This is the shared run/resume/continue parent serializer, not the detached launch.
+    for operation in ('run', 'resume', 'continue'):
         for label, kind, payload, expected in (
             ('accepted', 'task', {'task_id': 'task-fixture'}, 0),
             ('refused', 'error', {'code': 'invalid_params', 'message': 'fixture refusal'}, 1),
@@ -98,6 +98,8 @@ def generate():
         output[bundle / name] = canonical(doc)
         manifest['files'][name] = hashlib.sha256(output[bundle / name]).hexdigest()
         required = ['task-list-watch.v1'] if name.startswith('ctl-task-list-watch-') and code == 0 else []
+        if name.startswith('ctl-launch-continue-'):
+            required = ['task-continue.v1']
         manifest['cases'][name] = dict(encoding='json', expected_product_version=PRODUCT_VERSION,
                                      format=CTL_FORMAT, required_capabilities=required, valid=True, exit_code=code)
     # Synthetic additive/missing-capability handshake variants, based on the
@@ -105,7 +107,7 @@ def generate():
     version = json.loads((bundle / 'version-info.json').read_text())
     capabilities = ('task-event-page.v1', 'task-prompt.v1', 'task-successors.v1',
                     'workflow-live-activity.v1', 'statistics-cost-model.v1', 'task-changes.v1',
-                    'task-list-watch.v1')
+                    'task-list-watch.v1', 'task-continue.v1')
     variants = [('version-info-s05-additive.json',
                  {**version, 'optional_future_field': {'value': True},
                   'capabilities': version['capabilities'] + ['future-capability.v99']}, [], True)]

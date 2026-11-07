@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, `task-list-watch.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`, `task-list-watch.v1` for `task-list-watch`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `conversation-delivery.v1`, `workflow-steering-replan.v1`, `workflow-steering-worker.v1`, `workflow-steering-window.v1`, `workflow-steering-read.v1`, `workflow-steering-builder.v1`, `workflow-steering-orchestrator.v1`, `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, `task-list-watch.v1`, `task-continue.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`, `task-list-watch.v1` for `task-list-watch`, `task-continue.v1` for `continue`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -1979,7 +1979,7 @@ changed by this policy. Electron first-paint/frame budgets still gate the client
 
 ### Launch and failure interpretation
 
-For `run` and `resume`, exit 0 with `result.task_id` acknowledges launch acceptance,
+For `run`, `resume` and `continue`, exit 0 with `result.task_id` acknowledges launch acceptance,
 not completion, output delivery or permission to retry. Resume creates a new task
 on the existing session. The parent serializer returns exit 1 with an error for a
 reported launch refusal; `invalid_params` can contain more specific diagnostic
@@ -2001,6 +2001,72 @@ The `ctl-launch-*` canonical fixtures exercise the real parent serializer with
 injected detached outcomes (no fork or agent execution) and the real unknown-command
 parser. Each manifest case records its process `exit_code`. Existing control tests
 exercise actual fake-backend run/resume and timeout ownership separately.
+
+#### Continue (`task-continue.v1`)
+
+```
+harflow-ctl continue TASK_ID [--extra-prompt TEXT | --extra-prompt-file PATH]
+    [--background-idle-seconds N] [--notes-path PATH]
+    [--group-report-output | --no-group-report-output]
+    [--git-https-rewrite | --no-git-https-rewrite]
+    [--allowed-command COMMAND]... [--fetch REMOTE]... [--fetch-default] [--fetch-required] --json
+```
+
+`continue` starts a fresh session from a positively settled standalone task. `--extra-prompt`
+and `--extra-prompt-file` are mutually exclusive. It consumes the source's queued follow-ups
+(queued with `send`), like `resume`. The command was already served before the capability
+existed; the capability makes it a published contract.
+
+Capability. `task-continue.v1` means this engine serves the command above and the launch
+outcome shapes below. It never means that a given task is eligible: eligibility is decided only
+when the command is invoked, and there is no pre-check read. An engine that does not advertise
+the capability is treated as not offering Continue, even if it serves the command. A consumer
+that gates Continue on it must also require `task-successors.v1` for exit-3 reconciliation,
+both from a fresh handshake.
+
+Exit codes. The serializer is the shared `ctl._cmd_detached`, so the codes are those of `run`
+and `resume`: exit 0 with `result.task_id` acknowledges an accepted launch, not completion
+(including an accepted launch still pending resources; a unique id prefix adds
+`resolved_from`, see `id_resolution.echo`); exit 1 with `error.code` and `error.message` is a
+reported refusal; exit 2 is a usage error; exit 3 with top-level `unknown.message` means the
+owner did not report reliably and a successor may exist.
+
+Exit 3 and retries. Reconcile before any user-authorized retry, and never automatically replay
+a launch. An empty `task-list-page --predecessor-task-id SOURCE` page does not prove that no
+successor exists: a pending successor has no task record and is not listed, a reservation
+durably written before the process spawned is invisible to the listing, and the predecessor
+filter is limited to verified direct callers. A retry is judged by a reservation fingerprint
+over the reconstructed prompt content and the selected effective options, not over command
+bytes: identical arguments can read changed prompt-file or notes content, and different
+transport arguments can produce identical content. An explicitly authorized retry may launch a
+successor proven not to have started (a matching unlaunched automatic attempt can be taken over
+manually; queued follow-ups are excluded from the fingerprint and recomposed for it), may
+re-acknowledge an existing or pending successor with exit 0, or may be refused. Identical
+command-line arguments do not guarantee identical reconstructed input.
+
+Refusals. Precondition refusals before the process forks, with exit 1: `nested_dispatch_refused`
+(a workflow-managed caller, or caller detection that cannot be decided); `invalid_task_id`;
+`invalid_params` with `error.data.code: "unknown_task"` and `error.data.input`;
+`ambiguous_task_id` with candidates in `error.data`; and state and document failures from the
+shared ctl session, with their codes and `error.data` where present (`state_busy`,
+`state_incompatible` and the others listed under state ownership). After the fork, errors come
+from `detached.error_doc` and never carry `error.data`: `start_failed` for continuation
+preconditions (task not settled or without an observed exit, a continuation that already
+exists, a cancelled chain, an unsettled reservation, a reservation reserved for a different
+caller request or over its size bound, an unavailable original assignment), `invalid_params`
+(the allowed-command check, or a refusal raised before any process could exist),
+`nested_dispatch_refused` (a workflow-managed source), `state_*`, resource codes,
+`session_busy`, `session_unknown`, `repo_unavailable`, `unsupported`, `unknown_backend` and
+`spawn_failed`. A `start_failed` precondition refusal currently reports its display text as
+`"ValueError: <text>"` in `message`. `message` is display text, not a selector; consumers must
+not parse it. Any other or future code is a refusal, not success.
+
+Fixtures. `contracts/v1/ctl-launch-continue-{accepted,refused,unknown}.json` come from the same
+shared serializer as the run and resume variants and are byte-identical to them; their
+manifest cases require `task-continue.v1` and record exit codes 0, 1 and 3.
+`invalid-s05-missing-task-continue.json` is a handshake without the capability, for testing a
+consumer's gate. Evidence that the real `continue` dispatch produces these documents is in
+`tests/test_ctl_continue_contract.py`.
 
 ### Included MCP schemas and unsupported mock capabilities
 

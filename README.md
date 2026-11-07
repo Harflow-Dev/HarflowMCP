@@ -169,6 +169,8 @@ A verified direct caller can also read the activity of a running workflow node w
 (capability `workflow-live-activity.v1`; see [live node activity](docs/contracts.md#live-workflow-node-activity-workflow-live-activityv1)).
 `harflow-ctl task-changes TASK_ID --json` returns the repository differences captured when a task settled (committed range and working tree, bounded rows and patch text; capability `task-changes.v1`; see [stored task changes](docs/contracts.md#stored-task-changes-task-changesv1)). The text can contain secrets or uncommitted edits, so only verified direct callers can read it.
 
+`harflow-ctl continue TASK_ID [--extra-prompt TEXT | --extra-prompt-file PATH] --json` starts a fresh session from a settled standalone task and consumes its queued follow-ups (capability `task-continue.v1`; see [continue](docs/contracts.md#continue-task-continuev1)).
+
 `harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json` is one bounded task-list invalidation wait (capability `task-list-watch.v1`; see [task-list invalidation wait](docs/contracts.md#task-list-invalidation-wait-task-list-watchv1)). It returns baseline/changed/timeout/reset/unavailable signals, not task facts; public paging and status remain authoritative. Direct callers only; it never initializes a missing state root. Watch continuity requires corrected producer writers (0.0.10); concurrent older writers are unqualified and may not invalidate the watcher. Consumers must retain public deadline reconciliation.
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`

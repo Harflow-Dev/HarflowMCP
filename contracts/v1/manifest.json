@@ -2765,6 +2765,45 @@
         "synthetic": true,
         "runtime_qualification": false
       }
+    },
+    "ctl-launch-continue-accepted.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.11",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-continue.v1"
+      ],
+      "valid": true,
+      "exit_code": 0
+    },
+    "ctl-launch-continue-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.11",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-continue.v1"
+      ],
+      "valid": true,
+      "exit_code": 1
+    },
+    "ctl-launch-continue-unknown.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.11",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-continue.v1"
+      ],
+      "valid": true,
+      "exit_code": 3
+    },
+    "invalid-s05-missing-task-continue.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.11",
+      "format": "harflow.version-info",
+      "required_capabilities": [
+        "task-continue.v1"
+      ],
+      "valid": false
     }
   },
   "files": {
@@ -2798,7 +2837,7 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "e97ae0ffb7c5b6a107afca26da5c9d19bc8d879359830d91aceeb1088a77c24c",
+    "version-info.json": "bf9be9765e1acfc8035e9471290506ac35582b8008d69231cc325a45320d552e",
     "workflow-definition-patch.json": "dec7079d69e46ff4d63da100bb12fc3fbfc1f120057da1d7346dd1f8fad05625",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -2960,13 +2999,13 @@
     "ctl-launch-resume-refused.json": "859edd74803956469adf3a03d60d869e2dcd8116100d0df04eb0f5755556823e",
     "ctl-launch-resume-unknown.json": "45b0a814a4679a77bc27749dfdd2f26e685f4be96fb370c1fe764539ca618aa8",
     "ctl-launch-unknown-operation.json": "7699b6859be66ae11db9af437ce02cf6a1704ea498beca083c6e337bdd33fc39",
-    "version-info-s05-additive.json": "1c168ca11acc3f3f24334e4886da35245695036acf30cb4f48f9d9213d4891d4",
-    "invalid-s05-missing-task-event-page.json": "937a3dbdc1e1ba10ab072b8f697be43e4cca7d15005e868d2f0f49292e79e8af",
-    "invalid-s05-missing-task-prompt.json": "b4fcd20a8ae96c663d9263850269743cef1016ae4bb9a99d06173795eb98205c",
-    "invalid-s05-missing-task-successors.json": "77e44c870a58b13b4c596e117697ce5f22c1f98babe01b14e706baac183e2df0",
-    "invalid-s05-missing-workflow-live-activity.json": "cda84ddc0f0b496df074f3824bb527366c0df86a48dd06d37e5eb4cc54a812ae",
-    "invalid-s05-missing-statistics-cost-model.json": "d44b2198d872c8f9cb7c93c144298d1a70cf7ccdc79730c7c17b996173d72ec8",
-    "invalid-s05-missing-task-changes.json": "9eac1c47a72ca8fff8e69276018292c6b89a28ad0d2bcf1f7fe4ee9aa6545e63",
+    "version-info-s05-additive.json": "2161f24099f0e456060fa1440b8dcdf554ab6dedda4c0093c2a5a2bcd77516e3",
+    "invalid-s05-missing-task-event-page.json": "776cc5f84afbad4d969d194df39d6f59783f1fba0492245d6795acb4603e4586",
+    "invalid-s05-missing-task-prompt.json": "bd6a97fab7b96b8b38fd93fd666be2b3bc4204bb05d16902a4ac68e4a15f124e",
+    "invalid-s05-missing-task-successors.json": "5905a9fd5a97d95d8131d33de24cab886edfb30870841ddabc87e660b12c4c72",
+    "invalid-s05-missing-workflow-live-activity.json": "91e050693b0606f08eed7935455a83773d9ca13c6b172ced605177fa1781d5c6",
+    "invalid-s05-missing-statistics-cost-model.json": "27142d6d26f15b30d76c3e8e7eeabfc1a1aebea5b15a1ab2919bf170981d93d9",
+    "invalid-s05-missing-task-changes.json": "08c3a120569df075a4bceb5cea92c2db39d25d4b82a037ccc571e380e91a2736",
     "ctl-task-list-watch-baseline.json": "2cccf73d7567fa524bf1edfd735b505eac88f2a12c9199869e310ab0c3151b35",
     "ctl-task-list-watch-changed.json": "f3b5559b2b7148ae7f5bef5e718d1c918c668c1e2ecdbe695401c3f805d2da55",
     "ctl-task-list-watch-timeout.json": "8ac48a3dae33a53828336e39c68b541bd5dfc8adf28dbf0b520225e7a9afb46c",
@@ -2974,7 +3013,7 @@
     "ctl-task-list-watch-unavailable.json": "3fe141f8e052b93f58f419811626530eb695659005a196626d8f2d552401de05",
     "ctl-task-list-watch-cursor-invalid.json": "163b8dad1f51eac06a0fa9b475f08d9ecb231bf798f6eda501cb45e53c89d0e8",
     "ctl-task-list-watch-direct-caller-refused.json": "7ca7b37ef349e6bd01c179f9c455b6dbac3df37c94eadd0d65f4b9cc71c4f0ac",
-    "invalid-s05-missing-task-list-watch.json": "4be968456b1d3189024ded6b2d997bd8e04f99cbbd852b65b49f89a11c9f8a8e",
+    "invalid-s05-missing-task-list-watch.json": "ce0f24dace28d4df60ae9a847c0229572eff5389975e6afdb66189851924c99b",
     "ctl-steering-builder-ready.json": "61da4cefb4d6cdaf6ea8c06b658b4c8aac5d55db1ea5a7e4d2833762ad84053f",
     "ctl-steering-builder-admitted.json": "517c648f1027a20636cf4b06c7291a29e23f28c9b5aab0a06f4bae97df9a57a5",
     "ctl-steering-builder-replayed.json": "51097515fe814cc78db3b32a2ce680fce33598348fbcc2c7e8c2ed3373b678bc",
@@ -2984,8 +3023,8 @@
     "ctl-steering-builder-command-refused.json": "8d9ab9e21e2f48c1e7bdfdad814994cd91c1013e5b54316fe64afb42173374bb",
     "ctl-steering-builder-queued.json": "94b1b2740a0e03265d84a4a45482e43b9c238cf3e1dcb3a773e1410ace467eb0",
     "ctl-steering-builder-summary.json": "d6135c1c3325fd401e51b97f9f2e7bdf4ef7cd50860c16310a8987fa2aa298b4",
-    "invalid-steering-missing-workflow-steering-read.json": "8ed5fb401d99771e8899a3996d7629e47967b1ebb8c4b5bf899847126e48888d",
-    "invalid-steering-missing-workflow-steering-builder.json": "e367c4d78ed30a3cd76fa459d24a21168855d40942d79c60ce19cd815f1f9f5e",
+    "invalid-steering-missing-workflow-steering-read.json": "4691d7c2445389d5233394156e3660240645540dfa63b3d31f8b4522c302a3f5",
+    "invalid-steering-missing-workflow-steering-builder.json": "95490bbae98ed48f64f2de3eb90c507fc7711aaa19b4392aa985e5eb4b50c557",
     "ctl-steering-builder-committed.json": "b7abd64aa03d70ef2637e4a97ff2cb2fa50076a8a2af147653db4e80dfef5473",
     "ctl-steering-orchestrator-ready.json": "a7088971112e72a36165754a7fa812735c9108239e8dd97a1ef920030f9ed544",
     "ctl-steering-orchestrator-admitted.json": "a301fb185ca59a87036c72537cc41cf6ebf87d8a67f5c261dbc5c794810903bb",
@@ -2995,7 +3034,7 @@
     "ctl-steering-orchestrator-committed.json": "142d296b1e79c9ac9218e6e4e6137d5e1b0766c3c519da1fdd238a3737c416fd",
     "ctl-steering-orchestrator-history.json": "6d1c329e3b621e90588f94bdf9f9283b37e63e642f0d32d8df611a71641d6151",
     "ctl-steering-orchestrator-summary.json": "9ad4b18c0d2e89c92dda3e11eb4eebc1252d7bf57bb03f2a47eddf1ab4bf7081",
-    "invalid-steering-missing-workflow-steering-orchestrator.json": "79f91add98858279dbf61e94caf10368296709eb3ada0e86c4d5bee586985993",
+    "invalid-steering-missing-workflow-steering-orchestrator.json": "505ccc3526d9c2eb37c726cd058146e92c1cbd58ee9ac8e0ab32813c4ee87749",
     "ctl-steering-orchestrator-queued.json": "6b6ceecaf0e10187c1eca4c8ad33fb4e3b5ad188d85c3a81d9b6a7a317984344",
     "ctl-steering-orchestrator-capture-unknown.json": "1a86adf40455ecedc944baa749e286d44dce069d434f8a1496a3b31dfc946553",
     "ctl-steering-orchestrator-stale.json": "3ee8b676b58bdff908f91f9c727fd88b67c660569a3f304f34cb38780dce7ebc",
@@ -3014,8 +3053,8 @@
     "ctl-steering-worker-committed.json": "425e933080d3c82c65dfa24013efc10adf4f04d65c486c7d2c2a14cc404535cf",
     "ctl-steering-worker-capture-unknown.json": "97f68bb95babe839029a66f7e17f9059447bab5722542e3044d45f141186c360",
     "ctl-steering-worker-stale.json": "55a837d4ad82f2746b7b2d249399600f0532f9d58f13b43b83787067d77ba309",
-    "invalid-steering-missing-workflow-steering-worker.json": "45d25a06905f70577b322001dac71afb84245c58925b4e0b6699b0941f86d633",
-    "invalid-steering-missing-workflow-steering-window.json": "e1d2318af4342515926f666f07982c5894d8f1a59ac9d0d8c4a72d3cfc0825ed",
+    "invalid-steering-missing-workflow-steering-worker.json": "e6ed822fe162e0f786a4dbfbeadc8c99213bc19d9447deaea7ec8d01e00c6a4d",
+    "invalid-steering-missing-workflow-steering-window.json": "6b2ac0da618d0cd6ec3758c780cc9b0c26fdfbd36b70cb157ca5827f869be128",
     "ctl-steering-replan-ready.json": "642bfc7b16025ea9476dc98be86985e8b109b048cbe0fbb03c1254442a032d0a",
     "ctl-steering-replan-admitted.json": "87a1dbfede0af2e2e7bb9440825f53680cd20b76a14478836c09a919c574a57e",
     "ctl-steering-replan-settling.json": "3426cf86e1f6fe55d72a8ed40f8bbf55dfabc7690885afe301a32d024696b7f6",
@@ -3025,7 +3064,7 @@
     "ctl-steering-replan-window-history.json": "c6be923d1e0c8f39117ab4b8e4a611f9e189d3165e95b5437b3411cf481f43bb",
     "ctl-steering-replan-expired.json": "56baf134d67c38a26f93062dd6f89b935935c146b251d1b9c2c010b8baab52d1",
     "ctl-steering-replan-spawn-race-unknown.json": "9d78095fd5e18a078efd7740851783c014c0df0264511695e569f45bdacd7268",
-    "invalid-steering-missing-workflow-steering-replan.json": "84e0098a78361df07a09f075f985752ff29f82b39b385a72b86df081dbf71425",
+    "invalid-steering-missing-workflow-steering-replan.json": "82bc2286d43de8835ff65f984575949034279462129c31d2ec9b34a905d852d5",
     "ctl-conversation-empty.json": "ef2b6beea039e8f69a28d322a50fada0b3cf6c82d8016576b8c1a3b160c848fd",
     "ctl-conversation-queue-fifo.json": "2515753bf871bef638ea55c370048f796f5dfa661ce395e433824a345d6189b3",
     "ctl-conversation-queue-replayed.json": "2515753bf871bef638ea55c370048f796f5dfa661ce395e433824a345d6189b3",
@@ -3058,6 +3097,10 @@
     "ctl-conversation-workflow-cancel-ack.json": "3aff12f2464e5709abd764fb21d33cf0a941fa39f85bb67ea9e4c4950ab0e547",
     "ctl-conversation-workflow-promote-ack.json": "e169ba7bd650fedc9f4a0836bc58694f99f98aa1d889a22474259a907d8b83be",
     "ctl-conversation-task-status-available.json": "0c523ee1e43ce2ec3b33f2ed39d57935833b3268a4931488a6771a97beb7af16",
-    "ctl-conversation-task-status-unavailable.json": "de98b902a87c51511f21ce85e16f0d61916a0206363ed026af0f81eb5b9ac6a2"
+    "ctl-conversation-task-status-unavailable.json": "de98b902a87c51511f21ce85e16f0d61916a0206363ed026af0f81eb5b9ac6a2",
+    "ctl-launch-continue-accepted.json": "328ecacdc2bb1d5d8a05bb3401112887b44164351fea7b46dae030c6048af32d",
+    "ctl-launch-continue-refused.json": "859edd74803956469adf3a03d60d869e2dcd8116100d0df04eb0f5755556823e",
+    "ctl-launch-continue-unknown.json": "45b0a814a4679a77bc27749dfdd2f26e685f4be96fb370c1fe764539ca618aa8",
+    "invalid-s05-missing-task-continue.json": "e97ae0ffb7c5b6a107afca26da5c9d19bc8d879359830d91aceeb1088a77c24c"
   }
 }

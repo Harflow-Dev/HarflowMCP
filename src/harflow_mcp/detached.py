@@ -1,4 +1,4 @@
-"""The fork-and-handshake lifecycle behind `harflow-ctl run` and `harflow-ctl resume` (A4.2).
+"""The fork-and-handshake lifecycle behind `harflow-ctl run`, `resume` and `continue` (A4.2).
 
 A task needs a process to own it for as long as it runs — to drain its pipes (an unread pipe blocks
 the agent) and publish its outcome — but the Monitor app wants a CLI call that returns as soon as

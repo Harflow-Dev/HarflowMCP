@@ -63,6 +63,7 @@ def test_s04_capabilities_remain_advertised_with_canonical_examples():
         'workflow-live-activity.v1': 'ctl-workflow-inspect-live-running-attempt.json',
         'statistics-cost-model.v1': 'ctl-statistics-page-cost-reported-and-silent.json',
         'task-changes.v1': 'ctl-task-changes-available-listing.json',
+        'task-continue.v1': 'ctl-launch-continue-accepted.json',
     }
     assert version['capabilities'] == list(CAPABILITIES)
     for capability, name in required.items():
