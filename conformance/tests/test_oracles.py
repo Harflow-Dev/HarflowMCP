@@ -82,7 +82,7 @@ def test_missing_envelope_identity_is_refused(field):
         validate_envelope(document, 'harflow.ctl')
 
 
-def test_manifest_matches_reviewed_291_fixture_identity():
+def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)

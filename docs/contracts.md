@@ -2041,11 +2041,19 @@ bytes: identical arguments can read changed prompt-file or notes content, and di
 transport arguments can produce identical content. An explicitly authorized retry may launch a
 successor proven not to have started (a matching unlaunched automatic attempt can be taken over
 manually; queued follow-ups are excluded from the fingerprint and recomposed for it), may
-re-acknowledge an existing or pending successor with exit 0, or may be refused. Identical
-command-line arguments do not guarantee identical reconstructed input.
+re-acknowledge a pending successor with exit 0, or may be refused, including `start_failed`
+("Continuation already exists") when a successor was already launched; each ctl invocation
+builds a fresh registry, so an already-launched successor is refused, not re-acknowledged. A
+refusal after exit 3 does not prove that no successor exists: reconcile again with
+`task-list-page --predecessor-task-id`. Identical command-line arguments do not guarantee
+identical reconstructed input.
 
-Refusals. Precondition refusals before the process forks, with exit 1: `nested_dispatch_refused`
-(a workflow-managed caller, or caller detection that cannot be decided); `invalid_task_id`;
+Refusals. Precondition refusals before the process forks, with exit 1: `caller_undecidable`
+(the ctl-wide mutation guard, when worker identity or depth variables, such as
+`HARFLOW_TASK_ID` or `HARFLOW_DEPTH` or their accepted predecessors, are present but
+unconfirmed or malformed); `nested_dispatch_refused`
+(a workflow-managed caller, or caller detection that cannot be decided when no worker
+variables are set); `invalid_task_id`;
 `invalid_params` with `error.data.code: "unknown_task"` and `error.data.input`;
 `ambiguous_task_id` with candidates in `error.data`; and state and document failures from the
 shared ctl session, with their codes and `error.data` where present (`state_busy`,
@@ -2053,11 +2061,14 @@ shared ctl session, with their codes and `error.data` where present (`state_busy
 from `detached.error_doc` and never carry `error.data`: `start_failed` for continuation
 preconditions (task not settled or without an observed exit, a continuation that already
 exists, a cancelled chain, an unsettled reservation, a reservation reserved for a different
-caller request or over its size bound, an unavailable original assignment), `invalid_params`
+caller request or over its size bound, an unavailable original assignment, and argument
+problems detected after the fork such as a notes path that is not a regular file or not
+UTF-8), `invalid_params`
 (the allowed-command check, or a refusal raised before any process could exist),
 `nested_dispatch_refused` (a workflow-managed source), `state_*`, resource codes,
 `session_busy`, `session_unknown`, `repo_unavailable`, `unsupported`, `unknown_backend` and
-`spawn_failed`. A `start_failed` precondition refusal currently reports its display text as
+`spawn_failed` (including argument problems detected after the fork, such as an unreadable
+`--extra-prompt-file`). A `start_failed` precondition refusal currently reports its display text as
 `"ValueError: <text>"` in `message`. `message` is display text, not a selector; consumers must
 not parse it. Any other or future code is a refusal, not success.
 

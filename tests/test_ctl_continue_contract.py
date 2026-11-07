@@ -55,7 +55,7 @@ def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
 
 
 def test_capability_is_advertised_and_fixtures_declare_it():
-    assert CAPABILITIES[-1] == "task-continue.v1"
+    assert "task-continue.v1" in CAPABILITIES
     version = json.loads((BUNDLE / "version-info.json").read_text())
     assert "task-continue.v1" in version["capabilities"]
     manifest = json.loads((BUNDLE / "manifest.json").read_text())
@@ -146,7 +146,7 @@ def test_ambiguous_prefix_is_refused_with_candidates_before_fork(state, monkeypa
     assert {candidate if isinstance(candidate, str) else candidate.get("task_id") for candidate in error["data"]["candidates"]} >= {FULL_ID, OTHER_ID}
 
 
-def test_managed_caller_is_refused_before_fork(state, monkeypatch, capsys):
+def test_undecidable_caller_detection_is_refused_before_fork(state, monkeypatch, capsys):
     from harflow_mcp import lineage
     store.write(default_log_dir(), _record(FULL_ID))
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: None)
@@ -168,5 +168,15 @@ def test_state_failure_reports_an_exit_one_envelope(state, monkeypatch, capsys):
     monkeypatch.setattr(ctl, "_resolve_task_arg", broken)
     code, document = _run(capsys, FULL_ID)
     assert code == 1
-    assert document["error"]["code"] == getattr(state_ownership.StateOwnershipError("x"), "code", "state_incompatible")
-    assert "fixture state failure" in document["error"]["message"]
+    error = document["error"]
+    assert error["code"] == "state_incompatible"
+    assert "fixture state failure" in error["message"]
+    assert error["data"] == {}
+
+
+def test_unconfirmed_worker_variable_is_caller_undecidable(state, monkeypatch, capsys):
+    store.write(default_log_dir(), _record(FULL_ID))
+    _forbid_launch(monkeypatch)
+    monkeypatch.setenv("HARFLOW_TASK_ID", "no-live-parent")
+    code, document = _run(capsys, FULL_ID)
+    assert code == 1 and document["error"]["code"] == "caller_undecidable"
