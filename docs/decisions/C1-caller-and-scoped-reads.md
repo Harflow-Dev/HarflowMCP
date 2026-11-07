@@ -36,8 +36,8 @@ The initialization half conflicts with the Engine's R01 rule that missing-root p
 that explicit store initialization is an internal fixture operation: **[U10]**. The scenarios tag it
 `[pending U10]`; the foreign-root refusal is not in question. *Executable form:* `--delta U10` expects an
 ordinary read of a missing root to answer as empty (the same documents as the baseline) **without creating
-the root**, tagged `[proposed, U10]`; Python fails this profile. The alternative, refusing the read, has no
-profile until the owner chooses it.
+the root**, tagged `[proposed, U10]`; Python fails this profile. The owner approved this behaviour for Rust
+on 2026-11-07 (see U10). The scenario tags keep their original wording.
 
 ## 2. Environment signals
 
@@ -246,17 +246,18 @@ A managed view restricts task reads (`guard_task_read`, `allowed_task_ids`, `fil
 None of section 6 beyond item 1 and the standalone case of item 2 is covered by E1: it needs workflow
 run documents and receipts. **[R]**
 
-### 6.1 Interim rule for Rust before workflow ownership is readable (proposed, owner decision)
+### 6.1 Interim rule for Rust before workflow ownership is readable (owner approved 2026-11-07)
 
 Python treats "no association found" as a direct view. That is safe only because Python can always read
 associations. A Rust engine that cannot yet read workflow ownership cannot tell "no association" from
 "association unreadable", so copying Python's fallthrough would fail open and show a workflow worker the
-whole root. **Proposed [proposed]:** until E6 supplies association reading, an agent caller (any confirmed or
+whole root. **Approved:** until E6 supplies association reading, an agent caller (any confirmed or
 marker-detected agent) whose workflow ownership is unresolved is refused on every authority-gated read
 (`status`, `status-batch`, `list`, `recovery-activity` with `workflow_read_refused`; the page read with
 `invalid_params`; `task-artifacts` with `artifact_error`). A caller with no agent evidence is unaffected.
 This is stricter than Python for standalone agents and is a deliberate interim difference, to be replaced
-by the Python rule when E6 lands. It needs owner acceptance, together with U2.
+by the Python rule when E6 lands. The owner approved it on 2026-11-07. U2 stays open: this rule does not
+decide what `status` exposes to agents once ownership is readable.
 
 *Executable form.* `python -m conformance.e1.scenarios ... --delta interim-6.1` swaps the expectations of
 every agent-caller read in `scope.agent_caller_by_ancestry`, `scope.unverifiable_task_identity` and the
@@ -423,9 +424,10 @@ These are open; the Rust engine implements the baseline above unless the owner r
   claim is possible; the ancestry bound of `managed_reader`'s strict owner lookup is unrecorded.
 - **U10** Python initializes a missing root on any ordinary read. The Engine's R01 says missing-root probes
   create nothing and store initialization is an internal fixture operation. The scenarios
-  `reads.missing_root` and `list.missing_root_initializes` are tagged `[pending U10]`; the owner must say
-  whether ordinary reads of a missing Rust root answer empty without creating it, or refuse. Either is a
-  delta against the contract text if it changes the observable root.
+  `reads.missing_root` and `list.missing_root_initializes` are tagged `[pending U10]`. **Resolved by the
+  owner on 2026-11-07:** ordinary reads of a missing Rust root answer empty and create nothing
+  (`--delta U10`). This is a delta against the contract text, and `docs/contracts.md` stays Python's
+  specification until the delta is folded in at contract transfer.
 
 Contract surface: none of the above requires a change to `contracts/v1` to implement the baseline.
 A resolution of U1, U4, U5 or U6 as a delta would add or change documented codes and therefore needs
@@ -449,7 +451,7 @@ Distinction to keep: **read gates** (the six above plus successors, `task-list-w
 and statistics from agents that would otherwise read other tasks; **human-only mutations** (D8) need a
 positive credential.
 
-Recommended interim rule for E1, pending owner acceptance:
+Interim rule for E1, approved by the owner on 2026-11-07:
 
 1. Rust implements sections 2 to 4 unchanged for the read gates. A caller is admitted only when no agent
    is detected and no agent evidence remains after a complete check (section 4.4). All refusals keep
@@ -464,9 +466,9 @@ Recommended interim rule for E1, pending owner acceptance:
 4. When E5 delivers a positive credential, the read gates may stay on negative evidence (parity) or
    require the credential; that is a later C1 delta, not part of E1.
 
-Alternative: refuse all six reads in Rust until E5. It is the strictest reading but removes the history
-and statistics views the Mac needs at the E1 exit, with no gain against a determined agent beyond what
-the deny-side check already gives. Not recommended; the choice is the owner's (recorded as a question).
+Rejected alternative: refuse all six reads in Rust until E5. It is the strictest reading but removes the
+history and statistics views the Mac needs at the E1 exit, with no gain against a determined agent beyond
+what the deny-side check already gives.
 
 `limit-hits` and `task-changes` are not covered by E1 scenarios; their gate is the same function **[R]**.
 
