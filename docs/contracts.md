@@ -2068,8 +2068,8 @@ UTF-8), `invalid_params`
 `nested_dispatch_refused` (a workflow-managed source), `state_*`, resource codes,
 `session_busy`, `session_unknown`, `repo_unavailable`, `unsupported`, `unknown_backend` and
 `spawn_failed` (including argument problems detected after the fork, such as an unreadable
-`--extra-prompt-file`). A `start_failed` precondition refusal currently reports its display text as
-`"ValueError: <text>"` in `message`. `message` is display text, not a selector; consumers must
+`--extra-prompt-file`). A `start_failed` refusal reports its display text as
+`"<ExceptionType>: <text>"` in `message`, currently `ValueError` for continuation preconditions. `message` is display text, not a selector; consumers must
 not parse it. Any other or future code is a refusal, not success.
 
 Fixtures. `contracts/v1/ctl-launch-continue-{accepted,refused,unknown}.json` come from the same
