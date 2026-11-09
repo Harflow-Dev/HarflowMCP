@@ -4372,7 +4372,7 @@ class TaskRegistry:
         return outcomes
 
     @layout_operation
-    async def cancel_cascade(self, task_id: str, *, workflow_control: bool = False) -> dict[str, Any]:
+    async def cancel_cascade(self, task_id: str, *, workflow_control: bool = False, _observation=None) -> dict[str, Any]:
         """Run `_cancel_cascade` as a registry-held task, shielded from the caller.
 
         Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
@@ -4387,7 +4387,8 @@ class TaskRegistry:
             if caller is not None:
                 refuse_managed(self._log_dir, caller.record.task_id)
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
-        result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+        from .task_cancel_observation import collect
+        result = await self._shielded(self._cancel_cascade(task_id, **({'_observation': _observation} if _observation is not None else {})), f"harflow-cascade-{task_id}")
         from . import task_resources
         # `covered` is what the cascade passes have already processed (None when a pass reported none).
         covered = self._covered_by(result)
@@ -4399,7 +4400,9 @@ class TaskRegistry:
             # so the walk is seeded with every recorded descendant the cascade covers.
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             seeds = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            collect(_observation, 'discover', seeds)
             descendant_scan = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(seeds))
+            collect(_observation, 'discover', descendant_scan)
             launch_refusals.update(getattr(descendant_scan, "refusals", {}))
             pending = [item for item in descendant_scan if item not in handled]
             # A pending launch that spawns between the recorded snapshot above and the pending scan is in
@@ -4408,17 +4411,18 @@ class TaskRegistry:
             # point before it shows up there as a recorded task the cascade has not covered.
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            collect(_observation, 'discover', recorded)
             unsignalled = set(recorded) - covered if covered is not None else set()
             if not pending and not unsignalled:
                 break
             if pending:
                 # Launches still waiting for resources have no process to signal; ask their owners to stop.
                 handled.update(pending)
-                stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
+                stopped = await asyncio.to_thread(self._cancel_pending_launches, pending, **({'_observation': _observation} if _observation is not None else {}))
                 requested.extend(item for item in stopped if item not in requested)
             # A launch can spawn while its request is written, after the owner's last look at it. It is
             # a task by now, so the ordinary cascade (which also reaches what it dispatched) stops it.
-            latest = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+            latest = await self._shielded(self._cancel_cascade(task_id, **({'_observation': _observation} if _observation is not None else {})), f"harflow-cascade-{task_id}")
             if covered is not None:
                 covered |= self._covered_by(latest) or set()
             result = self._merge_cascade_results(result, latest)
@@ -4426,6 +4430,7 @@ class TaskRegistry:
             result = {**result, "pending_cancel_requested": requested}
         if launch_refusals:
             result = {**result, "launch_refusals": list(launch_refusals.values()), "history_incomplete": True, "cascade_incomplete": True}
+        collect(_observation, 'evidence', result)
         return {key: value for key, value in result.items() if key != _COVERED_KEY}
 
     @staticmethod
@@ -4452,11 +4457,11 @@ class TaskRegistry:
             merged["cascade_incomplete"] = bool(merged.get("unconverged")) or bool(merged["refused_tasks"])
         return merged
 
-    def _cancel_pending_launches(self, task_ids: list[str]) -> list[str]:
+    def _cancel_pending_launches(self, task_ids: list[str], *, _observation=None) -> list[str]:
         from . import task_resources
-        return [target for task_id in task_ids for target in task_resources.cancel_launch(self._log_dir, task_id, authorized=True)["cascade"]["pending_cancel_requested"]]
+        return [target for task_id in task_ids for target in task_resources.cancel_launch(self._log_dir, task_id, authorized=True, **({'_observation': _observation} if _observation is not None else {}))["cascade"]["pending_cancel_requested"]]
 
-    async def cancel_pending(self, task_id: str) -> dict[str, Any] | None:
+    async def cancel_pending(self, task_id: str, *, _observation=None) -> dict[str, Any] | None:
         """Cancel a launch that has no record yet, under the authorization `cancel_cascade` applies.
 
         None when `task_id` is not a pending launch. The checks are the cascade's: native transports
@@ -4475,7 +4480,7 @@ class TaskRegistry:
         if caller is not None:
             refuse_managed(self._log_dir, caller.record.task_id)
         pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
-        return await asyncio.to_thread(task_resources.cancel_launch, self._log_dir, task_id, authorized=True)
+        return await asyncio.to_thread(task_resources.cancel_launch, self._log_dir, task_id, authorized=True, **({'_observation': _observation} if _observation is not None else {}))
 
     async def _shielded(self, coro: Any, name: str) -> Any:
         self._loop = asyncio.get_running_loop()
@@ -4484,7 +4489,7 @@ class TaskRegistry:
         job.add_done_callback(self._control_jobs.discard)
         return await asyncio.shield(job)
 
-    async def _cancel_cascade(self, task_id: str) -> dict[str, Any]:
+    async def _cancel_cascade(self, task_id: str, *, _observation=None) -> dict[str, Any]:
         """Cancel `task_id` and, best-effort, every live descendant this bridge can find via
         lineage — nested dispatches that task's own agent made through harflow_mcp (`spawned_by`),
         or any record reporting the same `root_task_id`. Not a sandboxed guarantee: an agent that
@@ -4495,6 +4500,7 @@ class TaskRegistry:
         forever on a lineage that keeps growing, bounded at `CASCADE_MAX_ROUNDS` either way.
         """
         refusals: dict[str, store.TaskDocumentError] = {}
+        from .task_cancel_observation import collect
         processed: set[str] = set()
         sigkill_survivors: list[str] = []
         owner_still_settling: list[str] = []
@@ -4507,6 +4513,7 @@ class TaskRegistry:
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            collect(_observation, 'discover', targets)
             refusals.update(getattr(targets, "refusals", {}))
             new_targets = sorted(targets - processed)
             if not new_targets:
@@ -4523,6 +4530,7 @@ class TaskRegistry:
                     continue
                 await stop_chain(self, target_id)
             processed.update(new_targets)
+            collect(_observation, 'processed', new_targets)
 
             local_ids: list[str] = []
             local_coros: list[Any] = []
@@ -4614,6 +4622,7 @@ class TaskRegistry:
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             final_targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            collect(_observation, 'discover', final_targets)
             refusals.update(getattr(final_targets, "refusals", {}))
             unconverged = sorted(final_targets - processed)
 
@@ -4638,7 +4647,7 @@ class TaskRegistry:
             if status == "cancelled":
                 cancelled_descendants.append(tid)
 
-        return {
+        result = {
             "cancelled_descendants": sorted(cancelled_descendants),
             "sigkill_survivors": sorted(set(sigkill_survivors)),
             "owner_still_settling": sorted(set(owner_still_settling)),
@@ -4651,6 +4660,8 @@ class TaskRegistry:
             "unconverged": unconverged,
             _COVERED_KEY: sorted(processed),
         }
+        collect(_observation, 'evidence', result)
+        return result
 
     @layout_operation
     async def cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:

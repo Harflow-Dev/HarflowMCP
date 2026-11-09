@@ -15,6 +15,11 @@ class ReadLimit(ValueError):
 
 
 def read_json(path: Path, limit: int, *, budget: Any = None) -> Any:
+    from .observation_budget import current
+    observer = current.get()
+    if observer is not None:
+        observer.remaining()
+        budget = observer
     if budget is not None and getattr(budget, 'metadata_decodes', 0) >= 100:
         raise ReadLimit('Metadata decode request limit reached')
     available = limit if budget is None else min(limit, max(0, budget.metadata_limit - budget.metadata_bytes))
@@ -23,6 +28,8 @@ def read_json(path: Path, limit: int, *, budget: Any = None) -> Any:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ReadLimit('JSON source must be a regular file')
+        if observer is not None and info.st_size > available:
+            observer.charge(info.st_size)
         if info.st_size > available:
             raise ReadLimit('JSON exceeds bounded read budget')
         with os.fdopen(fd, 'rb', buffering=0, closefd=False) as source:

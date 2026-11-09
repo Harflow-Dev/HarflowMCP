@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add ctl-only `task-cancel-cascade.v1`: cumulative private cancellation evidence and a bounded final `result.cascade.observation` for recorded tasks and pending launches. Fresh captured identity and observed exit/drain distinguish stopped tasks from unknown outcomes; pending settlement remains generation-bound. Preserve legacy cancellation, MCP, continuation-stop, phase-write warnings and product version. Nine ctl fixtures plus a negative handshake bring the bundle to 320 fixtures. Engine contract lands first; companion-app adoption independently re-vendors the identical complete bundle and digest and requires a fresh capability handshake.
+
 - Add ctl-only `task-continuation-stop.v1`: bounded read-only chain-stop observations on full/brief/batch status and allowlisted `chain_stopped` data on the actual locked Continue refusal. Admission, MCP behavior/schema, exit codes and product version 0.0.11 are unchanged. Seven canonical additions bring the complete bundle to 310 fixtures; consumers must re-vendor the entire final bundle and manifest before separate native adoption. Engine contract and bundle land first; native consumption follows independently.
 
 - Advertise `task-artifacts.v1` for bounded, stat-only `harflow-ctl task-artifacts` metadata pages and optional `artifact_error` reasons `cursor_invalid`, `cursor_stale` and `ownership_preparing`. Add canonical `ctl-task-artifacts-{empty,populated,next-page,unavailable,preparing,page-error,error}.json` fixtures and `invalid-s05-missing-task-artifacts.json`; consumers adopting the capability must re-vendor the complete updated `contracts/v1` bundle, including capability-derived handshake fixtures and `manifest.json`/`manifest.sha256`. MCP tools remain unchanged.

@@ -261,7 +261,7 @@ def settle_cancelled(log_dir: Path, receipt: dict[str, Any]) -> bool:
     return True
 
 
-def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> dict[str, Any]:
+def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False, _observation=None) -> dict[str, Any]:
     """Ask a launch, and every pending descendant, to stop before it spawns. Blocking.
 
     Internal: it performs no caller authorization. Every entry point must come through
@@ -276,10 +276,13 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
     if authorized is not True:
         raise PermissionError("cancel_launch requires an authorized caller; use TaskRegistry.cancel_pending")
     descendants = pending_descendants(log_dir, task_id)
+    from .task_cancel_observation import collect
+    collect(_observation, 'discover', descendants)
     targets = [task_id, *descendants]
     requested, settled, withdrawal_unsettled = [], [], []
     for target in targets:
         receipt = pending_receipt(log_dir, target)
+        binding = collect(_observation, 'receipt', target, receipt)
         # A request is only worth writing for a launch an owner can still read it for; a settled
         # one would keep the file forever.
         if receipt is None or receipt["state"] not in (*PENDING_STATES, "reserved", "claimed"):
@@ -289,16 +292,22 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
         if "withdrawal_claim" in receipt:
             if settle_cancelled(log_dir, receipt):
                 settled.append(target)
+                collect(_observation, 'settlement', target, binding)
             else:
                 withdrawal_unsettled.append(target)
         elif receipt["state"] == "waiting_for_resources":
             fresh = owner_confirmed_gone(log_dir, receipt)
-            if fresh is not None and settle_cancelled(log_dir, fresh):
-                settled.append(target)
+            if fresh is not None:
+                binding = collect(_observation, 'receipt', target, fresh)
+                if settle_cancelled(log_dir, fresh):
+                    settled.append(target)
+                    collect(_observation, 'settlement', target, binding)
     spawned = read_task_record(log_dir, task_id, include_prompt=False) is not None
-    return {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled,
+    result = {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled,
             **({"withdrawal_unsettled": withdrawal_unsettled, "cascade_incomplete": True} if withdrawal_unsettled else {}),
             **({"launch_refusals": list(descendants.refusals.values()), "history_incomplete": True, "cascade_incomplete": True} if descendants.refusals else {})}}
+    collect(_observation, 'evidence', result['cascade'])
+    return result
 
 
 # ---- the pending view --------------------------------------------------------------------------

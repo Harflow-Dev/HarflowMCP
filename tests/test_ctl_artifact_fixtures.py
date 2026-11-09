@@ -25,7 +25,7 @@ def test_artifact_fixtures_match_fresh_ctl_dispatches():
 
 
 def test_artifact_fixture_semantics_and_capability():
-    assert CAPABILITIES[-1] == 'task-artifacts.v1'
+    assert {'task-artifacts.v1', 'task-continuation-stop.v1', 'task-cancel-cascade.v1'} <= set(CAPABILITIES)
     manifest = json.loads((BUNDLE / 'manifest.json').read_bytes())
     def document(label):
         name = f'ctl-task-artifacts-{label}.json'

@@ -42,7 +42,11 @@ def read(path: Path, *, decode_document=None):
         source = source_identity(opened)
         if opened.st_size > RECEIPT_BYTES:
             raise ReadLimit("JSON exceeds bounded read budget")
-        with os.fdopen(os.dup(descriptor), "rb") as stream:
+        from .observation_budget import current
+        budget = current.get()
+        with os.fdopen(os.dup(descriptor), "rb", buffering=0 if budget is not None else -1) as stream:
+            if budget is not None:
+                budget.charge(RECEIPT_BYTES + 1)
             content = stream.read(RECEIPT_BYTES + 1)
         if len(content) > RECEIPT_BYTES:
             raise ReadLimit("JSON exceeds bounded read budget")

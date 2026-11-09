@@ -88,7 +88,11 @@ def _launch_source(log_dir, task_id):
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise LaunchDocumentError(log_dir, task_id, 'not_regular', 'Task launch source is not a regular file')
-        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
+        from .observation_budget import current
+        budget = current.get()
+        with os.fdopen(descriptor, 'rb', closefd=False, buffering=0 if budget is not None else -1) as handle:
+            if budget is not None:
+                budget.charge(65537)
             raw = handle.read(65537)
         try:
             after = path.lstat()

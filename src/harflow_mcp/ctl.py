@@ -274,7 +274,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     cancel_message_p.add_argument("--json", action="store_true")
 
     cancel_p = sub.add_parser(
-        "cancel", help="cancel a task and, best-effort, its live descendants (like cancel_task)"
+        "cancel", help="cancel a task and, best-effort, its live descendants; JSON includes a bounded final observation",
+        description="Cancel recorded tasks and pending launches. JSON cascade.observation reports bounded final evidence, not containment or resource settlement (task-cancel-cascade.v1)."
     )
     cancel_p.add_argument("task_id")
     cancel_p.add_argument("--json", action="store_true")
@@ -1162,7 +1163,7 @@ def _refuse_managed_caller(args: argparse.Namespace, code: str) -> int | None:
     return None
 
 
-def _cmd_cancel(args: argparse.Namespace) -> int:
+def _cmd_cancel(args: argparse.Namespace, *, _observation=None, _observation_fallback=None) -> int:
     log_dir = default_log_dir()
     refused = _refuse_managed_caller(args, "invalid_params")
     if refused is not None:
@@ -1173,17 +1174,24 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
         return _fail(args, exc.code, exc.message, exc.data)
     task_id = args.task_id = resolution.id
     args.task_resolution = getattr(args, "task_resolution", None) or resolution
+    from . import task_cancel_observation
+    if _observation_fallback is None:
+        _observation_fallback = task_cancel_observation.fallback()
+        try:
+            _observation = task_cancel_observation.Collector(task_id)
+        except Exception:
+            pass
     if store.read(log_dir, task_id) is None:
         from . import task_resources
         pending = task_resources.pending_view(log_dir, task_id)
         if pending is not None:
-            return _cancel_pending(args, log_dir, task_id)
+            return _cancel_pending(args, log_dir, task_id, _observation=_observation, _observation_fallback=_observation_fallback)
         return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
 
     registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
 
     async def cancel_and_settle() -> tuple[dict[str, Any], list[str]]:
-        cascade = await registry.cancel_cascade(task_id)
+        cascade = await registry.cancel_cascade(task_id, **({'_observation': _observation} if _observation is not None else {}))
         return cascade, await registry.settle_phase_writes(PHASE_WRITE_SETTLE_SECONDS)
 
     try:
@@ -1200,6 +1208,7 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
     record = store.read(log_dir, task_id)
     status = store.brief(log_dir, record)["status"] if record is not None else None
     result = id_resolution.echo({"task_id": task_id, "status": status, "cascade": cascade}, primary=getattr(args, "task_resolution", None))
+    cascade['observation'] = task_cancel_observation.finish(_observation, log_dir, _fallback=_observation_fallback)
     if unrecorded:
         # Delivered, but the phase file saying so never landed before this process had to exit;
         # lease recovery may later record the attempt as failed.
@@ -1216,21 +1225,23 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str) -> int:
+def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str, *, _observation=None, _observation_fallback=None) -> int:
     """`cancel` for a launch with no record: ask its owner to stop waiting, in the existing result shape."""
     from . import task_resources
     registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
     try:
-        outcome = asyncio.run(registry.cancel_pending(task_id))
+        outcome = asyncio.run(registry.cancel_pending(task_id, **({'_observation': _observation} if _observation is not None else {})))
     except (backends.UnsupportedCapability, ValueError) as exc:
         return _fail(args, "invalid_params", str(exc))
     if outcome is None:
         return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
     if outcome["spawned"]:
-        return _cmd_cancel(args)  # it spawned while we asked: the ordinary cancel takes over
+        return _cmd_cancel(args, _observation=_observation, _observation_fallback=_observation_fallback)  # preserve pre-spawn evidence
     view = task_resources.pending_view(log_dir, task_id)
     status = view["status"] if view is not None else "cancelled"
     result = id_resolution.echo({"task_id": task_id, "status": status, "cascade": outcome["cascade"]}, primary=getattr(args, "task_resolution", None))
+    from . import task_cancel_observation
+    outcome['cascade']['observation'] = task_cancel_observation.finish(_observation, log_dir, _fallback=_observation_fallback)
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:

@@ -66,6 +66,7 @@ def test_s04_capabilities_remain_advertised_with_canonical_examples():
         'task-artifacts.v1': 'ctl-task-artifacts-populated.json',
         'task-continue.v1': 'ctl-launch-continue-accepted.json',
         'task-continuation-stop.v1': 'ctl-task-status-continuation-stopped.json',
+        'task-cancel-cascade.v1': 'ctl-task-cancel-settled.json',
     }
     assert version['capabilities'] == list(CAPABILITIES)
     for capability, name in required.items():

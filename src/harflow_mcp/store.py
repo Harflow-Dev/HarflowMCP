@@ -19,6 +19,7 @@ from .state_access import task_operation, task_layout, assert_task_owned
 from .state_ownership import StateOwnershipError
 
 import json
+import io
 import hashlib
 import logging
 import os
@@ -375,6 +376,12 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
 
 
 def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
+    from .observation_budget import Exhausted, current
+    observer_budget = current.get()
+    if observer_budget is not None:
+        observer_budget.remaining()
+        metadata_byte_limit = observer_budget.metadata_limit
+        metadata_budget = observer_budget
     path = record_path(log_dir, task_id)
     initial_source = None
 
@@ -394,7 +401,7 @@ def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_
         return None
     except (OSError, ValueError) as exc:
         from .bounded_io import ReadLimit
-        if isinstance(exc, ReadLimit):
+        if isinstance(exc, (ReadLimit, Exhausted)):
             raise
         code = "task_unavailable" if isinstance(exc, OSError) else "task_incompatible"
         raise refusal(str(exc), code) from exc
@@ -415,6 +422,8 @@ def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_
                 if hashlib.sha256(prompt.encode("utf-8")).hexdigest() != match[1]:
                     raise ValueError("Full prompt source integrity check failed")
                 record = replace(record, prompt=prompt, prompt_truncated=False, prompt_error=None)
+            except Exhausted:
+                raise
             except (ValueError, OSError) as exc:
                 reason = "Full task assignment is unavailable; prompt preview is not authoritative: " + str(exc)
                 log.warning("task %s: %s", task_id, reason)
@@ -428,6 +437,8 @@ def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_
     except TaskDocumentError as exc:
         exc._source_identity = initial_source
         raise
+    except Exhausted:
+        raise
     except (TypeError, ValueError, OSError):
         raise refusal("Task metadata became unavailable", "task_unavailable")
 
@@ -438,6 +449,10 @@ def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_b
     try:
         return _read(log_dir, task_id, include_prompt=include_prompt, metadata_byte_limit=metadata_byte_limit, metadata_budget=metadata_budget)
     except TaskDocumentError as exc:
+        from .observation_budget import current
+        if current.get() is not None:
+            # Derivative publication can wait on an unbounded catalog lock.
+            raise
         # Reconcile derivative authority only for reads, never for a refused write.
         from .catalog import Catalog
         header, stamp, active = _blocker(log_dir, task_id, exc)
@@ -830,13 +845,16 @@ def process_alive(pid: int | None, markers: Sequence[str]) -> bool:
         # Alive but owned by someone else, so it is not ours.
         return False
 
+    from .observation_budget import current
+    budget = current.get()
+    timeout = min(5, budget.remaining()) if budget is not None else 5
     try:
         cmdline = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             check=False,
-            timeout=5,
+            timeout=timeout,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         # The pid is alive; we just cannot confirm identity. Reporting "gone" would be a worse
@@ -880,7 +898,43 @@ def replay_log(log_dir: Path, task_id: str, backend_name: str) -> tuple[Accumula
     backend = get_backend(backend_name)
     state = Accumulator()
     tail: list[str] = []
+    from .observation_budget import current
+    budget = current.get()
     try:
+        if budget is not None:
+            import stat
+            descriptor = os.open(log_path(log_dir, task_id), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            chunks = []
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise ValueError('Replay source is not a regular file')
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with os.fdopen(descriptor, 'rb', buffering=0) as handle:
+                while True:
+                    budget.remaining()
+                    available = max(0, budget.metadata_limit - budget.metadata_bytes)
+                    if available == 0:
+                        if handle.tell() < os.fstat(handle.fileno()).st_size:
+                            budget.charge(1)
+                        break
+                    chunk = handle.read(min(65536, available))
+                    budget.charge(len(chunk))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            for line in io.StringIO(b''.join(chunks).decode('utf-8'), newline=None):
+                budget.remaining()
+                line = line.rstrip('\n')
+                if not line.strip():
+                    continue
+                tail.append(line[:TAIL_LINE_CHARS])
+                tail = tail[-TAIL_LINES_RETURNED:]
+                event = parse_line(line)
+                if event is not None:
+                    backend.ingest(event, state)
+            return state, tail
         with log_path(log_dir, task_id).open(encoding="utf-8") as handle:
             for line in handle:
                 line = line.rstrip("\n")
@@ -893,6 +947,8 @@ def replay_log(log_dir: Path, task_id: str, backend_name: str) -> tuple[Accumula
     except FileNotFoundError:
         pass
     except OSError:
+        if budget is not None:
+            raise
         log.warning("could not replay stream log for task %s", task_id, exc_info=True)
     return state, tail[-TAIL_LINES_RETURNED:]
 
@@ -931,7 +987,7 @@ _OWNED_BY_LIVE_SERVER_NOTE = (
 
 @task_operation
 def resolve_status(
-    log_dir: Path, record: TaskRecord, *, detail: bool = True
+    log_dir: Path, record: TaskRecord, *, detail: bool = True, _observer_record=None
 ) -> tuple[str, str, Accumulator, list[str]]:
     """The single place a recovered task's status is decided.
 
@@ -947,6 +1003,11 @@ def resolve_status(
         raise TaskDocumentError(record.task_id, "Task metadata disappeared", code="task_unavailable")
     record = fresh
     status, note, state, tail, _owned = _resolve(log_dir, record, detail=detail)
+    from .observation_budget import current
+    if current.get() is not None:
+        current.get().remaining()
+    if _observer_record is not None:
+        _observer_record.append(record)
     return status, note, state, tail
 
 
@@ -1016,7 +1077,8 @@ def _resolve(
         # before it died, that is not a guess — it is exactly what happened, so report it rather
         # than reconstructing a status from a stream that has no result event for this either way.
         try:
-            authorized = control.cancel_verdict(log_dir, record.task_id) == "authorized"
+            from .observation_budget import current
+            authorized = control.cancel_verdict(log_dir, record.task_id, **({'_observe_only': True} if current.get() is not None else {})) == "authorized"
         except StateOwnershipError:
             raise
         except Exception:

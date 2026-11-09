@@ -43,9 +43,9 @@ The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` 
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
-The capability sequence above additionally appends `task-artifacts.v1` and
-`task-continuation-stop.v1`, in that order: bounded artifact metadata reads and
-advisory ctl continuation-stop observations respectively.
+The capability sequence above additionally appends `task-artifacts.v1`,
+`task-continuation-stop.v1` and `task-cancel-cascade.v1`, in that order: bounded artifact
+metadata reads, advisory ctl continuation-stop observations and final ctl cancellation observations.
 
 Consumers perform one fresh version-info probe immediately before each ordinary ctl or setup operation, with the same effective HOME, environment and working-directory policy. Setup probes the paired ctl from the selected runtime. Validate product line, required formats/capabilities, platform and selected state-root equality before launching the requested command. Historical ctl without version-info is incompatible. Approval is not cached across operations. This handshake does not establish authenticity or immutable runtime identity, and does not permit concurrent incompatible writers to share a store. Production managed runtime integration remains unavailable.
 
@@ -2163,7 +2163,84 @@ manifest cases require `task-continue.v1` and record exit codes 0, 1 and 3.
 consumer's gate. Evidence that the real `continue` dispatch produces these documents is in
 `tests/test_ctl_continue_contract.py`.
 
-#### Continuation-stop observations (`task-continuation-stop.v1`)
+### Task cancellation observation (`task-cancel-cascade.v1`)
+
+On a fresh `version-info` handshake, `task-cancel-cascade.v1` qualifies the additional
+`result.cascade.observation` on successful `harflow-ctl cancel TASK_ID --json` results.
+The existing full-ID/prefix echoes, authority/refusal ordering, workflow-control restrictions,
+legacy cascade fields and merge rules, phase-write warnings and exit behavior are preserved.
+Operation refusals remain errors, without a successful observation. MCP cancellation payloads,
+descriptions and schemas are unchanged. The capability grants no new cancellation authority.
+
+The observation contains exactly these fields:
+
+```json
+{
+  "scope": "recorded_tasks_and_pending_launches",
+  "observed_at": "2026-10-15T00:00:00+00:00",
+  "coverage": "complete",
+  "truncated": false,
+  "items": [
+    {"task_id": "task-full-id", "state": "stopped", "basis": "observed_settlement", "status": "cancelled"}
+  ]
+}
+```
+
+- `observed_at` is a timezone-bearing ISO8601 reader timestamp, not the cancellation time.
+- `items` places the requested full ID first, then other qualified discovered targets in
+  deterministic ID order. At most 100 rows and 65,536 serialized UTF-8 bytes are emitted;
+  byte truncation removes whole rows. Candidate selection precedes observer rereads/probes.
+  The limits never constrain cancellation traversal, signals, convergence or pending requests.
+- `state` is `stopped`, `running` or `unknown`. `basis` is `observed_settlement`,
+  `confirmed_live_identity`, `proven_not_started` or `insufficient_evidence`.
+  `status` is a qualified resolved status, otherwise null; it is not inferred from `state`.
+- Recorded `stopped / observed_settlement` requires an observed exit code, `output_drained`
+  exactly true and a fresh dead verdict for the captured task identity, with coherent qualified
+  metadata across status resolution and the final reread. Fresh live identity means
+  `running / confirmed_live_identity` even when terminal fields persist. Missing identity,
+  replacement, disappearance and insufficient evidence stay unknown. Terminal/cancelled status,
+  reconstructed success, signal delivery, owner death and legacy `cancelled_descendants`
+  membership do not prove settlement.
+- Pending `stopped / proven_not_started` requires the target's own successful cancellation
+  settlement, a qualified matching receipt generation/binding, and no task record. A request,
+  accepted withdrawal claim, absent record or dead waiting owner alone is insufficient.
+  Unsettled withdrawal stays unknown; a newly recorded task uses recorded classification.
+  Launch-owner liveness does not establish task execution liveness.
+- `coverage: complete` describes discovery and required final rereads, not whether every task
+  stopped. It requires no omitted rows and no cumulative cascade/history incompleteness,
+  unconverged targets, refused task/launch documents or unsettled withdrawals. An unknown row
+  with a successful qualified reread can coexist with complete coverage.
+- `coverage: incomplete` means a constructed projection failed any completeness condition,
+  including omitted candidates or failed/budget-limited rereads. Evidence from every traversal
+  pass and nested launch cancellation is cumulative even when a later legacy merge looks clean.
+  Unqualified refused documents stay in legacy `refused_tasks`/`launch_refusals`; their IDs
+  never qualify them as descendant rows.
+
+Observer-construction failure produces this exact minimal fallback (with a fresh timestamp):
+
+```json
+{"scope":"recorded_tasks_and_pending_launches","observed_at":"2026-10-15T00:00:00+00:00","coverage":"unknown","truncated":false,"items":[]}
+```
+
+Private observation work shares a five-second cooperative deadline and eight-MiB read allowance
+across metadata, replay and identity work. Probes use the remaining deadline. There is no
+observer polling, settlement wait or abandoned background work. Exhaustion emits unknown rows
+where qualified status is unavailable and incomplete coverage; it alone does not set `truncated`.
+Collection/projection failures never retry cancellation or replace its outcome. Observation is
+read-only with respect to execution and settlement: it never signals, releases resources or
+claims process containment or phase-slot settlement.
+
+`scripts/generate-cancel-cascade-fixtures.py` exercises actual ctl dispatch/serialization with
+isolated qualified state and controlled process/clock facts. Nine `ctl-task-cancel-*.json`
+specimens include round-bound nonempty `unconverged`, refused documents excluded from rows,
+and a parent with an unsettled pending-child withdrawal. Manifest case metadata records seeded
+state, controlled seams and qualification limits. The handshake generator owns
+`invalid-s05-missing-task-cancel-cascade.json`. Existing non-handshake fixtures and the MCP schema
+bundle retain their bytes. Engine and companion app build independently: engine contract/bundle
+land first; later app adoption must vendor identical fixture bytes and manifest digest and
+require this capability on a fresh handshake. `PRODUCT_VERSION` is unchanged.
+
+### Continuation-stop observations (`task-continuation-stop.v1`)
 
 The fresh `version-info` handshake advertises `task-continuation-stop.v1` after
 `task-artifacts.v1`. It qualifies this additive ctl-only diagnostic on authorized

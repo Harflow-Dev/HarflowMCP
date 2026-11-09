@@ -190,8 +190,20 @@ def read_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> 
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             return UNPARSABLE
-        with os.fdopen(os.dup(descriptor), "rb") as handle:
-            raw = handle.read()
+        from .observation_budget import current
+        budget = current.get()
+        with os.fdopen(os.dup(descriptor), "rb", buffering=0 if budget is not None else -1) as handle:
+            if budget is None:
+                raw = handle.read()
+            else:
+                budget.remaining()
+                available = max(0, budget.metadata_limit - budget.metadata_bytes)
+                if opened.st_size > available:
+                    budget.charge(opened.st_size)
+                raw = handle.read(available)
+                budget.charge(len(raw))
+                if os.fstat(descriptor).st_size > available:
+                    budget.charge(available + 1)
         data = json.loads(raw.decode("utf-8"))
         payload = control_documents.decode(data, task_id, family, n, phase)
         final = os.fstat(descriptor)
@@ -228,10 +240,14 @@ def latest_attempt(log_dir: Path, task_id: str, family: str) -> int | None:
     store.validate_task_id(task_id)
     best: int | None = None
     try:
-        entries = list(log_dir.iterdir())
+        from .observation_budget import current
+        budget = current.get()
+        entries = log_dir.iterdir() if budget is not None else list(log_dir.iterdir())
     except OSError:
         return None
     for path in entries:
+        if budget is not None:
+            budget.charge(len(path.name.encode('utf-8')))
         match = _PHASE_FILE_RE.match(path.name)
         if match is None:
             continue
@@ -275,12 +291,16 @@ def join_tokens(log_dir: Path, task_id: str, family: str, n: int) -> list[str]:
     as "no joiners" and let a `.failed` settle an attempt early.
     """
     store.validate_task_id(task_id)
+    from .observation_budget import current
+    budget = current.get()
     try:
-        entries = list(log_dir.iterdir())
+        entries = log_dir.iterdir() if budget is not None else list(log_dir.iterdir())
     except OSError as exc:
         raise JoinsUnreadable(f"could not list {log_dir}: {exc}") from exc
     tokens: list[str] = []
     for path in entries:
+        if budget is not None:
+            budget.charge(len(path.name.encode('utf-8')))
         match = _PHASE_FILE_RE.match(path.name)
         if match is None or match.group("id") != task_id or match.group("family") != family:
             continue
@@ -443,7 +463,7 @@ def begin_attempt(
 
 
 @task_operation
-def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None) -> str:
+def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None, *, _observe_only: bool = False) -> str:
     """Whether a cross-process cancel is authorized for `task_id`.
 
     `"none"` — no cancel has ever been attempted. `"authorized"` — the latest attempt's signal was
@@ -458,7 +478,7 @@ def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None) -> 
     latest = latest_attempt(log_dir, task_id, CANCEL)
     if latest is None:
         return "none"
-    if attempt_outcome(log_dir, task_id, CANCEL, latest) == "pending":
+    if not _observe_only and attempt_outcome(log_dir, task_id, CANCEL, latest) == "pending":
         recover_abandoned(log_dir, task_id, CANCEL, latest, resolved_now)
     state = attempt_state(log_dir, task_id, CANCEL, latest, resolved_now)
     if state == "sig":

@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 import re
 import stat
+from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805'
+PINNED_MANIFEST_SHA256 = 'af89f70008a7fc2c722ae6836ab51dc758f6f691b1154536137b8eadfbff3ed2'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -90,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 310 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 320 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
@@ -103,6 +104,42 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         if case.get('encoding') == 'json' and case.get('valid'):
             strict_json(raw)
     return manifest
+
+
+def validate_cancel_observation(doc):
+    validate_envelope(doc, 'harflow.ctl')
+    value = doc.get('result', {}).get('cascade', {}).get('observation')
+    if (not isinstance(value, dict) or set(value) != {'scope', 'observed_at', 'coverage', 'truncated', 'items'}
+            or value['scope'] != 'recorded_tasks_and_pending_launches'
+            or value['coverage'] not in {'complete', 'incomplete', 'unknown'}
+            or type(value['truncated']) is not bool or not isinstance(value['items'], list)
+            or len(value['items']) > 100 or len(json.dumps(value).encode('utf-8')) > 65536):
+        raise ConformanceError('invalid cancellation observation')
+    try:
+        if datetime.fromisoformat(value['observed_at']).utcoffset() is None:
+            raise ValueError('missing timezone')
+    except (TypeError, ValueError) as exc:
+        raise ConformanceError('invalid observation timestamp') from exc
+    if value['coverage'] == 'unknown' and (value['items'] or value['truncated']):
+        raise ConformanceError('invalid observation fallback')
+    identifiers = []
+    for row in value['items']:
+        if (not isinstance(row, dict) or set(row) != {'task_id', 'state', 'basis', 'status'}
+                or not isinstance(row['task_id'], str) or not row['task_id']
+                or row['state'] not in {'stopped', 'running', 'unknown'}
+                or row['basis'] not in {'observed_settlement', 'confirmed_live_identity', 'proven_not_started', 'insufficient_evidence'}
+                or row['status'] not in {None, 'running', 'completed', 'failed', 'cancelled', 'timed_out'}):
+            raise ConformanceError('invalid observation row')
+        expected = {'observed_settlement': 'stopped', 'confirmed_live_identity': 'running',
+                    'proven_not_started': 'stopped', 'insufficient_evidence': 'unknown'}[row['basis']]
+        if row['state'] != expected:
+            raise ConformanceError('inconsistent observation evidence')
+        identifiers.append(row['task_id'])
+    if (identifiers and identifiers[0] != doc['result']['task_id']
+            or len(identifiers) != len(set(identifiers)) or identifiers[1:] != sorted(identifiers[1:])
+            or value['truncated'] and value['coverage'] != 'incomplete'):
+        raise ConformanceError('invalid observation ordering or coverage')
+    return value
 
 
 def validate_event_page(doc, expected_version='0.0.11'):

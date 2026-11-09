@@ -33,13 +33,16 @@ IdentityCheck = Literal["alive", "dead", "undecidable"]
 
 def _run_ps(pid: int) -> subprocess.CompletedProcess[str] | None:
     """One `ps` lookup for `pid`'s start time and command line. None if it could not be run."""
+    from .observation_budget import current
+    budget = current.get()
+    timeout = min(5, budget.remaining()) if budget is not None else 5
     try:
         return subprocess.run(
             ["ps", "-o", "lstart=,command=", "-p", str(pid)],
             env={**os.environ, "LC_ALL": "C"},
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):

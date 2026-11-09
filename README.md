@@ -17,6 +17,10 @@ Task ids and workflow run ids may be passed as unique prefixes of at least 8 cha
 resolved id in `resolved_from`, and an ambiguous prefix lists its candidates. See
 [id prefixes](docs/contracts.md#id-prefixes).
 
+`harflow-ctl cancel TASK_ID --json` includes a bounded final observation of recorded tasks and
+pending launches (`task-cancel-cascade.v1`): stopped, running or unknown per target, with explicit
+discovery coverage. See the [cancellation observation contract](docs/contracts.md#task-cancellation-observation-task-cancel-cascadev1).
+
 While bounded reads are still establishing caller authority, preparation responses expose only
 neutral status, source and reason, with empty content and unknown counts. This also applies to a
 cold index for a direct caller; retry until authority is established. See

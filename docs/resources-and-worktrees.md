@@ -48,6 +48,12 @@ record** until it spawns, so nothing that reads a record sees it, and the call r
   the owner honours at its next poll and again at the last point before the agent starts (after the
   grant, the worktree and the pre-spawn checks), and cascades to pending descendants. A request that
   lands after that point is applied by the owner right after the spawn, through the ordinary cancel.
+  Successful ctl JSON also includes `cascade.observation` when the engine advertises
+  `task-cancel-cascade.v1`: a bounded final view of qualified recorded/pending targets, with
+  cumulative discovery coverage. A pending child whose withdrawal cleanup remains unsettled
+  stays unknown and makes coverage incomplete even if a later legacy cascade pass is clean.
+  This observation does not release resources or establish phase-slot settlement. See the
+  [exact cancellation contract](contracts.md#task-cancellation-observation-task-cancel-cascadev1).
 - After spawn the task record carries `resources {names, reservation_id, state, wait_started_at,
   granted_at, released_at, borrowed_from?}` in `get_task_status` and `harflow-ctl status`.
 - `harflow-ctl status` and `status-batch` answer a pending id with the additive error code

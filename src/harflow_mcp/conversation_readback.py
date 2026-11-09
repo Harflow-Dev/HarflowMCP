@@ -23,6 +23,10 @@ def replay(log_dir, record):
             if not stat.S_ISREG(info.st_mode):
                 return state, tail
             offset = max(0, info.st_size - 256 * 1024)
+            from .observation_budget import current
+            budget = current.get()
+            if budget is not None:
+                budget.charge(256 * 1024)
             os.lseek(fd, offset, os.SEEK_SET)
             raw = os.read(fd, 256 * 1024)
             if offset:

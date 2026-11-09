@@ -23,7 +23,7 @@ S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
   --commit "$(git rev-parse v0.0.11^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805 \
+  --manifest-sha256 af89f70008a7fc2c722ae6836ab51dc758f6f691b1154536137b8eadfbff3ed2 \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```
@@ -38,11 +38,19 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 310-fixture bundle (0.0.11 plus the unreleased `continue`, `task-artifacts.v1` and `task-continuation-stop.v1` contracts). The examples use this current checkout's bundle, not the released 0.0.11 manifest. Earlier S07/S08/S09
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 320-fixture bundle (0.0.11 plus the unreleased `continue`, `task-artifacts.v1`, `task-continuation-stop.v1` and `task-cancel-cascade.v1` contracts). The examples use this current checkout's bundle, not the released 0.0.11 manifest. Earlier S07/S08/S09
 receipts retain their original source and manifest identities; this repin does not requalify
 their scenarios, a managed runtime, or any consumer. The S08 and S09 profiles still snapshot the older 0.0.7 sources
 (manifest `383ecf7a…`), which `verify_manifest` no longer accepts since the pinned digest moved
 with 0.0.10; rerunning them needs a per-source digest and is not part of this repin.
+
+The nine `ctl-task-cancel-*.json` specimens exercise actual ctl serialization against isolated
+qualified records/receipts, with controlled clocks, process probes and explicitly recorded fault
+seams. The independent oracle checks the exact observation shape, ordering, coverage, row/byte
+limits and minimal fallback. The missing-capability handshake requires `task-cancel-cascade.v1`.
+Case provenance records qualification limits; S07's target smoke operations remain read-only.
+Companion-app adoption must independently vendor the identical complete bundle/digest and require
+the capability on a fresh handshake.
 
 ## Explicit binary target
 
@@ -257,7 +265,7 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
 .venv/bin/python -m conformance.e1.scenarios \
   --source-repo "$PWD" --commit "$(git rev-parse v0.0.11^{commit})" --python "$PWD/.venv/bin/python" \
   --manifest "$PWD/contracts/v1/manifest.json" \
-  --manifest-sha256 93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805 \
+  --manifest-sha256 af89f70008a7fc2c722ae6836ab51dc758f6f691b1154536137b8eadfbff3ed2 \
   --output /path/to/new-empty-dir
 .venv/bin/python -m pytest conformance/tests_e1 -q   # infrastructure self-checks
 ```
@@ -291,7 +299,7 @@ D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 ```sh
 .venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.11^{commit})" \
   --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
-  --manifest-sha256 93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805 \
+  --manifest-sha256 af89f70008a7fc2c722ae6836ab51dc758f6f691b1154536137b8eadfbff3ed2 \
   --product-version 0.0.11 --seam none --output /path/to/new-dir
 .venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
 ```

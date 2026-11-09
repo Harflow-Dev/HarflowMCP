@@ -11,11 +11,11 @@ import pytest
 
 from conformance.oracles import (
     ConformanceError, strict_json, validate_envelope, validate_version_info,
-    verify_manifest,
+    verify_manifest, validate_cancel_observation,
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = '93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805'
+DIGEST = 'af89f70008a7fc2c722ae6836ab51dc758f6f691b1154536137b8eadfbff3ed2'
 
 
 def envelope(format='harflow.ctl'):
@@ -86,7 +86,32 @@ def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)
-    assert len(document['files']) == 310
+    assert len(document['files']) == 320
+
+
+def test_cancellation_fixtures_obey_binding_shape_and_capability():
+    manifest = verify_manifest(BUNDLE / 'manifest.json')
+    names = sorted(name for name in manifest['files'] if name.startswith('ctl-task-cancel-'))
+    assert len(names) == 9
+    for name in names:
+        validate_cancel_observation(strict_json((BUNDLE / name).read_bytes()))
+        case = manifest['cases'][name]
+        assert case['required_capabilities'] == ['task-cancel-cascade.v1']
+        assert 'Actual ctl.main' in case['provenance']
+    negative = strict_json((BUNDLE / 'invalid-s05-missing-task-cancel-cascade.json').read_bytes())
+    with pytest.raises(ConformanceError, match='missing capabilities'):
+        validate_version_info(negative, negative['state_root'], ['task-cancel-cascade.v1'])
+
+
+@pytest.mark.parametrize('changes', [
+    dict(extra=True), dict(coverage='invented'), dict(truncated=1), dict(observed_at='2026-10-15T00:00:00'),
+    dict(items=[{}]), dict(coverage='unknown'), dict(items=[dict(task_id='other', state='running', basis='observed_settlement', status='completed')]),
+])
+def test_cancellation_oracle_rejects_invalid_observations(changes):
+    doc = strict_json((BUNDLE / 'ctl-task-cancel-settled.json').read_bytes())
+    doc['result']['cascade']['observation'].update(changes)
+    with pytest.raises(ConformanceError):
+        validate_cancel_observation(doc)
 
 
 def copied_bundle(tmp_path):

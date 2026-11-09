@@ -108,7 +108,11 @@ def _read(path):
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_DOCUMENT_BYTES:
             raise WithdrawalError('Withdrawal document is not a bounded regular file')
-        with os.fdopen(os.dup(fd), 'rb') as stream:
+        from .observation_budget import current
+        budget = current.get()
+        with os.fdopen(os.dup(fd), 'rb', buffering=0 if budget is not None else -1) as stream:
+            if budget is not None:
+                budget.charge(MAX_DOCUMENT_BYTES + 1)
             raw = stream.read(MAX_DOCUMENT_BYTES + 1)
         after = path.lstat()
         identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns)
