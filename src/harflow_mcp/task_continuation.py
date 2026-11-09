@@ -14,6 +14,7 @@ from . import control, followups, shared_scratch, store
 from .backends import get as get_backend
 from .state_access import storage_operation, require_state_path
 from .state_ownership import StateOwnershipError, owned_job, run_owned_worker
+from .task_continuation_stop import marker_path, REFUSAL_MESSAGE
 
 CONTEXT_BYTES = 64 * 1024
 NOTES_BYTES = 64 * 1024
@@ -99,7 +100,7 @@ async def stop_chain(registry: Any, task_id: str) -> None:
         source = read_task_record(registry.log_dir, task_id, include_prompt=False)
         if source is None or not (source.auto_continue or source.continuation_of_task_id or (registry.log_dir / f'{task_id}.continuation.json').exists()):
             return
-        _write(registry.log_dir / f'{root}.continuation-stopped.json', {'cancelled_task_id': task_id}, layout=registry.state_layout)
+        _write(marker_path(registry.log_dir, root), {'cancelled_task_id': task_id}, layout=registry.state_layout)
 
 
 @storage_operation
@@ -136,8 +137,10 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
     effective_idle = resolve(background_idle_seconds, source.background_idle_seconds)
     root = source.chain_root_task_id or task_id
     async with control.session_lock(registry.log_dir, 'continuation-' + root):
-        if (registry.log_dir / f'{root}.continuation-stopped.json').exists():
-            raise ValueError('Continuation chain was cancelled; start a new task explicitly')
+        if marker_path(registry.log_dir, root).exists():
+            exc = ValueError(REFUSAL_MESSAGE)
+            exc.harflow_continuation_stop_data = {'reason': 'chain_stopped', 'chain_root_task_id': root}
+            raise exc
         # Reload inside the lock: durable exit/drain evidence is mandatory, including recovery.
         source = store.read(registry.log_dir, task_id)
         if source is None or source.status not in {'completed', 'failed', 'timed_out', 'cancelled'} or source.exit_code is None or not source.finished_at or not source.output_drained:

@@ -191,8 +191,9 @@ def test_status_plain_text_for_an_unknown_task_prints_nothing_to_stdout(
 
 
 def test_status_batch_entries_match_single_status_documents(
-    home: Path, capsys: pytest.CaptureFixture
+    home: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr('harflow_mcp.task_continuation_stop._now', lambda: '2026-10-15T00:00:00+00:00')
     log_dir = _log_dir(home)
     store.write(log_dir, make_record())
     store.write(log_dir, make_record(task_id="task-2", backend="codex", session_id="s2", markers=["s2"]))
@@ -213,6 +214,107 @@ def test_status_batch_entries_match_single_status_documents(
             single.pop("duration_seconds", None)
             batched.pop("duration_seconds", None)
         assert batched == single
+
+
+def test_status_continuation_stop_full_brief_batch(home, capsys, monkeypatch):
+    from harflow_mcp import task_continuation_stop as stop
+    monkeypatch.setattr(stop, '_now', lambda: '2026-10-15T00:00:00+00:00')
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record())
+    stop.marker_path(log_dir, 'task-1').write_text('{"cancelled_task_id":"task-1"}')
+    observations = []
+    for args in (['status', 'task-1'], ['status', 'task-1', '--brief'],
+                 ['status-batch', '--task-ids', 'task-1,missing']):
+        assert ctl.main([*args, '--json']) == 0
+        doc = json.loads(capsys.readouterr().out)
+        task = doc['tasks'][0] if 'tasks' in doc else doc['task']
+        observations.append(task['continuation_stop'])
+    assert observations[0] == observations[1] == observations[2]
+    assert observations[0]['state'] == 'stopped'
+
+
+@pytest.mark.parametrize('mode', ['full', 'brief', 'batch'])
+def test_status_stop_identity_tracks_snapshot_record_replacement(home, capsys, monkeypatch, mode):
+    from dataclasses import replace
+    from harflow_mcp import task_continuation_stop as stop
+    log_dir = _log_dir(home)
+    initial = make_record(chain_root_task_id='chain-a', root_task_id='dispatch-root',
+                          spawned_by='dispatch-parent', group='dispatch-group')
+    replacement = replace(initial, chain_root_task_id='chain-b')
+    store.write(log_dir, initial)
+    stop.marker_path(log_dir, 'chain-b').write_text('{"cancelled_task_id":"cancelled-b"}')
+    monkeypatch.setattr(stop, '_now', lambda: '2026-10-15T00:00:00+00:00')
+    read_record, snapshot, read = ctl._read_task_record, store.snapshot, store.read
+    qualified = []
+    projections = []
+    observing = False
+    observe_identity = stop.observe_identity
+
+    def replace_after_initial_read(*args, **kwargs):
+        record = read_record(*args, **kwargs)
+        assert record.chain_root_task_id == 'chain-a'
+        qualified.append(record)
+        assert store.write_landed(log_dir, replacement)
+        return record
+
+    def capture_projection(directory, record, **kwargs):
+        assert record is qualified[0]
+        result = snapshot(directory, record, **kwargs)
+        assert result['chain_root_task_id'] == 'chain-b'
+        projections.append(result.copy())
+        return result
+
+    def read_outside_observation(directory, task_id, **kwargs):
+        assert not observing, 'diagnostic must not reread any task or ancestry record'
+        return read(directory, task_id, **kwargs)
+
+    def observe_without_rereads(directory, **kwargs):
+        nonlocal observing
+        assert kwargs == dict(task_id=initial.task_id, chain_root_task_id='chain-b')
+        observing = True
+        try:
+            return observe_identity(directory, **kwargs)
+        finally:
+            observing = False
+
+    monkeypatch.setattr(ctl, '_read_task_record', replace_after_initial_read)
+    monkeypatch.setattr(store, 'snapshot', capture_projection)
+    monkeypatch.setattr(store, 'read', read_outside_observation)
+    monkeypatch.setattr(stop, 'observe_identity', observe_without_rereads)
+    argv = ['status-batch', '--task-ids', initial.task_id] if mode == 'batch' else ['status', initial.task_id]
+    if mode == 'brief':
+        argv.append('--brief')
+    assert ctl.main([*argv, '--json']) == 0
+    doc = json.loads(capsys.readouterr().out)
+    task = doc['tasks'][0] if mode == 'batch' else doc['task']
+    assert len(qualified) == len(projections) == 1
+    if mode != 'brief':
+        assert task['chain_root_task_id'] == 'chain-b'
+    assert task['continuation_stop'] == dict(state='stopped', chain_root_task_id='chain-b',
+        reason='chain_cancelled', cancelled_task_id='cancelled-b', observed_at='2026-10-15T00:00:00+00:00')
+
+
+@pytest.mark.parametrize('broken_identity', ['missing-root', 'wrong-task'])
+def test_status_stop_incoherent_projection_is_unknown(home, capsys, monkeypatch, broken_identity):
+    from harflow_mcp import task_continuation_stop as stop
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record(chain_root_task_id='chain-a', root_task_id='dispatch-root'))
+    stop.marker_path(log_dir, 'chain-a').write_text('{}')
+    snapshot = store.snapshot
+    def incomplete_projection(*args, **kwargs):
+        result = snapshot(*args, **kwargs)
+        if broken_identity == 'missing-root':
+            result.pop('chain_root_task_id')
+        else:
+            result['task_id'] = 'unrelated-task'
+        return result
+    monkeypatch.setattr(store, 'snapshot', incomplete_projection)
+    monkeypatch.setattr(stop, '_inspect', lambda *a: pytest.fail('incoherent projection must not inspect a marker'))
+    assert ctl.main(['status', 'task-1', '--json']) == 0
+    observation = json.loads(capsys.readouterr().out)['task']['continuation_stop']
+    assert observation['state'] == 'unknown'
+    assert observation['chain_root_task_id'] is None
+    assert observation['reason'] is observation['cancelled_task_id'] is None
 
 
 def test_status_batch_mixes_authorized_unauthorized_and_unknown_ids(

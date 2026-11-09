@@ -52,7 +52,8 @@ Action = Callable[[Any], Awaitable[Any]]
 @dataclass(frozen=True)
 class Outcome:
     """What the parent learned: `kind` is `"task"` (payload `{"task_id"}`), `"error"` (payload
-    `{"code", "message"}`) or `"unknown"` (payload `{"message"}`)."""
+    `{"code", "message"}` with optional validated chain-stop `data`) or `"unknown"`
+    (payload `{"message"}`)."""
 
     kind: str
     payload: dict[str, Any]
@@ -81,8 +82,8 @@ class _Handshake:
             self.close()
 
 
-def error_doc(exc: BaseException) -> dict[str, str]:
-    """A stable `{code, message}` for anything starting or resuming a task can raise."""
+def error_doc(exc: BaseException) -> dict[str, Any]:
+    """Stable code/message, plus allowlisted data only for marked chain-stop ValueError."""
     if isinstance(exc, StateOwnershipError):
         return {"code": getattr(exc, "code", "state_incompatible"), "message": str(exc)}
     from . import backends
@@ -113,7 +114,13 @@ def error_doc(exc: BaseException) -> dict[str, str]:
         # Refused inside a boundary that cannot have created a process: the caller's request was
         # invalid, and retrying it unchanged cannot strand a running agent.
         return {"code": "invalid_params", "message": str(exc)}
-    return {"code": "start_failed", "message": f"{type(exc).__name__}: {exc}"}
+    result = {"code": "start_failed", "message": f"{type(exc).__name__}: {exc}"}
+    from .task_continuation_stop import refusal_data, REFUSAL_MESSAGE
+    if type(exc) is ValueError and str(exc) == REFUSAL_MESSAGE:
+        data = refusal_data(getattr(exc, 'harflow_continuation_stop_data', None))
+        if data is not None:
+            result['data'] = data
+    return result
 
 
 def run_detached(

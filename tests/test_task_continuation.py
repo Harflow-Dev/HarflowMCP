@@ -292,8 +292,15 @@ async def test_cancel_before_reserved_spawn_prevents_restart(tmp_path, monkeypat
     source = record(tmp_path, auto_continue=1)
     registry = Registry(tmp_path)
     await stop_chain(registry, source.task_id)
-    with pytest.raises(ValueError, match='chain was cancelled'):
-        await continue_task(registry, source.task_id)
+    consumption = AsyncMock(side_effect=AssertionError('stopped admission must precede follow-up consumption'))
+    monkeypatch.setattr('harflow_mcp.followups.begin', consumption)
+    with pytest.raises(ValueError, match='chain was cancelled') as refused:
+        await continue_task(registry, source.task_id, consume_followups=True)
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == 'Continuation chain was cancelled; start a new task explicitly'
+    assert refused.value.harflow_continuation_stop_data == {'reason': 'chain_stopped', 'chain_root_task_id': source.task_id}
+    assert not (registry.log_dir / f'{source.task_id}.continuation.json').exists()
+    consumption.assert_not_awaited()
     registry.start.assert_not_awaited()
 
 

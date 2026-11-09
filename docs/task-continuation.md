@@ -26,6 +26,27 @@ Cancelling the initial task also reaches active successors through continuation 
 
 Retention preserves the original chain assignment while any successor record remains, including settled successors still within retention and records whose cleanup is locked or failed. Fully expired chains are reclaimed once their successor records have been removed.
 
+## Chain-stop diagnostics in ctl
+
+With `task-continuation-stop.v1` on the fresh handshake, ctl full/brief status and
+successful batch rows include `continuation_stop`: `state`, `chain_root_task_id`,
+`reason`, `cancelled_task_id` and reader-generated `observed_at`. Stable safe marker
+presence is `stopped` with reason `chain_cancelled`; verified absence is `not_stopped`;
+unsafe, unreadable or raced sources are `unknown`. Attribution may be null even when
+stopped. Ordinary cancellation without a chain marker is `not_stopped`. A source's
+explicit chain root is authoritative; delegation ancestry and groups have no effect.
+
+This is advisory: `not_stopped`, `unknown`, or an omitted field never establishes
+eligibility. Admission still checks marker existence inside the chain lock before
+reservation or follow-up consumption. The actual stopped-chain ctl Continue refusal
+adds `error.data: {reason: "chain_stopped", chain_root_task_id: ID}` to `start_failed`,
+preserving exit 1 and its existing display text. Other detached errors carry no data.
+MCP status and continuation errors are unchanged.
+
+`task-continue.v1` qualifies launch support and `task-successors.v1` qualifies
+reconciliation after ambiguous launches (exit 3); the diagnostic capability replaces
+neither. See the [complete field and uncertainty contract](contracts.md#continuation-stop-observations-task-continuation-stopv1).
+
 ## Recovery after a permission denial
 
 When a finished Claude task reports `permission_denials`, read each entry's `denial_category` and

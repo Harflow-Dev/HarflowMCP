@@ -911,7 +911,7 @@ def _error_code(exc: BaseException, default: str) -> str:
     return getattr(exc, "code", default)
 
 
-def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observer=None) -> dict[str, Any]:
+def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observer=None, include_continuation_stop=True) -> dict[str, Any]:
     """One task's full snapshot — the shared body of `status` and `status-batch`.
 
     Raises `_StatusReadRefused` with the same `code`/`message` a single `status` reports for this
@@ -921,6 +921,13 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any, *, parent_observ
     record = _read_task_record(log_dir, task_id, managed)
     from .workflow_inspection import decorate_tasks
     snapshot = store.snapshot(log_dir, record, ctl_observation=True, parent_observer=parent_observer)
+    if include_continuation_stop:
+        from .task_continuation_stop import observe_identity
+        # snapshot requalifies the record, so the initial read may now be stale.
+        coherent = snapshot.get('task_id') == task_id and 'chain_root_task_id' in snapshot
+        snapshot['continuation_stop'] = observe_identity(
+            log_dir, task_id=snapshot['task_id'] if coherent else None,
+            chain_root_task_id=snapshot['chain_root_task_id'] if coherent else None)
     return decorate_tasks([snapshot], log_dir)[0]
 
 
@@ -1624,10 +1631,16 @@ def _cmd_detached(args: argparse.Namespace, action: Any, resolution: id_resoluti
             print(outcome.payload["task_id"])
         return 0
     if outcome.kind == "error":
+        from .task_continuation_stop import refusal_data, REFUSAL_MESSAGE
+        data = None
+        if (getattr(args, 'command', None) == 'continue' and outcome.payload.get('code') == 'start_failed'
+                and outcome.payload.get('message') == 'ValueError: ' + REFUSAL_MESSAGE):
+            data = refusal_data(outcome.payload.get('data'))
         return _fail(
             args,
             str(outcome.payload.get("code", "start_failed")),
             str(outcome.payload.get("message", "")),
+            data,
         )
     print(f"harflow-ctl: {outcome.payload['message']}", file=sys.stderr)
     if args.json:

@@ -80,6 +80,21 @@ def _settled(task_id: str, timeout: float = 15.0) -> store.TaskRecord:
 # --- run / resume: the handshake ------------------------------------------------------------
 
 
+def test_continue_stopped_chain_real_fork_matches_fixture(tmp_path):
+    from harflow_mcp import task_continuation_stop as stop
+    task_id = 'task-continuation-stop'
+    directory = default_log_dir()
+    store.write(directory, store.TaskRecord(task_id, 'fake', None, str(tmp_path),
+        '2026-10-15T00:00:00+00:00', status='completed', exit_code=0))
+    stop.marker_path(directory, task_id).write_text('{}')
+    code, out, err = drive('ctl', 'continue', task_id, '--json')
+    assert code == 1, err
+    canonical = (json.dumps(_one(out), sort_keys=True, separators=(',', ':')) + '\n').encode()
+    fixture = Path(__file__).parents[1] / 'contracts/v1/ctl-continue-chain-stopped.json'
+    assert canonical == fixture.read_bytes()
+    assert not (directory / f'{task_id}.continuation.json').exists()
+
+
 def test_run_returns_the_task_id_and_the_child_owns_the_task_to_the_end(git_repo: Path) -> None:
     code, out, err = drive(
         "ctl", "run", "--backend", "fake", "--repo", str(git_repo), "--prompt", "hi", "--json"

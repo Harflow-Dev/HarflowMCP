@@ -73,6 +73,35 @@ def test_error_doc_preserves_more_specific_errors_and_maps_marked_value_errors()
         assert error_doc(exc)['code'] == code
 
 
+@pytest.mark.parametrize('data', [None, {}, [], {'reason': 'other', 'chain_root_task_id': 'root'},
+    {'reason': 'chain_stopped', 'chain_root_task_id': '../escape'},
+    {'reason': 'chain_stopped', 'chain_root_task_id': 1},
+    {'reason': 'chain_stopped', 'chain_root_task_id': 'root', 'extra': True}])
+def test_error_doc_rejects_malformed_stop_attributes(data):
+    from harflow_mcp.task_continuation_stop import REFUSAL_MESSAGE
+    exc = ValueError(REFUSAL_MESSAGE)
+    exc.harflow_continuation_stop_data = data
+    assert error_doc(exc) == {'code': 'start_failed', 'message': 'ValueError: ' + REFUSAL_MESSAGE}
+
+
+async def test_actual_stopped_exception_transport_and_classification_precedence(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from harflow_mcp.task_continuation_stop import marker_path, REFUSAL_MESSAGE
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    record = store.TaskRecord('source', 'claude', None, str(tmp_path), '2026-01-01T00:00:00+00:00')
+    store.write(registry.log_dir, record)
+    marker_path(registry.log_dir, 'source').write_text('{}')
+    with pytest.raises(ValueError) as caught:
+        await registry.continue_task('source')
+    assert type(caught.value) is ValueError
+    assert error_doc(caught.value) == dict(code='start_failed', message='ValueError: ' + REFUSAL_MESSAGE,
+        data={'reason': 'chain_stopped', 'chain_root_task_id': 'source'})
+    assert 'data' not in error_doc(ValueError(REFUSAL_MESSAGE))
+    caught.value.harflow_not_started = True
+    assert error_doc(caught.value) == dict(code='invalid_params', message=REFUSAL_MESSAGE)
+
+
 async def test_run_with_incompatible_saved_grants_reports_invalid_params(tmp_path, monkeypatch, backend):
     from unittest.mock import AsyncMock
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)

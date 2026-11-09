@@ -22,6 +22,12 @@ file observations are paged separately through [task artifact reads](task-artifa
 The ctl brief projection bounds response size; obtaining a recovered status can still
 require the existing recovery/replay work before projection.
 
+Ctl status adds the advisory `continuation_stop` object when the fresh handshake
+advertises `task-continuation-stop.v1`. The brief preserves all five validated fields
+and complete IDs within its existing 8192-byte bound; projection itself does no marker
+reads. States `stopped`, `not_stopped` and `unknown` describe observation only, never
+eligibility. MCP status has no new field. See the [continuation-stop contract](contracts.md#continuation-stop-observations-task-continuation-stopv1).
+
 For indexed history use `harflow-ctl task-list-compact --json --limit 50`, or
 explicit bounded listing options on the MCP `list_tasks` tool. These compact
 history listings are available only to direct callers. Once caller readiness is
@@ -102,7 +108,8 @@ snapshots in one document and one process:
 `{"v": 11, "tasks": [<snapshot>...], "errors": {"<id>": {"code", "message"}}}`.
 It is an additive command under `CTL_JSON_VERSION` 11 — no existing document
 changes shape. Entries are exactly what `status <id> --json` reports (only a
-running task's `duration_seconds`, computed per call, may differ), and `errors`
+running task's `duration_seconds` and reader-generated `continuation_stop.observed_at`,
+computed per call, may differ), and `errors`
 carries the same codes single `status` reports: `unknown_task`, read-refusal
 codes, and `invalid_task_id`. A whole-batch refusal — including undecidable
 caller authority — is the `status` error shape for the whole command, never

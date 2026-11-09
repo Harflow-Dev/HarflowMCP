@@ -171,6 +171,12 @@ A verified direct caller can also read the activity of a running workflow node w
 
 `harflow-ctl continue TASK_ID [--extra-prompt TEXT | --extra-prompt-file PATH] --json` starts a fresh session from a settled standalone task and consumes its queued follow-ups (capability `task-continue.v1`; see [continue](docs/contracts.md#continue-task-continuev1)).
 
+Ctl full/brief status and batch rows expose advisory chain-stop observations with
+`task-continuation-stop.v1` in the fresh version-info handshake. `stopped`,
+`not_stopped` and `unknown` describe the marker observation, never launch eligibility;
+successor reconciliation still uses `task-successors.v1`. See the
+[continuation-stop contract](docs/contracts.md#continuation-stop-observations-task-continuation-stopv1).
+
 `harflow-ctl task-list-watch [--cursor C] [--wait-seconds N] --json` is one bounded task-list invalidation wait (capability `task-list-watch.v1`; see [task-list invalidation wait](docs/contracts.md#task-list-invalidation-wait-task-list-watchv1)). It returns baseline/changed/timeout/reset/unavailable signals, not task facts; public paging and status remain authoritative. Direct callers only; it never initializes a missing state root. Watch continuity requires corrected producer writers (0.0.10); concurrent older writers are unqualified and may not invalidate the watcher. Consumers must retain public deadline reconciliation.
 
 For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`

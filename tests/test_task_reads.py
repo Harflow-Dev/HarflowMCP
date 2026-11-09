@@ -44,6 +44,30 @@ def test_brief_bounds_and_does_not_mutate_prose():
     assert json.dumps(payload) == before
 
 
+@pytest.mark.parametrize('state', ['stopped', 'not_stopped', 'unknown'])
+def test_brief_preserves_complete_continuation_stop(state):
+    observation = dict(state=state, chain_root_task_id='r' * 64,
+        reason='chain_cancelled' if state == 'stopped' else None,
+        cancelled_task_id='c' * 64 if state == 'stopped' else None,
+        observed_at='2026-10-15T00:00:00+00:00')
+    payload = dict(task_id='task', continuation_stop=observation, summary='界' * 100000,
+                   error='界' * 100000, recent_activity=['界' * 100000] * 10)
+    before = json.dumps(payload)
+    brief = task_reads.brief_status(payload)
+    assert brief['continuation_stop'] == observation
+    assert brief['continuation_stop'] is not observation
+    assert len(json.dumps(brief, ensure_ascii=True).encode()) <= task_reads.BRIEF_BYTES
+    assert json.dumps(payload) == before
+
+
+@pytest.mark.parametrize('change', [dict(state='eligible'), dict(chain_root_task_id='../bad'),
+    dict(reason='other'), dict(cancelled_task_id=1), dict(observed_at='no timezone'), dict(extra=True)])
+def test_brief_rejects_malformed_continuation_stop(change):
+    observation = dict(state='stopped', chain_root_task_id='root', reason='chain_cancelled',
+        cancelled_task_id=None, observed_at='2026-10-15T00:00:00+00:00') | change
+    assert 'continuation_stop' not in task_reads.brief_status({'continuation_stop': observation})
+
+
 @pytest.mark.parametrize('kw', [dict(limit=0), dict(limit=101), dict(fields=['prompt']),
     dict(since='yesterday'), dict(since='2026-01-01'), dict(status='success'),
     dict(group='x' * 129), dict(group='😀' * 129), dict(group=' '),

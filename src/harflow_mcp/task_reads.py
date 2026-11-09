@@ -121,6 +121,10 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
             result[key] = {'pid': value['pid'], 'start_time': _text(value['start_time'], 128) if isinstance(value.get('start_time'), str) else None}
     if isinstance(payload.get('successor_tasks'), dict):
         result['successor_tasks'] = payload['successor_tasks']
+    from .task_continuation_stop import project
+    observation = project(payload.get('continuation_stop'))
+    if observation is not None:
+        result['continuation_stop'] = observation
     artifact = payload.get('artifact_summary')
     if isinstance(artifact, dict):
         count, state = artifact.get('count'), artifact.get('state')

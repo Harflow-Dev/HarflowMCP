@@ -124,6 +124,10 @@ class World:
         stack.enter_context(mock.patch.object(identity, "own_identity", lambda: {"pid": 6789, "start_time": "responding-server-start", "markers": []}))
         stack.enter_context(mock.patch.object(lineage, "detect_caller_detail", lambda *_a, **_k: SimpleNamespace(caller=None, undecidable=self.facts["undecidable"])))
         stack.enter_context(mock.patch.object(ctl, "default_log_dir", lambda: self.tasks_dir))
+        # Keep the legacy optional-field-omitted status specimen. The production
+        # snapshot and envelope still serialize it; only this fixture seam opts out.
+        from functools import partial
+        stack.enter_context(mock.patch.object(ctl, '_status_snapshot', partial(ctl._status_snapshot, include_continuation_stop=False)))
         stack.enter_context(state_ownership.state_session(resolve_layout(root=self.root)))
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.hub = Hub(self)

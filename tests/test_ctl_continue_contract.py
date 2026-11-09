@@ -116,6 +116,38 @@ def test_precondition_value_error_reports_start_failed(state, monkeypatch, capsy
     assert "data" not in error
 
 
+def test_actual_chain_stop_refusal_matches_fixture(state, monkeypatch, capsys):
+    from harflow_mcp import task_continuation_stop as stop
+    task_id = 'task-continuation-stop'
+    store.write(default_log_dir(), _record(task_id))
+    stop.marker_path(default_log_dir(), task_id).write_text('{}')
+    def fake(action, *, registry_factory, **kwargs):
+        try:
+            asyncio.run(action(registry_factory()))
+        except ValueError as exc:
+            assert type(exc) is ValueError
+            return detached.Outcome('error', detached.error_doc(exc), 123)
+        pytest.fail('stopped admission must refuse')
+    monkeypatch.setattr(detached, 'run_detached', fake)
+    code, document = _run(capsys, task_id)
+    assert code == 1
+    assert _canonical()(document) == (BUNDLE / 'ctl-continue-chain-stopped.json').read_bytes()
+
+
+@pytest.mark.parametrize('operation,code,message,data', [
+    ('continue', 'invalid_params', 'other', {'reason': 'chain_stopped', 'chain_root_task_id': 'root'}),
+    ('continue', 'start_failed', 'other', {'reason': 'chain_stopped', 'chain_root_task_id': 'root'}),
+    ('run', 'start_failed', 'ValueError: Continuation chain was cancelled; start a new task explicitly', {'reason': 'chain_stopped', 'chain_root_task_id': 'root'}),
+    ('continue', 'start_failed', 'ValueError: Continuation chain was cancelled; start a new task explicitly', {'reason': 'chain_stopped', 'chain_root_task_id': '../bad'}),
+    ('continue', 'start_failed', 'ValueError: Continuation chain was cancelled; start a new task explicitly', {'reason': 'chain_stopped', 'chain_root_task_id': 'root', 'extra': True}),
+])
+def test_parent_drops_unallowlisted_error_data(state, monkeypatch, capsys, operation, code, message, data):
+    import argparse
+    monkeypatch.setattr(detached, 'run_detached', lambda *a, **k: detached.Outcome('error', dict(code=code, message=message, data=data), 123))
+    assert ctl._cmd_detached(argparse.Namespace(json=True, command=operation), None) == 1
+    assert 'data' not in json.loads(capsys.readouterr().out)['error']
+
+
 def _forbid_launch(monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("refusals must happen before the detached owner is started")

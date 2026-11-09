@@ -15,7 +15,7 @@ from conformance.oracles import (
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = 'd5fd363d1d1bbf7be8dbed5d24c4ed5a38967325ab48cb0bc34e41531e4d9e95'
+DIGEST = '93b187fa501d0c325291476d4b7e09cacc310a174be872299294574cdb203805'
 
 
 def envelope(format='harflow.ctl'):
@@ -86,7 +86,7 @@ def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)
-    assert len(document['files']) == 303
+    assert len(document['files']) == 310
 
 
 def copied_bundle(tmp_path):

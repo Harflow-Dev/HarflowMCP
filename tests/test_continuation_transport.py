@@ -42,6 +42,21 @@ async def test_continue_tool_passes_exact_text_and_notes(monkeypatch):
     assert observed == [("guard", "old"), ("old", "  next\nstep  ", "/tmp/notes")]
 
 
+async def test_mcp_stopped_chain_error_remains_code_and_text_only(monkeypatch):
+    from unittest.mock import AsyncMock
+    from harflow_mcp.task_continuation_stop import REFUSAL_MESSAGE
+    exc = ValueError(REFUSAL_MESSAGE)
+    exc.harflow_continuation_stop_data = dict(reason='chain_stopped', chain_root_task_id='old')
+    monkeypatch.setattr(server, '_guard_task_read', AsyncMock(return_value=id_resolution.Resolution('old', None)))
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(
+        continue_task=AsyncMock(side_effect=exc), _mutation_caller=AsyncMock(return_value=None)))
+    with pytest.raises(MCPError) as caught:
+        await server.continue_task('old')
+    assert caught.value.error.code == -32602
+    assert caught.value.error.message == REFUSAL_MESSAGE
+    assert caught.value.error.data is None
+
+
 def test_continue_cli_file_preserves_prose(tmp_path, monkeypatch):
     text = "  next\r\nstep  "
     path = tmp_path / "followup"

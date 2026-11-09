@@ -43,6 +43,10 @@ The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` 
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
+The capability sequence above additionally appends `task-artifacts.v1` and
+`task-continuation-stop.v1`, in that order: bounded artifact metadata reads and
+advisory ctl continuation-stop observations respectively.
+
 Consumers perform one fresh version-info probe immediately before each ordinary ctl or setup operation, with the same effective HOME, environment and working-directory policy. Setup probes the paired ctl from the selected runtime. Validate product line, required formats/capabilities, platform and selected state-root equality before launching the requested command. Historical ctl without version-info is incompatible. Approval is not cached across operations. This handshake does not establish authenticity or immutable runtime identity, and does not permit concurrent incompatible writers to share a store. Production managed runtime integration remains unavailable.
 
 ## Normalized events and budgets
@@ -2137,7 +2141,8 @@ variables are set); `invalid_task_id`;
 `ambiguous_task_id` with candidates in `error.data`; and state and document failures from the
 shared ctl session, with their codes and `error.data` where present (`state_busy`,
 `state_incompatible` and the others listed under state ownership). After the fork, errors come
-from `detached.error_doc` and never carry `error.data`: `start_failed` for continuation
+from `detached.error_doc` and carry no `error.data` except the narrowly marked stopped-chain
+refusal documented below: `start_failed` for continuation
 preconditions (task not settled or without an observed exit, a continuation that already
 exists, a cancelled chain, an unsettled reservation, a reservation reserved for a different
 caller request or over its size bound, an unavailable original assignment, and argument
@@ -2157,6 +2162,92 @@ manifest cases require `task-continue.v1` and record exit codes 0, 1 and 3.
 `invalid-s05-missing-task-continue.json` is a handshake without the capability, for testing a
 consumer's gate. Evidence that the real `continue` dispatch produces these documents is in
 `tests/test_ctl_continue_contract.py`.
+
+#### Continuation-stop observations (`task-continuation-stop.v1`)
+
+The fresh `version-info` handshake advertises `task-continuation-stop.v1` after
+`task-artifacts.v1`. It qualifies this additive ctl-only diagnostic on authorized
+`status TASK --json`, `status TASK --brief --json` and each successful `status-batch`
+task row. It does not add a command, MCP field, persisted task field or eligibility API.
+`task-continue.v1` controls launch support; `task-successors.v1` controls recorded-task
+reconciliation, including after exit 3. Neither is a prerequisite for reading this diagnostic.
+
+`continuation_stop` always contains exactly these five fields:
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `stopped`, `not_stopped` or `unknown` |
+| `chain_root_task_id` | The source record's supplied `chain_root_task_id`, otherwise its own `task_id`; null if the selected identity is invalid |
+| `reason` | `chain_cancelled` only for `stopped`; otherwise null |
+| `cancelled_task_id` | Optional syntactically valid ID attributed by the marker; otherwise null |
+| `observed_at` | Reader-generated timezone-aware ISO8601 time, not marker mtime or cancellation time |
+
+No dispatch ancestry, `root_task_id`, `spawned_by`, group or scratch identity is used.
+An invalid supplied root never falls back to another identity, and observation does not
+read a root task record.
+The observer uses the task/chain-root identity from the same qualified source as the
+returned status projection, including when snapshot qualification observes a replacement
+after the initial task read. It performs no extra record reread; an incoherent or incomplete
+projected identity yields `unknown` with null root rather than borrowing the initial identity.
+Safe, stable regular marker presence means `stopped`; repeated
+verified absence under an unchanged qualified task directory means `not_stopped`.
+Invalid roots, symlinks (including dangling ones), special files, access failures,
+replacement, modification, disappearance or other observed identity races mean `unknown`.
+Identity checks cover device, inode, mode, size, mtime and ctime before and after reads,
+pathname-to-descriptor binding and the parent directory. Selected-root ownership/lease
+refusals retain their enclosing failure; ordinary optional observer failures produce `unknown`.
+
+Attribution reads at most 4096 bytes total, only after checking size, using nonblocking
+read-only owned descriptors without following symlinks. These reads share the request's
+existing metadata budget. Malformed/empty JSON, invalid UTF-8, a non-object or invalid
+attribution does not negate stable presence. A readable stable oversized marker is
+`stopped` with null attribution; exhausted attribution budget also leaves attribution
+null. Attribution is syntactic metadata, not verified authorship. No marker repair,
+normalization, deletion, chain-lock acquisition/creation, reservation or follow-up
+consumption occurs. Observations can become stale immediately and never gate admission.
+Ordinary task cancellation alone does not establish a chain-stop marker. `not_stopped`,
+`unknown`, and an omitted optional field never grant eligibility.
+
+The ctl brief projector validates and preserves the complete object and both IDs inside
+its existing 8192-byte bound; it performs no marker reads. Batch rows use the same
+observer after each task's authorization, with existing per-ID errors and 100-ID limit.
+Their `observed_at` can differ from separate single-status calls.
+
+At the existing locked continuation admission branch, a stopped chain still raises an
+ordinary `ValueError` with the exact text
+`Continuation chain was cancelled; start a new task explicitly`. Only this marked
+exception can add the following data through `detached.error_doc` and the ctl Continue
+parent serializer, with exit 1:
+
+```json
+{"code":"start_failed","message":"ValueError: Continuation chain was cancelled; start a new task explicitly","data":{"reason":"chain_stopped","chain_root_task_id":"task-continuation-stop"}}
+```
+
+This is the single exception to detached errors' code/message-only rule. The two-field
+data object is strictly allowlisted: other reasons, unknown keys, invalid IDs, unmarked
+exceptions (even identical display text), other error classifications and other launch
+operations do not gain data. Consumers select the structured reason, never parse display
+text. A refusal does not revoke an already in-flight successor; reconciliation remains
+necessary after ambiguous launches. Task acknowledgements, exit-3 `unknown`, admission's
+existence predicate/lock/reservation ordering and MCP invalid-parameters text remain unchanged.
+
+`scripts/generate-continuation-stop-fixtures.py` owns six ctl specimens: full stopped,
+not-stopped and unknown status, stopped brief, mixed batch and the actual locked admission
+refusal (`ctl-continue-chain-stopped.json`). It uses isolated state, production task writers,
+real ctl dispatch/envelopes, a fixed observation clock and controlled human ancestry/owner
+identity, with temporary path redaction. Refusal serialization uses the actual exception,
+not manufactured error text. Per-case `provenance` records these controlled facts. The
+handshake generator owns `invalid-s05-missing-task-continuation-stop.json`.
+Diagnostic cases require only `task-continuation-stop.v1`; the refusal requires it and
+`task-continue.v1`; the negative handshake requires the missing diagnostic capability.
+The approval generator deliberately opts its existing `status-awaiting` specimen out of
+the optional observation via a documented internal fixture seam, preserving its bytes
+while retaining production snapshot and envelope serialization.
+
+Integration order: engine specification and canonical bundle first, then independent
+native consumer re-vendoring/adoption with the exact final manifest digest. Re-vendor the
+complete bundle, including capability-derived handshakes and both manifest files.
+Product version remains 0.0.11. No sibling checkout is required.
 
 ### Included MCP schemas and unsupported mock capabilities
 
