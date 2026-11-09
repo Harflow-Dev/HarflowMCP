@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.0.12
+
+- Prerelease for companion-app adoption of three additive ctl contracts: `task-artifacts.v1` (bounded, stat-only task artifact metadata pages), `task-continuation-stop.v1` (read-only chain-stop observations and `chain_stopped` Continue refusal data) and `task-cancel-cascade.v1` (bounded cancellation cascade observations). MCP tools and existing ctl documents are unchanged. The product version moves to 0.0.12. The fixture generators re-emit the generator-backed `contracts/v1` fixtures with `product_version` 0.0.12; opaque pagination cursors whose digest covers the versioned document change accordingly. Cursors copied from 0.0.11 fixtures therefore differ from the 0.0.12 specimens. The bundle stays at 320 fixtures with manifest SHA256 `5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f`; the conformance oracle pin and digest tests move with it, and consumers must re-vendor the complete bundle.
 
 - Add ctl-only `task-cancel-cascade.v1`: cumulative private cancellation evidence and a bounded final `result.cascade.observation` for recorded tasks and pending launches. Fresh captured identity and observed exit/drain distinguish stopped tasks from unknown outcomes; pending settlement remains generation-bound. Preserve legacy cancellation, MCP, continuation-stop, phase-write warnings and product version. Nine ctl fixtures plus a negative handshake bring the bundle to 320 fixtures. Engine contract lands first; companion-app adoption independently re-vendors the identical complete bundle and digest and requires a fresh capability handshake.
 

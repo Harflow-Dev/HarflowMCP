@@ -1,1 +1,1 @@
-{"error":{"code":"changes_entry_not_found","message":"No such repository, scope or path in the stored changes"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.11","v":1}
+{"error":{"code":"changes_entry_not_found","message":"No such repository, scope or path in the stored changes"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.12","v":1}
