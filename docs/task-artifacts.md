@@ -166,7 +166,14 @@ expires normally; those ancestors may remain until a subsequent sweep. If owner
 deletion fails, its ancestors remain for the retry. Ancestor preservation does not
 extend the lifetime of the owner's descendants or session peers.
 
-The CLI JSON contract is version 13; setup and event-log versions are unchanged.
+The public CLI uses the enveloped `harflow.ctl` v1 contract. Consumers require
+`task-artifacts.v1` for task artifact reads and the optional `error.data.reason`:
+`cursor_invalid` restarts paging, `cursor_stale` restarts without appending across
+revisions, and `ownership_preparing` retries the same request. Blocked catalogs and
+other errors omit the reason; absent or unknown reasons require error display and
+manual reload. A failed cursor request preserves already loaded rows as previous
+observations. There is no loading/preparing wire state, and the MCP surface is
+unchanged. See the [public task-artifacts contract](contracts.md#task-artifact-metadata-pages-task-artifactsv1).
 
 ## Workflow tree reads and selected delivery
 

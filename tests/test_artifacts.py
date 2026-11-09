@@ -1131,3 +1131,160 @@ def test_engine_observed_backend_plan_refuses_other_namespace(setup, monkeypatch
     with pytest.raises(ValueError, match='built-in'):
         artifacts.record_backend_plan(logs, record.task_id,
                                      {'path': str(path), 'tool_use_id': 'write', 'registered_observation': {}})
+
+
+def test_task_artifact_cursor_reason_classification(setup):
+    import base64
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    artifacts.register(logs, 'report', 'report', 'first')
+    artifacts.register(logs, 'report', 'report', 'second')
+    first = artifacts.get(logs, record.task_id, limit=1)
+    original = json.loads(base64.urlsafe_b64decode(first['next_cursor']))
+    encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+    invalid = ['bad!', 'x' * 513, encode(None), encode({}), encode(original[:2]),
+               encode([1, original[1], 1]), encode([record.task_id, None, 1]),
+               encode([*original[:2], True]), encode([*original[:2], -1]),
+               encode([*original[:2], 3]), encode([*original[:2], '1'])]
+    stale = [encode(['another-owner', *original[1:]]), encode([original[0], 'another-revision', 1])]
+    for reason, cursors in [('cursor_invalid', invalid), ('cursor_stale', stale)]:
+        for cursor in cursors:
+            with pytest.raises(ValueError) as caught:
+                artifacts.get(logs, record.task_id, cursor=cursor)
+            assert type(caught.value) is ValueError
+            assert str(caught.value) == 'Invalid or stale artifact cursor'
+            assert caught.value.harflow_artifact_reason == reason
+    artifacts.register(logs, 'report', 'report', 'concurrent append')
+    with pytest.raises(ValueError) as caught:
+        artifacts.get(logs, record.task_id, cursor=first['next_cursor'])
+    assert caught.value.harflow_artifact_reason == 'cursor_stale'
+
+
+@pytest.mark.parametrize('case, reason, message', [
+    ('bootstrap', 'ownership_preparing', 'Workflow ownership preparation is incomplete; retry the request'),
+    ('history', 'ownership_preparing', 'Workflow ownership preparation is incomplete; retry the request'),
+    ('preparing', 'ownership_preparing', 'Workflow ownership is unavailable'),
+    ('blocked', None, 'Workflow ownership is unavailable'),
+])
+def test_ctl_ownership_error_reasons_at_both_preparation_paths(setup, monkeypatch, capsys, case, reason, message):
+    from harflow_mcp import ctl
+    from harflow_mcp.workflows import WorkflowStore
+    logs, _, record = setup
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
+    page = {'bootstrap_pending': case == 'bootstrap', 'history_incomplete': case == 'history'}
+    monkeypatch.setattr(WorkflowStore, 'list_run_page', lambda *args, **kwargs: page)
+    # Keep the second-path status under precise control without changing task/caller catalogs.
+    original = WorkflowStore._ownership_catalog
+    def ownership(self):
+        index = original(self)
+        index.state = lambda db=None: {'status': case}
+        index._discover = lambda db: None
+        return index
+    monkeypatch.setattr(WorkflowStore, '_ownership_catalog', ownership)
+    assert ctl.main(['task-artifacts', record.task_id, '--json']) == 1
+    error = json.loads(capsys.readouterr().out)['error']
+    assert error == {'code': 'artifact_error', 'message': message, **({'data': {'reason': reason}} if reason else {})}
+
+
+@pytest.mark.parametrize('limit', [0, 51, True, '20'])
+def test_invalid_limit_has_no_artifact_reason(setup, limit):
+    logs, _, record = setup
+    with pytest.raises(ValueError) as caught:
+        artifacts.get(logs, record.task_id, limit=limit)
+    assert str(caught.value) == 'Artifact limit must be between 1 and 50'
+    assert not hasattr(caught.value, 'harflow_artifact_reason')
+
+
+def test_stat_only_reads_do_not_open_artifact_contents(setup, monkeypatch):
+    import builtins
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('report')
+    artifacts.register(logs, str(target), 'report')
+    original_open, original_os_open, original_path_open = builtins.open, os.open, Path.open
+    def check(path):
+        assert str(path) != str(target), 'artifact content opened'
+    def opened(path, *args, **kwargs):
+        check(path)
+        return original_open(path, *args, **kwargs)
+    def path_open(path, *args, **kwargs):
+        check(path)
+        return original_path_open(path, *args, **kwargs)
+    def descriptor(path, flags, *args, **kwargs):
+        # macOS O_EVTONLY / Linux O_PATH permit metadata handles, never content reads.
+        if str(path) in (str(target), target.name):
+            assert flags & getattr(os, 'O_EVTONLY', getattr(os, 'O_PATH', 0))
+        return original_os_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(builtins, 'open', opened)
+    monkeypatch.setattr(Path, 'open', path_open)
+    monkeypatch.setattr(os, 'open', descriptor)
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+
+
+def test_complete_ctl_artifact_envelope_bound(setup, monkeypatch, capsys):
+    from harflow_mcp import ctl
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    for number in range(20):
+        artifacts.register(logs, 'report', 'report', str(number) + '\U0001f600' * 1020)
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
+    assert ctl.main(['task-artifacts', record.task_id, '--limit', '50', '--json']) == 0
+    raw = capsys.readouterr().out
+    page = json.loads(raw)['result']
+    assert len(raw.encode()) <= 64 * 1024
+    assert 0 < len(page['items']) < 20
+    assert page['has_more'] and page['next_cursor']
+    assert page['items'][0]['note'] == '0' + '\U0001f600' * 1020
+
+
+@pytest.mark.parametrize('cursor_case, reason', [('malformed', 'cursor_invalid'), ('owner', 'cursor_stale'), ('revision', 'cursor_stale')])
+def test_ctl_cursor_reasons_preserve_message(setup, monkeypatch, capsys, cursor_case, reason):
+    import base64
+    from harflow_mcp import ctl
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    artifacts.register(logs, 'report', 'report', 'first')
+    artifacts.register(logs, 'report', 'report', 'second')
+    cursor = artifacts.get(logs, record.task_id, limit=1)['next_cursor']
+    parts = json.loads(base64.urlsafe_b64decode(cursor))
+    if cursor_case == 'malformed':
+        cursor = 'bad!'
+    else:
+        parts[0 if cursor_case == 'owner' else 1] = 'different'
+        cursor = base64.urlsafe_b64encode(json.dumps(parts).encode()).decode()
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
+    assert ctl.main(['task-artifacts', record.task_id, '--cursor', cursor, '--json']) == 1
+    assert json.loads(capsys.readouterr().out)['error'] == {
+        'code': 'artifact_error', 'message': 'Invalid or stale artifact cursor', 'data': {'reason': reason}}
+
+
+def test_ctl_old_revision_cursor_beyond_new_length_is_stale(setup, monkeypatch, capsys):
+    from harflow_mcp import ctl
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    for note in ('first', 'second', 'third'):
+        artifacts.register(logs, 'report', 'report', note)
+    cursor = artifacts.get(logs, record.task_id, limit=2)['next_cursor']
+    assert len(artifacts.get(logs, record.task_id, cursor=cursor)['items']) == 1
+
+    manifest = artifacts._path(logs, record.task_id)
+    document = json.loads(manifest.read_text())
+    document['items'] = document['items'][:1]
+    manifest.write_text(json.dumps(document))
+    assert artifacts.get(logs, record.task_id)['count'] == 1
+
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
+    assert ctl.main(['task-artifacts', record.task_id, '--cursor', cursor, '--json']) == 1
+    assert json.loads(capsys.readouterr().out)['error'] == {
+        'code': 'artifact_error', 'message': 'Invalid or stale artifact cursor',
+        'data': {'reason': 'cursor_stale'}}
+
+
+def test_task_artifact_human_self_and_foreign_authority(setup, monkeypatch):
+    logs, _, record = setup
+    store.write(logs, replace(record, task_id='another-owner', pid=999, pgid=888))
+    assert artifacts.get(logs, record.task_id)['state'] == 'available'
+    with pytest.raises(ValueError):
+        artifacts.get(logs, 'another-owner')
+    monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 1, 1: 0})
+    assert artifacts.get(logs, 'another-owner')['state'] == 'available'

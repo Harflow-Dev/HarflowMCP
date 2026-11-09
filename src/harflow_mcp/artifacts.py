@@ -32,6 +32,12 @@ TREE_LIMIT = 64
 PAGE_BYTES = 63000
 
 
+def _reason_error(message: str, reason: str) -> ValueError:
+    error = ValueError(message)
+    error.harflow_artifact_reason = reason
+    return error
+
+
 def _read_owner(log_dir, task_id):
     assert_task_owned(log_dir)
     return store.read(log_dir, task_id, include_prompt=False,
@@ -83,12 +89,15 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
     try:
         page = storage.list_run_page(limit=1)
         if page.get('bootstrap_pending') or page.get('history_incomplete'):
-            raise ValueError('Workflow ownership preparation is incomplete; retry the request')
+            raise _reason_error('Workflow ownership preparation is incomplete; retry the request', 'ownership_preparing')
         index = storage._ownership_catalog()
         with state_session(storage.state_layout):
             with index.connect() as db:
                 index._discover(db)
-                if index.state(db)['status'] != 'ready':
+                status = index.state(db)['status']
+                if status != 'ready':
+                    if status == 'preparing':
+                        raise _reason_error('Workflow ownership is unavailable', 'ownership_preparing')
                     raise ValueError('Workflow ownership is unavailable')
                 row = db.execute('SELECT 1 FROM associations WHERE id=? LIMIT 1', (task_id,)).fetchone()
         return {'managed_or_unverifiable': True} if row else None
@@ -788,16 +797,26 @@ def _get_page(log_dir: Path, task_id: str, cursor: str | None, limit: int, calle
     digest = hashlib.sha256(raw).hexdigest()
     offset = 0
     if cursor is not None:
+        message = 'Invalid or stale artifact cursor'
         try:
             if not isinstance(cursor, str) or len(cursor) > 512:
                 raise ValueError()
-            owner, saved, offset = json.loads(base64.urlsafe_b64decode(cursor))
-            if owner != task_id or saved != digest or type(offset) is not int or not 0 <= offset <= len(items):
+            decoded = json.loads(base64.urlsafe_b64decode(cursor))
+            if not isinstance(decoded, list) or len(decoded) != 3:
+                raise ValueError()
+            owner, saved, offset = decoded
+            if not isinstance(owner, str) or not isinstance(saved, str) or type(offset) is not int or offset < 0:
                 raise ValueError()
         except StateOwnershipError:
             raise
         except Exception as exc:
-            raise ValueError('Invalid or stale artifact cursor') from exc
+            raise _reason_error(message, 'cursor_invalid') from exc
+        # A cursor bound to another owner or manifest revision is stale, whatever its offset:
+        # the offset counts rows of that revision, so it is not checked against this one.
+        if owner != task_id or saved != digest:
+            raise _reason_error(message, 'cursor_stale')
+        if offset > len(items):
+            raise _reason_error(message, 'cursor_invalid')
     for item in items[offset:offset + limit]:
         state = _availability(log_dir, record, item)
         entry = item | {'availability': {'state': state, 'observed_at': _now()}}

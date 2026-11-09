@@ -9,7 +9,7 @@ live workflow node activity, statistics cost and stored task changes), plus thei
 file named in the manifest is verified against its recorded hash and left alone. Each document is the output of
 `ctl.main` against an isolated HOME and state root. Event logs are written by the production `EventLog` writer;
 task records by `store.write`. Controlled facts: the wall clock (event stamps, `observed_at`, the settling
-grace), the catalog identity that task-page cursors bind to, the statistics clock and source witnesses (inode and ctime, for the statistics fixture only), process liveness (`identity.identity_check`, `store.record_process_alive`, `identity.own_identity`), the file identity cursors bind to (device and inode) and
+grace), the catalog identity that task-page cursors bind to, the statistics clock and source witnesses (inode and ctime, for the statistics fixture only), human caller ancestry (`lineage._default_process_table`), process liveness (`identity.identity_check`, `store.record_process_alive`, `identity.own_identity`), the file identity cursors bind to (device and inode) and
 the record file's mtime, none of which can be reproduced across machines. The temporary base directory never
 appears in a document.
 """
@@ -100,6 +100,7 @@ class World:
         stack.enter_context(mock.patch.object(statistics, "datetime", FixedDatetime))
         os.environ.pop("HARFLOW_RETENTION_DAYS", None)
         stack.enter_context(mock.patch.object(identity, "own_identity", lambda: {"pid": 4242, "start_time": "ctl-start", "markers": []}))
+        stack.enter_context(mock.patch.object(lineage, "_default_process_table", lambda: {os.getpid(): 1, 1: 0}))
         stack.enter_context(mock.patch.object(store, "record_process_alive", lambda record: record.pid is not None))
         stack.enter_context(mock.patch.object(takeover, "caller_refusal", lambda *_: None))
 

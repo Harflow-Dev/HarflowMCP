@@ -2110,7 +2110,9 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                       if args.command == 'register-artifact' else
                       artifacts.get(default_log_dir(), args.task_id, args.cursor, args.limit))
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            return _fail(args, 'artifact_error', str(exc))
+            reason = getattr(exc, 'harflow_artifact_reason', None) if args.command == 'task-artifacts' else None
+            data = {'reason': reason} if reason in ('cursor_invalid', 'cursor_stale', 'ownership_preparing') else None
+            return _fail(args, 'artifact_error', str(exc), data)
         print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
         return 0
 

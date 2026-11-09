@@ -866,6 +866,85 @@ tightly. Capability `task-successors.v1`; an older engine answers the flag with 
 is "unsupported". MCP `list_task_page(predecessor_task_id=...)` is unchanged. Examples:
 `contracts/v1/ctl-task-page-successors-*.json`.
 
+### Task artifact metadata pages (`task-artifacts.v1`)
+
+`harflow-ctl task-artifacts TASK_ID --limit N --json` reads metadata references; pass
+`--cursor OPAQUE_CURSOR` to continue. `task-artifacts.v1` certifies this public read
+contract, including the optional error reasons below. Consumers gate the Artifacts
+tab on this capability: without it the tab is unsupported, even if the command exists.
+Use the fresh version-info handshake described above. The MCP `get_task_artifacts`
+surface is deliberately unchanged; `contracts/mcp-v1/tools.json` is unchanged.
+The `invalid-s05-missing-` fixture prefix is a test-dispatch convention for missing
+capabilities, including capabilities added after S05; it is not a version gate.
+
+Success uses the common `harflow.ctl` v1 envelope and exit 0. `result` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `task_id` | Resolved full owner ID |
+| `items` | Registration metadata plus current stat observations, in registration order |
+| `next_cursor` | Opaque continuation string, or null |
+| `has_more` | Whether another page remains |
+| `state` | `available` or `unavailable` |
+| `count` | Manifest registration count only when state is `available` |
+| `resolved_from` | Optional ID-prefix resolution echo |
+
+Each item contains `artifact_id` (stable registration ID), owning `task_id`, absolute
+`path`, declared `kind` (`screenshot`, `log`, `report`, `other`), complete verbatim
+`note`, timezone-aware ISO-8601 `registered_at`, `provenance`, and
+`registered_observation` with integer `device`, `inode`, `size`, `mtime_ns`.
+Optional `workflow` records the saved root/run/node/execution/task binding, role,
+visit/retry identity where present, and receipt provenance. A hosting native
+transport is attributed as `native_transport`, with hosted attempt IDs where present;
+this is not native-child authorship.
+
+Provenance methods include `verified_process_lineage`, `observed_backend_plan`
+(with tool evidence and optionally saved plan-directory identity), and `engine_output`.
+These identify the submitter or observation method, not content authorship.
+`availability` contains `state` (`available`, `changed`, `deleted`, `unavailable`) and
+timezone-aware ISO-8601 `observed_at`. It is a stat-only observation: even `available`
+certifies neither bytes, content validity, successful execution nor permission to
+open or publish the file. Files may change immediately after observation.
+
+A qualified supported owner without a manifest returns `state=available`, `count=0`,
+`items=[]`, `has_more=false`, `next_cursor=null`. A malformed, unreadable or incompatible
+manifest returns `state=unavailable`; its zero count and empty rows are placeholders,
+not evidence of zero registrations. There is no loading or ownership-preparing wire
+state. Loading and loading-more are consumer request states.
+
+Generic local failures use `error.code=artifact_error`, unchanged display messages
+and exit 1. The optional `error.data.reason` supports these actions:
+
+| Reason | Meaning and consumer action |
+| --- | --- |
+| `cursor_invalid` | Malformed, oversized, undecodable or wrongly typed cursor, or offset out of range. Restart from the first page. |
+| `cursor_stale` | Well-formed cursor bound to another owner or manifest revision. Restart from the first page; never append across revisions. |
+| `ownership_preparing` | Workflow ownership preparation is incomplete, including a preparing catalog. Retry the same request. |
+
+All other artifact errors omit the reason, including blocked ownership catalogs.
+An absent or unknown reason is non-actionable: show the error and offer manual reload.
+Never parse display messages. Shared state/document refusals retain their existing
+specific codes; usage errors retain exit 2. A failed cursor request is a page error
+because of its request context. Preserve loaded rows as previous observations and
+offer a fresh first-page reload. An unavailable page must not become empty success.
+
+Verified humans may read a known supported owner, including qualified workflow tasks.
+Dispatched callers may read only their own references; uncertain caller identity fails
+closed. Owner, ancestry, workflow-receipt and saved-path authority checks remain in
+force. Metadata access grants no file-content access or additional permissions.
+
+The default limit is 20; accepted limits are 1 through 50. A task holds at most 100
+references, with path and note each at most 4096 UTF-8 bytes and a 1 MiB manifest.
+Page construction retains the 63000-byte threshold and the complete ctl envelope
+fits the 64 KiB response budget; pages may contain fewer rows than requested.
+Cursors are at most 512 characters and bind owner, manifest revision and offset.
+Concurrent registration invalidates old revision cursors. Keep notes complete and
+use returned cursors opaquely. The shared request budget remains 8 MiB and 100 JSON
+decodes, with 4 MiB task/workflow record bounds. Preparation retries are read retries,
+not empty history. These bounds do not promise constant filesystem or SQLite latency.
+See [the artifact guide](task-artifacts.md) for registration and retention behavior;
+the private manifest format is specified separately above.
+
 ### Stored task changes (`task-changes.v1`)
 
 ```bash

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import stat
 
-PINNED_MANIFEST_SHA256 = '1a08593b8491c440503c616521b85e8a3d21f0051a93bc13948c4b0371de2e9d'
+PINNED_MANIFEST_SHA256 = 'd5fd363d1d1bbf7be8dbed5d24c4ed5a38967325ab48cb0bc34e41531e4d9e95'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -90,7 +90,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 295 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 303 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
