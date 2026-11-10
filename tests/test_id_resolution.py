@@ -703,6 +703,7 @@ CTL_EXEMPT = {
     ("workflow-steering-history", "workflow_run_id"): "steering v1 history is bound to the exact root identity",
     ("workflow-steer", "workflow_run_id"): "steering v1 request identity binds the full root id; prefixes are unsupported",
     ("worktree-remove", "--task-id"): "destructive and accepts a task or run id in one namespace; the full id is required",
+    ("task-pending-status", "--task-id"): "pending-launch identity is the full launch id; prefixes would be ambiguous with launches that are not yet tasks",
 }
 
 
