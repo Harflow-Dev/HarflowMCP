@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.0.13
+
+- Prerelease for companion-app adoption of the additive ctl contract `task-pending-launch.v1` (direct-human pending-launch discovery through `harflow-ctl task-pending-page` and `task-pending-status`). MCP tools and existing ctl document shapes are unchanged. The product version moves to 0.0.13. The fixture generators re-emit the generator-backed `contracts/v1` fixtures with `product_version` 0.0.13; opaque pagination cursors whose digest covers the versioned document change accordingly, so cursors copied from 0.0.12 fixtures differ from the 0.0.13 specimens. `ctl-launch-unknown-operation.json` also lists the two new commands in its usage message. The bundle has 334 fixtures with manifest SHA256 `56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55`; the conformance oracle pin and digest tests move with it, and consumers must re-vendor the complete bundle.
 
 - Add direct-human ctl-only `task-pending-launch.v1` inventory and exact-ID lookup over qualified launch receipts. Bound enumeration, source reads and responses; retain uncertainty, omit execution authority and preserve existing cancellation behavior. Add actual serializer-generated pending discovery and existing status/batch pending-data fixtures. Product version and release qualification are unchanged; consumers must vendor the complete updated canonical bundle and negotiate the capability independently.
 

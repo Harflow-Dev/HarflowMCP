@@ -1,1 +1,1 @@
-{"error":{"code":"caller_undecidable","message":"Task history reads require a verified direct caller: it could not be established that no agent is running this (the process table is unavailable)"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.12","v":1}
+{"error":{"code":"caller_undecidable","message":"Task history reads require a verified direct caller: it could not be established that no agent is running this (the process table is unavailable)"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.13","v":1}

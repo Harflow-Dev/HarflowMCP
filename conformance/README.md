@@ -20,10 +20,10 @@ S07_REPO="$PWD"
 S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
 .venv/bin/python -m conformance \
   --source-repo "$S07_REPO" \
-  --commit "$(git rev-parse v0.0.12^{commit})" \
+  --commit "$(git rev-parse v0.0.13^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f \
+  --manifest-sha256 56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55 \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```
@@ -38,7 +38,7 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 320-fixture 0.0.12 bundle (0.0.11 plus the `continue`, `task-artifacts.v1`, `task-continuation-stop.v1` and `task-cancel-cascade.v1` contracts). The examples use this bundle, not the 0.0.11 manifest. Earlier S07/S08/S09
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 334-fixture 0.0.13 bundle (0.0.12 plus the `task-pending-launch.v1` contract). The examples use this bundle, not the 0.0.12 manifest. Earlier S07/S08/S09
 receipts retain their original source and manifest identities; this repin does not requalify
 their scenarios, a managed runtime, or any consumer. The S08 and S09 profiles still snapshot the older 0.0.7 sources
 (manifest `383ecf7a…`), which `verify_manifest` no longer accepts since the pinned digest moved
@@ -263,9 +263,9 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
 
 ```sh
 .venv/bin/python -m conformance.e1.scenarios \
-  --source-repo "$PWD" --commit "$(git rev-parse v0.0.12^{commit})" --python "$PWD/.venv/bin/python" \
+  --source-repo "$PWD" --commit "$(git rev-parse v0.0.13^{commit})" --python "$PWD/.venv/bin/python" \
   --manifest "$PWD/contracts/v1/manifest.json" \
-  --manifest-sha256 5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f \
+  --manifest-sha256 56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55 \
   --output /path/to/new-empty-dir
 .venv/bin/python -m pytest conformance/tests_e1 -q   # infrastructure self-checks
 ```
@@ -297,9 +297,9 @@ never acceptance evidence (its extra environment keys are reported). The fake-ba
 D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 
 ```sh
-.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.12^{commit})" \
+.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.13^{commit})" \
   --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
-  --manifest-sha256 5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f \
-  --product-version 0.0.12 --seam none --output /path/to/new-dir
+  --manifest-sha256 56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55 \
+  --product-version 0.0.13 --seam none --output /path/to/new-dir
 .venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
 ```
