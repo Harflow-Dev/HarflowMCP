@@ -71,7 +71,7 @@ def env_agent_refusal(environ: Mapping[str, str] | None = None) -> tuple[str, st
 
 
 def caller_refusal(
-    log_dir: Path, environ: Mapping[str, str] | None = None
+    log_dir: Path, environ: Mapping[str, str] | None = None, *, candidates=None
 ) -> tuple[str, str] | None:
     """`(code, reason)` when takeover must be refused because of who is asking, else None.
 
@@ -81,12 +81,15 @@ def caller_refusal(
     is *no* caller — `ps` missing or denied, an unreadable ancestry or session, a related task whose
     liveness cannot be decided (`caller_undecidable`): a gate that reads "could not tell" as "a
     person" is open to exactly the environments where it cannot see. `lineage.detect_caller_detail`
-    is looked up at call time so tests can stub it.
+    is looked up at call time so tests can stub it. Optional `candidates` supplies the same
+    complete, qualified candidate evidence through the existing lineage seam; the default
+    detection call and its behavior are unchanged. A lazy CandidateScan preserves env-first refusal.
     """
     env_refusal = env_agent_refusal(environ)
     if env_refusal is not None:
         return env_refusal
-    detection = lineage.detect_caller_detail(log_dir)
+    detection = (lineage.detect_caller_detail(log_dir) if candidates is None else
+                 lineage.detect_caller_detail(log_dir, candidates=candidates))
     if detection.caller is not None:
         return (
             "agent_caller",

@@ -189,6 +189,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     )
     watch_p.add_argument("--json", action="store_true", help="required")
 
+    pending_page_p = sub.add_parser('task-pending-page', help='bounded direct-human pending launch inventory')
+    pending_page_p.add_argument('--json', action='store_true')
+    pending_page_p.add_argument('--limit', type=int, default=50)
+    pending_page_p.add_argument('--cursor')
+    pending_status_p = sub.add_parser('task-pending-status', help='direct-human exact full-ID launch lookup')
+    pending_status_p.add_argument('--json', action='store_true')
+    pending_status_p.add_argument('--task-id', required=True)
+
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
         "--since", default=None, help="only tasks started within this long ago, e.g. 7d, 12h"
@@ -1926,6 +1934,25 @@ def _main(argv: list[str] | None = None) -> int:
         except (StateOwnershipError, phase_slots.ResourceError) as exc:
             return _fail(args, exc.code, str(exc), exc.as_dict() if isinstance(exc, StateOwnershipError) else None)
         print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
+    if args.command in {'task-pending-page', 'task-pending-status'}:
+        from . import task_pending_reads, takeover
+        from .state_layout import resolve_layout
+        # Agent markers refuse before root ownership/existence or cursor inspection.
+        refusal = takeover.env_agent_refusal()
+        if refusal:
+            return _fail(args, refusal[0], 'Pending launch reads require a verified direct caller.', {'coverage': 'unknown', 'check': 'direct_caller_required'})
+        try:
+            layout = resolve_layout()
+            with state_session(layout, initialize=False, timeout=task_pending_reads.MAX_SECONDS):
+                result = (task_pending_reads.pending_page(layout.tasks_directory, limit=args.limit, cursor=args.cursor)
+                          if args.command == 'task-pending-page' else
+                          task_pending_reads.pending_status(layout.tasks_directory, args.task_id))
+        except task_pending_reads.PendingReadError as exc:
+            return _fail(args, exc.code, str(exc), {'coverage': 'unknown', 'check': exc.check})
+        except StateOwnershipError:
+            return _fail(args, 'pending_observation_unavailable', 'Pending launch coverage is unknown; selected state is unavailable.', {'coverage': 'unknown'})
+        print(json.dumps(envelope(CTL_FORMAT, {'result': result})) if args.json else json.dumps(result, indent=2))
         return 0
     if args.command in {"state-inspect", "state-recover"}:
         from .state_layout import resolve_layout

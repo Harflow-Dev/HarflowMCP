@@ -21,6 +21,12 @@ resolved id in `resolved_from`, and an ambiguous prefix lists its candidates. Se
 pending launches (`task-cancel-cascade.v1`): stopped, running or unknown per target, with explicit
 discovery coverage. See the [cancellation observation contract](docs/contracts.md#task-cancellation-observation-task-cancel-cascadev1).
 
+Direct human clients can discover pre-record launch attempts after restart with
+`harflow-ctl task-pending-page --json` and look up an exact full ID with
+`task-pending-status --task-id FULL_ID --json`. These bounded read-only views preserve source
+uncertainty; cancellation support describes a mechanism and grants no permission. See the
+[pending launch contract](docs/contracts.md#pending-launch-discovery-task-pending-launchv1).
+
 While bounded reads are still establishing caller authority, preparation responses expose only
 neutral status, source and reason, with empty content and unknown counts. This also applies to a
 cold index for a direct caller; retry until authority is established. See

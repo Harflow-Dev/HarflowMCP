@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add direct-human ctl-only `task-pending-launch.v1` inventory and exact-ID lookup over qualified launch receipts. Bound enumeration, source reads and responses; retain uncertainty, omit execution authority and preserve existing cancellation behavior. Add actual serializer-generated pending discovery and existing status/batch pending-data fixtures. Product version and release qualification are unchanged; consumers must vendor the complete updated canonical bundle and negotiate the capability independently.
+
 ## 0.0.12
 
 - Prerelease for companion-app adoption of three additive ctl contracts: `task-artifacts.v1` (bounded, stat-only task artifact metadata pages), `task-continuation-stop.v1` (read-only chain-stop observations and `chain_stopped` Continue refusal data) and `task-cancel-cascade.v1` (bounded cancellation cascade observations). MCP tools and existing ctl documents are unchanged. The product version moves to 0.0.12. The fixture generators re-emit the generator-backed `contracts/v1` fixtures with `product_version` 0.0.12; opaque pagination cursors whose digest covers the versioned document change accordingly. Cursors copied from 0.0.11 fixtures therefore differ from the 0.0.12 specimens. The bundle stays at 320 fixtures with manifest SHA256 `5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f`; the conformance oracle pin and digest tests move with it, and consumers must re-vendor the complete bundle.

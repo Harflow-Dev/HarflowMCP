@@ -81,3 +81,16 @@ execution does not qualify engine-to-fake integration, task/authority behavior,
 workflows, a managed runtime or a real harness; those need their assigned later
 sessions and authorization. Runtime hashes describe selected observed bytes, not
 publisher authenticity or a complete OS/stdlib dependency closure.
+
+### Pending launch read qualification
+
+`task-pending-launch.v1` is an additive, direct-human ctl read capability in source, independently
+negotiated from the selected engine. The isolated producer suite
+`tests/test_task_pending_reads.py` and `scripts/generate-pending-launch-fixtures.py --check`
+exercise qualified stored launch/task documents, source refusals, bounded namespace traversal,
+read/serialization budgets and actual ctl serialization without starting providers. The generator
+also captures existing single/batch `task_pending_launch` data unchanged. These synthetic checks
+do not qualify installed binaries, process cancellation, paid providers, the native consumer or
+Rust adoption. See [the contract](contracts.md#pending-launch-discovery-task-pending-launchv1)
+for coverage and cursor limits. The complete canonical fixture bundle must be re-vendored before
+consumer adoption; a current source capability must not be inferred from product version alone.

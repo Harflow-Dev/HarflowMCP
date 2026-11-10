@@ -2735,3 +2735,91 @@ synthetic receipts; these are contract fixtures, not provider qualification.
 Integration order is producer specification/fixtures, byte-identical Mac fixture
 vendoring and consumer adapters/version gate, then separate Rust adoption. Mac
 must use ctl and the advertised capability, never read the private ledger.
+
+## Pending launch discovery (`task-pending-launch.v1`)
+
+`harflow-ctl task-pending-page --json [--limit 50] [--cursor TOKEN]` and
+`harflow-ctl task-pending-status --json --task-id FULL_ID` are read-only, direct-human-only
+operations. The existing takeover caller gate refuses agent and undecidable callers before
+launch namespace or target inspection; environment markers refuse before state-root inspection.
+The selected state session uses `initialize=False`: absent or incompatible state is unavailable,
+with unknown coverage, and is never created or repaired. These operations have no MCP counterpart.
+The additive capability must be negotiated from the selected engine's fresh `version-info`;
+source support does not certify an installed 0.0.12 binary or companion-app pin.
+
+The page `result` contains `scope: "prerecord_launch_attempts_and_not_started"`, `observed_at`,
+`items`, `namespace_revision`, `namespace_complete`, `coverage`, `invalid_name_count`,
+`examined_count`, `has_more`, `next_cursor` (nullable) and `bound` (nullable). The inventory includes
+qualified `reserved`, `claimed`, `waiting_for_resources`, `granted` and retained `not_started`
+receipts without an ordinary record, including resource-free launch handshakes. Qualified ordinary
+records and `spawned`/`settled` launch history are filtered, including history whose record was
+pruned. Filtered candidates count as examined and advance the cursor. No synthetic task status is
+created; `granted` proves neither running nor that execution has not begun.
+
+A pending item has `task_id`, `disposition: "pending"`, `cancel_support` and `launch`.
+`launch` has the qualified opaque `generation`, raw `state`, nullable `title`, `backend`,
+`repo_path`, `created_at`, `not_started_reason`, `lineage` (known valid full-ID `spawned_by`,
+`root_task_id`, `parent_task_id`, `chain_root_task_id` only), `resource_names` and
+`metadata_truncated`. Display text is bounded in UTF-8 bytes: repository path 4096, other scalar
+text 1024, and at most 100 resource names of 256 bytes each. Truncation is explicit. No prompts,
+invocation, PIDs, owner identity, authorization, queue authority or private state-file paths appear.
+A refused valid filename produces only `task_id`, `disposition: "refused"`, sanitized `code` and
+`check`; it never contributes trusted labels, associations or action grants. Invalid launch
+filenames contribute only the aggregate count and unknown coverage. Unknown source states fail
+qualification and remain deny-only uncertain rows.
+
+`cancel_support: "supported" | "unsupported"` describes the existing cancellation mechanism,
+never permission. Active resource/worktree launch kinds support that mechanism; resource-free
+handshakes and all retained `not_started` receipts do not. A mutation must requalify its own caller,
+workflow authority and current full-ID source. Existing cancellation remains unchanged: if the
+same full ID spawns during a Stop race, ordinary task cancellation may be requested. This read
+capability supplies no atomic generation precondition, cancellation guarantee or new authority.
+
+Exact lookup returns `scope`, `observed_at`, `task_id` and a `disposition`: `pending` (same projected
+row fields), `recorded` (a qualified ordinary record for that exact full ID; consumers must next
+read ordinary status), `not_found` (qualified missing launch and record), `refused` (sanitized
+qualification failure), or `unknown` (`pending_record_inconsistent`,
+`postrecord_source_without_record` when `spawned`/`settled` lacks an ordinary record). IDs are never
+prefix-expanded. `not_found`, missing sources, empty pages and read failures never prove
+cancellation, no-spawn, settlement or safe replay. Reads never probe owner liveness, settle,
+recover, repair, resume or relaunch. Existing status/batch shapes are unchanged; their
+`task_pending_launch` `data.launch_state` and optional `data.not_started_reason` have canonical
+serializer-generated specimens alongside this capability.
+
+Each complete namespace enumeration is bounded to 65,536 **all directory entries** and 8 MiB
+of filename bytes, not merely matching launch/ordinary-record files. The direct-caller gate
+lazily acquires complete qualified ordinary-record candidates through the existing lineage
+detector, with the same namespace caps and shared metadata/deadline budget. Candidate acquisition
+failures, invalid names, changed namespaces and bounds yield `caller_undecidable`, never a partial
+list proving a human caller. Other takeover consumers retain their default detector behavior.
+Ordinary and launch namespace acquisition each perform a before/after enumeration: at most four
+bounded scans per page (262,144 entry visits / 32 MiB filename bytes across all four scans), all
+inside the cooperative request deadline. Exact lookup performs only the bounded ordinary-caller
+namespace pair, then the exact source reads. It collects and sorts only this bounded launch-name set and
+examines at most 100 candidates, returning at most the requested 1..100 rows (default 50).
+Source metadata reads have a cooperative 5-second / 8-MiB allowance; receipt readers charge their
+65,537-byte maximum read before access. Successful serialized ctl documents stay below 128 KiB
+with envelope/cursor reserve. Metadata or response limits stop before consuming the unread or
+unreturned candidate and resume after the last completed candidate. No-progress exhaustion fails
+explicitly. Namespace caps and failed namespace rechecks fail the operation with
+`pending_observation_bound` or `pending_observation_unavailable`, unknown coverage and no cursor
+claiming unseen names were covered. Deadlines are cooperative, not filesystem syscall cancellation.
+
+Opaque cursors bind version, direct-human scope, selected root token, root/tasks device+inode
+identity, query/limit, complete bounded launch-filename hash and last **examined** candidate.
+Changed filenames/identities produce `pending_cursor_expired`; malformed/cross-root/query cursors
+produce `pending_cursor_invalid`. These are unsigned traversal positions, not authorization or
+certificates of prior coverage. Names are re-enumerated completely on every page and checked again
+after reads. `namespace_revision` is a **filename namespace hash**, not content generation or an
+atomic multi-page snapshot. In-place source changes are qualified per row and may be observed on
+later pages without changing the hash. Each row is point-in-time evidence.
+
+`namespace_complete: true` means bounded enumeration finished for this request. `coverage` is
+`unknown` while more pages exist, after source refusals/invalid names/bounds, or when an honest
+cursor traversal already encountered uncertainty; otherwise it is `complete` for the completed
+bounded traversal. Clients must independently start at the first page, follow every returned
+cursor, retain every uncertainty, verify namespace consistency, and finish before replacing prior
+incomplete inventory. A final page or a crafted cursor alone cannot certify inventory completeness.
+Normal pagination can advance through an empty filtered window with `has_more: true`. No page
+provides a transactional absence claim. Public operation errors carry `error.data.coverage:
+"unknown"`; consumers retain uncertainty rather than clearing pending state or Continue receipts.

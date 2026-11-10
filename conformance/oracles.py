@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '5591ad4cf52a9c0bf58e5274f1858b962d0368c6a0fa17eb2e1e6cac50a8e82f'
+PINNED_MANIFEST_SHA256 = 'f86fbe421ac3dc467265e8ce77756f0b6b70b63c008edd13b4ac1ae03aa65ff9'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -91,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 320 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 334 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):

@@ -3076,6 +3076,154 @@
       ],
       "valid": false,
       "provenance": "Synthetic missing-capability handshake derived from canonical version-info; only task-cancel-cascade.v1 removed; fixed platform and state root, no provider execution."
+    },
+    "ctl-task-pending-bound.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-cursor-invalid.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-empty.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-existing-batch-pending.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-existing-status-pending.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-next-page.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-states.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-status-not-found.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-status-pending.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-status-recorded.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-status-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-pending-status-unknown.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual qualified launch/task readers, bounded pending projection and ctl.main serializer over isolated storage. Controlled direct caller, clock and opaque cursor identity; no live provider. Synthetic evidence, not runtime certification."
+    },
+    "invalid-s05-missing-task-pending-launch.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.12",
+      "format": "harflow.version-info",
+      "required_capabilities": [
+        "task-pending-launch.v1"
+      ],
+      "valid": false
     }
   },
   "files": {
@@ -3091,25 +3239,25 @@
     "invalid-workflow-definition-foreign.json": "6b90bc9c77962d64bbfe7098536512596dbfbc651735b8234024a4bb4cf4396b",
     "invalid-workflow-definition-raw.json": "528279acbb8c6a3873c826ce94d8b9d181383f7de84cbc4137ca4a44566a8bc1",
     "invalid-workflow-definition-version.json": "d814614da8e545c3f471d6c576a7ab41c08beba71a91ab89fad030d4c9822afd",
-    "invalid-boolean-version.json": "f2371436017270b5d72b74118356ddec09bca1fd61a6d390ff7d0371a675b104",
+    "invalid-boolean-version.json": "ed607c71f69b27936e5258f807ff350b48ed213238a73328a600b6b33070e614",
     "invalid-ctl-inner-event.json": "290fe50a056bc63faf0a432fe34c2cd7249a13a780e4bbf1635b0df631b314da",
-    "invalid-foreign-format.json": "88008d7fd15ea0f34917af56405b1dee20ac115d191d1ed252edbf79de207dc4",
-    "invalid-foreign-product.json": "115bc3ef6076e356a6d387da50e10828b516ff038cd4f5bd81b182c30b763530",
-    "invalid-major-mismatch.json": "f67ec6f31ede388b7adf5362b8058e3d7e1251d372b49ef560213ac5d3d7a8f6",
-    "invalid-malformed-product-version.json": "8e1d68b0d96091117259d249de3cfbf46b8313f6a66604dda1feecf81cdc0dba",
-    "invalid-minor-mismatch.json": "08c84c67fe6c452d3d4b1b1ff7167feec227443fe8ea3c402be4039febab4a0e",
-    "invalid-missing-capabilities.json": "7e12cdc11eb023c290ed7271031a562319cabb1ccfed632b711b3ccc8d057f24",
-    "invalid-missing-product.json": "0b8a9aa8102d0cdae35a7fcab3c25e69f621d8759cd664a6d752a0a699f041f9",
-    "invalid-overflow-version.json": "dd5af220b378b93cf3b7e750da8873472673f0f50f2df967800a8c3e91e6e6a2",
-    "invalid-prerelease.json": "84b0e45e9d0dd60e309f8d8f11e163cc48248c91e4a7d1e19a19ee14d61003be",
-    "invalid-unsupported-version.json": "ba7ed7f1bfb9efc8ed43eead6cb0ea65acb73ce45efce2f3d3b88493a139b23d",
+    "invalid-foreign-format.json": "545dfc7b69ebf9d76adfc6d9d4226bcb7dbcdb2da171175736648d6be644dc77",
+    "invalid-foreign-product.json": "7036661e0bb784008307970371f3af8e79311f3118388f2bf9eb6e27f358f352",
+    "invalid-major-mismatch.json": "4610113e9f70f8d0a98b1d00718229c5f7e5b88bd3bd821b16844e12ab8e9f28",
+    "invalid-malformed-product-version.json": "88ef477a843fbd5291b37d3c006972909f0913b63beb2278bc7786f5164c9854",
+    "invalid-minor-mismatch.json": "f3e6db7778bdf85290877cf1fa497aedbb16a3f201bf6c0239f79cd034650e08",
+    "invalid-missing-capabilities.json": "45beb7c10ce5fef9587ea938e48df260f53c2049438114ebdbc8cd6ed28c83c4",
+    "invalid-missing-product.json": "08ff68d696de800f45538d4b45f947f62a2c386d1336422f44d69849c82db732",
+    "invalid-overflow-version.json": "0292c5c43dd7d8056ec07c3fc2ab82d327ab049be00ef65b0531d80cdbfa9df7",
+    "invalid-prerelease.json": "0a8fe996950a8b3b987420abe45621b720f33d43d7ffbf119b44d0ccfe169dd3",
+    "invalid-unsupported-version.json": "0aff10f0b2d0c350dd6bce066bb62410917aca81e0e6ea6470aeea3e2972fa5e",
     "setup-error.json": "67873fc779c6ebe85b8242eec53c950593c9577b0ee364aa72c726fc5a11aea4",
     "setup-success.json": "79216a64a03d7effc47b2bf1679fcae6b6660401cff11c05310047743d83aea7",
     "setup-usage.json": "cef093e0294047b088f051074bf7dc3dc5b2251bbfaf7c0f5ae615d01efb75ae",
-    "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
-    "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
-    "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "424bbbcf4175457b0487121e76e3fc5609621d13dbde892322d249d554ded2aa",
+    "version-info-build-metadata.json": "716cd4511d89138ecbfd83023e4b90b7b2701198faec97f8ea5cfcac598126d2",
+    "version-info-patch-backward.json": "b1750d92e988612e19d0476262db94aa4710e1a4905cd7b653fe31907a55ea9e",
+    "version-info-patch-forward.json": "fef70f89fa6902d01279db5c48cc824c92a417f7d659dd96b9e635a7f0b7bb90",
+    "version-info.json": "c10eaa4cc58e5b6232607e754fc0133b247e518f4e93e13c3e0dc1b6ba2367d4",
     "workflow-definition-patch.json": "dec7079d69e46ff4d63da100bb12fc3fbfc1f120057da1d7346dd1f8fad05625",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -3271,13 +3419,13 @@
     "ctl-launch-resume-refused.json": "8a31831f506a68c5bb002db7875d794a0ea7997d38c0f085440ff2010f6320e6",
     "ctl-launch-resume-unknown.json": "f36e5f85b8171da7cb3736d82f2cb4f9d05e7c5f6e79aff9da2771b11b976a7f",
     "ctl-launch-unknown-operation.json": "310cd5ea8167959f710ae5309a02a314b67baef25607c3ba23ac2986bcb4961e",
-    "version-info-s05-additive.json": "d6e8f672e55641c514177a89d14603ec8547cf13236338b726521156f58df000",
-    "invalid-s05-missing-task-event-page.json": "e295d3e0225455f4c419bd11596addef88b04d352dd0f45ba08e00b2bf207dad",
-    "invalid-s05-missing-task-prompt.json": "cda06e12012c317e89b0ca6c0844e784332e10f134f2454748be475b393565c4",
-    "invalid-s05-missing-task-successors.json": "677ec64b92f09b09bf06ec9224382aa597fbb1e16ad529f7d2b34668d2829106",
-    "invalid-s05-missing-workflow-live-activity.json": "9322a9d58216fe5c5ea928c5189c8ed6f0cceed8d3412d3fa01281ae014ebbbe",
-    "invalid-s05-missing-statistics-cost-model.json": "2e89a7c979782dccd96951a46ed36e73433018ff6cfcbb7c4851539c39331438",
-    "invalid-s05-missing-task-changes.json": "6ea20f2bd5adc99c50b7ed3cfd933d8adfc54e421472a6ffe4be277403476dd9",
+    "version-info-s05-additive.json": "f89ead8a64bc6e2532f09fc53a1ac2654b1b025b3a44fa02f0b6fd699f1be62c",
+    "invalid-s05-missing-task-event-page.json": "00237d0644a745ea50900e707911ac1041a97f4dc3401ac60e0202a943be27f4",
+    "invalid-s05-missing-task-prompt.json": "e0396b267c7babc4d09236f51a295c4dd52d14fd4b2f92a7db2b34c53b869ecb",
+    "invalid-s05-missing-task-successors.json": "ee4438cf92133d5e15fe31f9c7eed5abce4b28bef9716d886ea967d62b7bb099",
+    "invalid-s05-missing-workflow-live-activity.json": "227ed5b35ff82399c08ba80a4afc6f2fda4ce6c514d7fd7fec1dc775342a14a8",
+    "invalid-s05-missing-statistics-cost-model.json": "6445f9ad3b6246fcfee4ed757ef235dd9f294ad4cd62272cb3edb405c8b832c2",
+    "invalid-s05-missing-task-changes.json": "01bb904674268a59ac5f6500b517915bd15ad9d46059924d85941a44a58a57d4",
     "ctl-task-list-watch-baseline.json": "2c02f154342ed13cd44fad9d6d8c18c6168efb34cd9bd966a410c4c22483d14c",
     "ctl-task-list-watch-changed.json": "2176d13075eacc4c36d1e79c271fa64a6a59bb670d03767611c429f414825dbc",
     "ctl-task-list-watch-timeout.json": "5934c6297506e021e402865a3325ca97ba2be2c50bf23121f64d2a9dd8017f1e",
@@ -3285,7 +3433,7 @@
     "ctl-task-list-watch-unavailable.json": "af45574488bccbaaa399e6f46e1c343764789695ab0e5e71ebd10a270fce5a9e",
     "ctl-task-list-watch-cursor-invalid.json": "1ce219bcbd79f8360a5cd552459fb72c9532f4e56c77547a92adbec7de444f5c",
     "ctl-task-list-watch-direct-caller-refused.json": "174bdd6e57377346993e694518aeace83cd569223025199e88586745223215cc",
-    "invalid-s05-missing-task-list-watch.json": "97fae43811732f73239673f05302cc77aa036ab6170765580fdb08809d997cb3",
+    "invalid-s05-missing-task-list-watch.json": "d84bde8d643ca1ebe77c8886bc2917298de2fbe89f322d3794ee7d042d8e8a10",
     "ctl-steering-builder-ready.json": "f7586755e9bfeb22f6a787749e4af84acab465aa4bb8111e411df628630cad74",
     "ctl-steering-builder-admitted.json": "d929aa412fc18f6733ae7657a557724a967a60d3882309777946e23509a94172",
     "ctl-steering-builder-replayed.json": "3dba0d980053ae36909124d8132b1dba3d6dc47675e8f73a0500754f6a91c5b2",
@@ -3295,8 +3443,8 @@
     "ctl-steering-builder-command-refused.json": "991b632d6a76c8477a441e6b5568b3fd9b27de08b87f9b02f8a5bbc6a51165cd",
     "ctl-steering-builder-queued.json": "7f57332cd05459599101262004948b7f770fcb53598a9ba5807393261b52ad32",
     "ctl-steering-builder-summary.json": "db8d5e4eb29d322c675f0c508b68e9bd7bb6230570ff14d186c3850331ae7b2f",
-    "invalid-steering-missing-workflow-steering-read.json": "64c4dda445be8d400d11ddabcfee6388d4011ad04b059c406a4cd91fd6bd7e01",
-    "invalid-steering-missing-workflow-steering-builder.json": "e263ab6b8b9eef9a7c2d1a79c79a45e6867dcaf174989c1ce61c7b3802c9647e",
+    "invalid-steering-missing-workflow-steering-read.json": "b2b0d8cd81e5f495d7e1707bc5f73bd7103984ca3009a31416e4c2a0fb85c5aa",
+    "invalid-steering-missing-workflow-steering-builder.json": "9aac3714e01b77b0ffd45cfde4d4d6950a5675067b5800673f1be3402443369f",
     "ctl-steering-builder-committed.json": "c42c9c1be97fedbb8f491a42657f54f2e03f221bd3842a0581876f14c7e3e8f0",
     "ctl-steering-orchestrator-ready.json": "4bdcc9ad5e60516cc4cfb9dfeac8fdf8bf4fe1b3d62eaa33ad4348321c541b04",
     "ctl-steering-orchestrator-admitted.json": "9edaaea7b26c4b51d3e0047609df2ea50609b89e2eb3e30c1920e8f1836b3bb4",
@@ -3306,7 +3454,7 @@
     "ctl-steering-orchestrator-committed.json": "34c19239b7456e86688145384b03f5a7740d725339492a19dbe57a98095ef967",
     "ctl-steering-orchestrator-history.json": "27afe06b2d2a7cd21a1882f6789f58f404734cd4b0259b244323ed267eec18e3",
     "ctl-steering-orchestrator-summary.json": "c5a7b9b1c3eeb7d6bb1b1899215de47c8a6f52968ec40be5cdd8064d391bff7c",
-    "invalid-steering-missing-workflow-steering-orchestrator.json": "c8dd3e51ed0d76e0859f8e9ffd5b44306818c9feb952ef284836d5833c16905f",
+    "invalid-steering-missing-workflow-steering-orchestrator.json": "9142acfe7c8ea87e8721103d9bcb604b1f630e7e50aa0d1cabf39062231ecfa5",
     "ctl-steering-orchestrator-queued.json": "f95b1b151b6ef352ae7d8df75b7b79ba73f5fdb98d5b5a3fa235082045362fde",
     "ctl-steering-orchestrator-capture-unknown.json": "d9e88591b0cc85ff341627fb3a5f4554985cb61909f2aeec333ea042fc097a9f",
     "ctl-steering-orchestrator-stale.json": "e365441926c6272537560de4d14ad78be6a7f48bf3b95fade5b6454e732c2592",
@@ -3325,8 +3473,8 @@
     "ctl-steering-worker-committed.json": "dfe660ca7d92b861033d9ce5e0ebffbd15a01d01cf8de945ad574bf25bf4643d",
     "ctl-steering-worker-capture-unknown.json": "ef428dc1da6996a765f417e5af825707781d66c876f5c6a6a38802a27812f49a",
     "ctl-steering-worker-stale.json": "08d959bbcaff5880e0588b5c382e638b3581e511afdf994decc746ef586640c1",
-    "invalid-steering-missing-workflow-steering-worker.json": "b04cb1d2bff927009dcb1a9912e27855dd6536b7adc76055e4fcde5340b259b0",
-    "invalid-steering-missing-workflow-steering-window.json": "b3fe197c3618d9d22f1202422d0bfabe9ddd1cdf6c658b94e3953f10936c601e",
+    "invalid-steering-missing-workflow-steering-worker.json": "15de601fb092d9e62d6190efe6d51eb4857e3f1d30cc83217cdfaf3bbeb080ac",
+    "invalid-steering-missing-workflow-steering-window.json": "e55cac9a8ec3aca939a5b69ce3a04e5940fdb0c108a55db86fa8c156a283e8fb",
     "ctl-steering-replan-ready.json": "39bcfb08365056c2b11a9f090c5b37e5342cf9c13162de8d2d5afadd6261f708",
     "ctl-steering-replan-admitted.json": "e89cc91f60b1046ef76e291865325c77e3be8d7088ed3aabdc5c99bda49078d4",
     "ctl-steering-replan-settling.json": "d875122d1b5890eb7370c1211667b7da5a92b2840423feb3e397e5fe2f99f6ab",
@@ -3336,7 +3484,7 @@
     "ctl-steering-replan-window-history.json": "e7e1a3c66d74bdad2bce05e906a32b3466257a290e6879850e1a803abf1adde0",
     "ctl-steering-replan-expired.json": "dd7457189156bdc3128953e398821b03a7ca2587ca44a2ac904e9427a6a51080",
     "ctl-steering-replan-spawn-race-unknown.json": "32b52c2c0cfc761338f363499677d57589c79452a959a50b81e36bf4c288b93d",
-    "invalid-steering-missing-workflow-steering-replan.json": "96c3c23415bf9941cd00f98183f65724bc51c2c778bfa2aa7b4c5d5911f416c1",
+    "invalid-steering-missing-workflow-steering-replan.json": "5f58eba535c50b8bd9d991d4a6cb656a6a29b928baaf6fe26008f1b9261c3065",
     "ctl-conversation-empty.json": "1789dcda4781a1aca13f6b64546f2e857385a0ad2a0aea3782002691d9b11591",
     "ctl-conversation-queue-fifo.json": "5f6a0915c7b202e8ea4b7698d45cc74601bdead6d1b1964dbe90f26cedc22638",
     "ctl-conversation-queue-replayed.json": "5f6a0915c7b202e8ea4b7698d45cc74601bdead6d1b1964dbe90f26cedc22638",
@@ -3373,7 +3521,7 @@
     "ctl-launch-continue-accepted.json": "6a9c4e27739a58b6c62c51283c658357332c1db9151931f5998dfd4fa78266a3",
     "ctl-launch-continue-refused.json": "8a31831f506a68c5bb002db7875d794a0ea7997d38c0f085440ff2010f6320e6",
     "ctl-launch-continue-unknown.json": "f36e5f85b8171da7cb3736d82f2cb4f9d05e7c5f6e79aff9da2771b11b976a7f",
-    "invalid-s05-missing-task-continue.json": "8be759bbcbda9cc9b811c5891569926f1c7441869c8cc1d6a8a4d2f8ac98d152",
+    "invalid-s05-missing-task-continue.json": "4934e1f06df2c4ecd0c473318f07f4d3086079d31e2a6373cfec4addd71f8877",
     "ctl-task-artifacts-empty.json": "1957aea7c5db70fd280ced4d598d70eeb973d36f144f47fb65a406919cabb762",
     "ctl-task-artifacts-error.json": "f4a50e1e2c840b821295f64355fb208aaf9370ca965637d926e9f5d53e8b4393",
     "ctl-task-artifacts-next-page.json": "ec00b755d0620d98ff7db83f1d9fe433cc83849abbfd8c52f3cbe167bafb3c2e",
@@ -3381,14 +3529,14 @@
     "ctl-task-artifacts-populated.json": "175253052319d7ec6cb6bb990fa79722a23686d97c22f46ed92689a519e14817",
     "ctl-task-artifacts-preparing.json": "02f208b02d6e5447485c62468af201e69b29ccd3fe03c56b49fb871f0418ce88",
     "ctl-task-artifacts-unavailable.json": "fb8bc3fa501707a070f87b8d8fdeb49592b88a3f8fc02e2f6454158ce1676013",
-    "invalid-s05-missing-task-artifacts.json": "d6ee9d1626f545586b886d3e1d764932cf9cb4f37a5982e99b560b9b0165346a",
+    "invalid-s05-missing-task-artifacts.json": "d9b8bf8e7d406c62c445484240d1358927f865ce6131b17ccf60b21f99390d3b",
     "ctl-continue-chain-stopped.json": "c4fad40dd728eee42a165e1f41ac7b62219715e47f5fb8c239608ec366779a0a",
     "ctl-task-status-batch-continuation-stop.json": "96b0c94f70fb8ad9bde29d1b92c7b3513dd55c6c12058ae7b415f34dd13cc02b",
     "ctl-task-status-brief-continuation-stopped.json": "c1ce1f3c6ded60c629656949fc2c7be94cf6a636ef84dddb22c0a4b6c2155f5b",
     "ctl-task-status-continuation-not-stopped.json": "30b667fb4df06a30815734abdb193725313c8e48dadfabae20066c7d095fa256",
     "ctl-task-status-continuation-stopped.json": "008dd768df294116578b7919fa633ac7b17ae3eb16df85c230b441c7330cae5d",
     "ctl-task-status-continuation-unknown.json": "fb4ac20fbaae3620ac9c47aaf77f45adbaa6bc6acb7de73843c4b8fa5d34bfc5",
-    "invalid-s05-missing-task-continuation-stop.json": "d3e95849780ab21720477f5d0b9d806ea08fc6ecf8b4261e151c7a78145c679e",
+    "invalid-s05-missing-task-continuation-stop.json": "86bd0bfb342e3a5c355b0b33e00a91b0aad99e6b0920d1743607d82db1771d55",
     "ctl-task-cancel-incomplete.json": "c94a228687b6c6b55ae2f8a355e9b66c19189a051040a22bfba14392d9c449d9",
     "ctl-task-cancel-partial.json": "fcad2c0df12531da89c6907824a6f992841150685f709acef0484cacb449c07f",
     "ctl-task-cancel-pending-child-withdrawal-unsettled.json": "dd51c3e12cf001c4e1f3decba150d56749313fb0c01f7bb110a4d9f7d679da59",
@@ -3398,6 +3546,20 @@
     "ctl-task-cancel-truncated.json": "3ed0a1e10ff73520befb282f802fa77232c87407ea56400fdd1e4dff86c5cca6",
     "ctl-task-cancel-unknown.json": "5e89729a5e58a49d5ef9581c2e68ce82c5b277c50a5061c0b845b092c0b43350",
     "ctl-task-cancel-unrecorded.json": "8394929acfc29ef8eaebbf9c21fce90bd0a7fa4c39e66167dfa90becea3c0ad2",
-    "invalid-s05-missing-task-cancel-cascade.json": "af8a09def557baf2b144ab5696c1031f181ab0ce05bc7443b5d3cb261aaee1ec"
+    "invalid-s05-missing-task-cancel-cascade.json": "d9f950ab85d09441db9cf93b955c7c589c76e6a89e9cef7bf5b11fa819756d2f",
+    "ctl-task-pending-bound.json": "272c9858a8c58cbec9db59dfdbbd679ff39275607012dce71cb2a0f0344470d4",
+    "ctl-task-pending-cursor-invalid.json": "eb787fdb7080108cfa889b8647ec2fd193a67ce0eba7a57eff454b5accda3fdc",
+    "ctl-task-pending-empty.json": "1a36130070064dcba8ae1538c666e44a5d71600770b63becc383f1074484953c",
+    "ctl-task-pending-existing-batch-pending.json": "fa8b356770fa7409a05c457327eec6a5ca731ca034c7fac115bfd7d2911fb617",
+    "ctl-task-pending-existing-status-pending.json": "d1084c288a7736b90378b1c9d6a8a4bd46a4487b796804246c0ce7076ed071b1",
+    "ctl-task-pending-next-page.json": "93333bf8959aa99f1a8b79359dd59b459664f67819a9f171f33976c28c1ed50b",
+    "ctl-task-pending-refused.json": "6b7de3e164949b40dcaa79136f56af9f58d378535c4b257809c957644b11317b",
+    "ctl-task-pending-states.json": "afd95aa05a4d2a5489de3eef1030f560d0b36e0db2dddd22ea1dfc838d2f54f0",
+    "ctl-task-pending-status-not-found.json": "03733d53b1e04badb4c2f5894fa29cf318a7537a12d48a27bb0e202dd96aade7",
+    "ctl-task-pending-status-pending.json": "4b7842c97c845bfdd04f48bc2a0e08cf79fe4c6c1275ebb61cb789b9a3149580",
+    "ctl-task-pending-status-recorded.json": "16253eb3d05526f3344828988824026b69c93334ace78ca8891b6fdbfb7dfa39",
+    "ctl-task-pending-status-refused.json": "7d5d4a4797b291049538acd46752c8be2daa8f08f76589c501ac3cc5a96449a6",
+    "ctl-task-pending-status-unknown.json": "3b0b3af441bd26e31aad805844e4ec6757ec7b8dc126b65463370ded9c9f8ad6",
+    "invalid-s05-missing-task-pending-launch.json": "424bbbcf4175457b0487121e76e3fc5609621d13dbde892322d249d554ded2aa"
   }
 }
