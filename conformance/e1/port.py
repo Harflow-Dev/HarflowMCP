@@ -4,7 +4,7 @@ A case never writes a file under the state root. It calls one of the named opera
 adapter turns the layout-neutral request into whatever store the engine under test uses (the engine
 may keep a SQLite root; no file layout is part of this interface).
 
-The seventeen operations (all take the state root first):
+The twenty operations (all take the state root first):
 
      1. initialize_empty(root)                 a compatible, empty, initialized store
      2. remove_root(root)                      the selected root no longer exists
@@ -23,11 +23,31 @@ The seventeen operations (all take the state root first):
     15. write_artifacts(root, task_id, items, header_valid) -> {'paths': [...]}
     16. change_artifact_target(root, task_id, name)   the present target's stat now differs
     17. authoritative_digest(root) -> str      non-empty digest of all authoritative state
+    18. stop_chain(root, spec)                 the chain-stop marker of a chain root (spec below)
+    19. add_launch(root, spec)                 a launch receipt without an ordinary record (spec below)
+    20. add_invalid_launch_name(root, name)    a launch-receipt file whose name is not a task identity
 
 `add_task` spec: always present are `task_id`, `backend`, `repo_path`, `freedom`, `session_id`, `status`,
 `exit_code`, `started_at`, `finished_at`, `output_drained` and `prompt` (see `world.task`). Optional keys are
 `title`, `group`, `model`, `continuation_of`, `prompt_store` ('inline' | 'sidecar_verified' | 'sidecar_missing' |
-'sidecar_mismatch' | 'sidecar_foreign_name') and `real_workspace`. An adapter has no defaults for asserted values.
+'sidecar_mismatch' | 'sidecar_foreign_name'), `real_workspace` and `chain_root`. An adapter has no defaults for
+asserted values. `chain_root` follows Python: omitted, the stored chain root of a task with `continuation_of` is
+that predecessor's stored chain root, else the predecessor id (a task without `continuation_of` stores none). A
+string is stored verbatim, whether or not it is a valid task identity; `None` stores no chain root even for a
+continuation.
+
+`stop_chain` spec: `chain_root` (the id whose marker is addressed) and `mode`: 'marker' (a stable regular
+marker; `attribution` is `{'kind': 'valid' | 'invalid' | 'malformed' | 'oversize', 'cancelled_task_id': ...}`,
+where `valid` names an identity, `invalid` a value that is not one, `malformed` writes unparseable bytes and
+`oversize` a parseable marker above the 4096-byte attribution read limit), 'fault' (the marker name exists but
+is not a regular file, so the engine cannot establish presence or absence) or 'absent' (remove any marker).
+
+`add_launch` spec: `name`, `state`, `generation`, `backend`, `title`, `repo_path`, `created_at`,
+`not_started_reason`, `lineage` (`None`, like `{}`, or any of `spawned_by`, `root_task_id`, `parent_task_id`, `chain_root_task_id`),
+`resources` (`None` or an object such as `{'names': [...]}`), `worktree` (`None` or an object such as
+`{'path': ...}`) and `refusal` (`None`, or `{'check': ...}` with one of `seed.REFUSAL_CHECKS`: the receipt then
+fails that qualification). Adding an existing `name` replaces its content in place and leaves the set of
+names unchanged.
 
 `write_artifacts` items (see `world.artifact`): always present are `artifact_id`, `name`, `target`
 ('absent' | 'present'), `kind`, `note`, `registered_at` and `provenance_method`; an `absent` item also carries
@@ -62,7 +82,7 @@ from . import seed, world as worldmod
 OPERATIONS = ('initialize_empty', 'remove_root', 'make_foreign_root', 'root_state', 'seed_world', 'add_task',
               'add_live_caller', 'damage_task', 'append_event', 'append_malformed_line', 'append_partial_line',
               'truncate_log', 'remove_log', 'tamper_prompt', 'write_artifacts', 'change_artifact_target',
-              'authoritative_digest')
+              'authoritative_digest', 'stop_chain', 'add_launch', 'add_invalid_launch_name')
 DERIVED = ('.listing', '.task-list-revision', '.statistics')
 
 
@@ -73,8 +93,8 @@ def _lstart(pid):
 
 
 class PythonLayoutAdapter:
-    """Adapter for Python 0.0.11's file layout. The only place that knows these file names."""
-    name = 'python-0.0.11-layout'
+    """Adapter for Python 0.0.13's file layout. The only place that knows these file names."""
+    name = 'python-0.0.13-layout'
 
     def identity(self):
         return {'name': self.name}
@@ -125,7 +145,14 @@ class PythonLayoutAdapter:
             if source in spec:
                 fields[target] = spec[source]
         if spec.get('continuation_of'):
-            fields.update(continuation_of_task_id=spec['continuation_of'], chain_root_task_id=spec['continuation_of'])
+            fields['continuation_of_task_id'] = spec['continuation_of']
+            # Python stores the predecessor's chain root, else the predecessor itself (task_continuation.py:138).
+            fields['chain_root_task_id'] = self._stored_chain_root(root, spec['continuation_of'])
+        if 'chain_root' in spec:
+            if spec['chain_root'] is None:
+                fields.pop('chain_root_task_id', None)
+            else:
+                fields['chain_root_task_id'] = spec['chain_root']
         result = {}
         if spec.get('real_workspace'):
             repo = Path(os.path.realpath(Path(root).parent)) / 'repos' / task_id
@@ -148,6 +175,23 @@ class PythonLayoutAdapter:
                 seed._write(tasks / name, text + ('tampered' if store == 'sidecar_mismatch' else ''))
         seed.write_task(tasks, task_id, **fields)
         return result
+
+    def _stored_chain_root(self, root, predecessor):
+        path = self._tasks(root) / f'{predecessor}.meta.json'
+        # A missing or damaged predecessor fails the seed operation (OSError, ValueError) rather than guessing.
+        stored = json.loads(path.read_text()).get('chain_root_task_id')
+        # Only a non-empty string counts as a stored root; a stored empty or non-string value is not reachable
+        # through `add_task` for a predecessor that has a root, so the predecessor itself is the root then.
+        return stored if isinstance(stored, str) and stored else predecessor
+
+    def stop_chain(self, root, spec):
+        seed.write_stop(self._tasks(root), spec['chain_root'], spec['mode'], spec.get('attribution'))
+
+    def add_launch(self, root, spec):
+        seed.write_launch(Path(root), self._tasks(root), spec)
+
+    def add_invalid_launch_name(self, root, name):
+        seed.write_invalid_launch_name(self._tasks(root), name)
 
     def add_live_caller(self, root, task_id, pid, identity='alive', status='running', marker=None):
         start = _lstart(pid)
@@ -283,7 +327,8 @@ def _external(op):
                  'damage_task': ('task_id',), 'append_event': ('task_id', 'seq', 'kind', 'observed_at', 'fields'),
                  'append_malformed_line': ('task_id',), 'append_partial_line': ('task_id',), 'truncate_log': ('task_id', 'keep_events'),
                  'remove_log': ('task_id',), 'tamper_prompt': ('task_id',), 'write_artifacts': ('task_id', 'items', 'header_valid'),
-                 'change_artifact_target': ('task_id', 'name')}.get(op, ())
+                 'change_artifact_target': ('task_id', 'name'),
+                 'stop_chain': ('spec',), 'add_launch': ('spec',), 'add_invalid_launch_name': ('name',)}.get(op, ())
         arguments = dict(zip(names, args))
         arguments.update(kwargs)
         return self.call(op, root, **arguments)

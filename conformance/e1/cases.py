@@ -2,7 +2,7 @@
 
 Each case runs in a fresh isolated state root against the public command line only, and creates or
 damages state exclusively through the fixture port (`port.py`). Checks tagged `[contract]` follow
-`docs/contracts.md`; every other check is `[baseline]`: it pins observed Python 0.0.11 behaviour that the
+`docs/contracts.md`; every other check is `[baseline]`: it pins observed Python 0.0.13 behaviour that the
 contracts do not spell out, so an engine that differs must record a contract delta (C1) rather than
 silently diverge. `[baseline, pending U2]`, `[baseline, U4]` and `[proposed]` mark checks whose
 status the owner has yet to decide (see `docs/decisions/C1-caller-and-scoped-reads.md`).
@@ -965,3 +965,10 @@ def _(ctx):
                else f'{label}: an ordinary read initializes the selected root [contract, pending U10]')
     ctx.fx.remove_root()
     ctx.baseline = None
+
+
+# Case groups kept in their own modules; importing them registers their cases here.
+from . import cases_stop  # noqa: E402,F401
+from . import cases_pending  # noqa: E402,F401
+from . import cases_pending_gate  # noqa: E402,F401
+from . import cases_artifact_reasons  # noqa: E402,F401

@@ -50,7 +50,7 @@ def test_seeded_world_matches_the_documented_private_envelopes(tmp_path):
     adapter.seed_world(tmp_path / 'root', world.WORLD_READS)
     tasks = tmp_path / 'root' / 'tasks'
     marker = strict_json((tmp_path / 'root' / '.harflow-store.json').read_bytes())
-    assert marker == {'format': 'harflow.store', 'layout_version': 1, 'product': 'harflow', 'product_version': '0.0.11', 'v': 1}
+    assert marker == {'format': 'harflow.store', 'layout_version': 1, 'product': 'harflow', 'product_version': '0.0.13', 'v': 1}
     for task_id in (world.A, world.B, world.C, world.D, world.E):
         document = strict_json((tasks / f'{task_id}.meta.json').read_bytes())
         assert (document['product'], document['format'], document['v'], document['task_id']) == ('harflow', 'harflow.task', 1, task_id)
@@ -96,14 +96,16 @@ def test_external_adapter_requires_its_pinned_digest(tmp_path):
 
 
 def test_every_case_is_registered_with_capabilities_and_a_default_tag():
-    assert len(cases.CASES) == 33
+    assert len(cases.CASES) == 56
     for name, (capabilities, function, tag) in cases.CASES.items():
         assert name.count('.') == 1 and callable(function) and 'ctl.v1' in capabilities and tag in ('baseline', 'contract')
 
 
 def test_cases_never_touch_the_state_root_directly():
-    source = Path(cases.__file__).read_text()
-    for forbidden in ('ctx.tasks', 'ctx.root /', 'seed.', 'shutil', 'write_text', 'write_bytes', '.meta.json', '.events.jsonl', '.artifacts.json'):
+    modules = [Path(cases.__file__), *sorted(Path(cases.__file__).parent.glob('cases_*.py'))]
+    source = ''.join(path.read_text() for path in modules)
+    for forbidden in ('ctx.tasks', 'ctx.root /', 'seed.', 'shutil', 'write_text', 'write_bytes', '.meta.json', '.events.jsonl', '.artifacts.json',
+                      '.launch.json', '.continuation-stopped.json'):
         assert forbidden not in source, forbidden
 
 
@@ -215,6 +217,15 @@ def test_external_adapter_round_trips_every_argument_name(tmp_path):
     assert external.add_live_caller(tmp_path / 'ext', '12121212-1212-4212-8212-121212121212', os.getpid(), 'alive', 'running', None) == {'supported': True}
     assert external.add_live_caller(tmp_path / 'ext', '34343434-3434-4434-8434-343434343434', os.getpid(), 'nonsense', 'running', None) == {'supported': False}
     assert external.identity()['sha256'] == digest
+    for adapter, root in ((external, tmp_path / 'ext'), (direct, tmp_path / 'dir')):
+        adapter.stop_chain(root, {'chain_root': world.A, 'mode': 'marker', 'attribution': world.marker_attribution('valid', world.C)})
+        adapter.add_launch(root, world.launch(world.launch_id('1'), 'reserved'))
+        adapter.add_invalid_launch_name(root, 'bad name')
+    # Receipts record their root path and directory inode, so compare names and the marker bytes, not a digest.
+    listing = lambda root: sorted(path.name for path in (root / 'tasks').iterdir() if path.name.endswith(('.launch.json', '.continuation-stopped.json')))
+    assert listing(tmp_path / 'ext') == listing(tmp_path / 'dir')
+    marker = f'{world.A}.continuation-stopped.json'
+    assert (tmp_path / 'ext' / 'tasks' / marker).read_bytes() == (tmp_path / 'dir' / 'tasks' / marker).read_bytes()
 
 
 def test_external_adapter_digest_is_rechecked_before_each_call(tmp_path):
@@ -298,6 +309,14 @@ def test_delta_profiles_have_live_alternate_expectations(tmp_path):
     assert base['ok']
 
 
+def test_prefix_paging_delta_fails_python_only_in_the_bug_assertion(tmp_path):
+    name = 'pending-launch.prefix_nested_ids'
+    baseline = run_selected(tmp_path / 'base', 'passthrough', [name])[name]
+    assert baseline['ok'], baseline['failures']
+    delta = run_selected(tmp_path / 'delta', 'passthrough', [name], deltas=['pending-prefix-paging'])[name]
+    assert not delta['ok'] and len(delta['failures']) == 1 and 'pending-prefix-paging' in delta['failures'][0], delta['failures']
+
+
 class SilentCaller(PythonLayoutAdapter):
     answer = None
 
@@ -330,8 +349,100 @@ def test_artifact_items_are_complete_and_the_adapter_has_no_defaults(tmp_path):
         (world.ARTIFACT_KIND, world.ARTIFACT_NOTE, world.ARTIFACT_REGISTERED_AT, world.ABSENT_OBSERVATION)
 
 
-def test_port_docstring_names_all_seventeen_operations():
+def test_port_docstring_names_all_twenty_operations():
     from conformance.e1 import port
-    assert len(port.OPERATIONS) == 17
+    assert len(port.OPERATIONS) == 20
     for op in port.OPERATIONS:
         assert f'{op}(' in port.__doc__, op
+
+
+def test_stop_markers_match_the_python_writer_and_edge_shapes(tmp_path):
+    adapter = PythonLayoutAdapter()
+    adapter.seed_world(tmp_path / 'root', world.WORLD_READS)
+    tasks = tmp_path / 'root' / 'tasks'
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.A, 'mode': 'marker', 'attribution': world.marker_attribution('valid', world.C)})
+    assert json.loads((tasks / f'{world.A}.continuation-stopped.json').read_text()) == {'cancelled_task_id': world.C}
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.B, 'mode': 'marker', 'attribution': world.marker_attribution('oversize', world.C)})
+    oversize = (tasks / f'{world.B}.continuation-stopped.json')
+    assert oversize.stat().st_size > 4096 and json.loads(oversize.read_text())['cancelled_task_id'] == world.C
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.D, 'mode': 'marker', 'attribution': world.marker_attribution('malformed', None)})
+    with pytest.raises(ValueError):
+        json.loads((tasks / f'{world.D}.continuation-stopped.json').read_text())
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.E, 'mode': 'fault'})
+    assert (tasks / f'{world.E}.continuation-stopped.json').is_dir()
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.E, 'mode': 'absent'})
+    adapter.stop_chain(tmp_path / 'root', {'chain_root': world.A, 'mode': 'absent'})
+    assert not (tasks / f'{world.E}.continuation-stopped.json').exists() and not (tasks / f'{world.A}.continuation-stopped.json').exists()
+    with pytest.raises(FileExistsError):
+        adapter.stop_chain(tmp_path / 'root', {'chain_root': world.B, 'mode': 'marker', 'attribution': world.marker_attribution('valid', world.C)})
+
+
+def test_chain_root_follows_python_semantics(tmp_path):
+    adapter = PythonLayoutAdapter()
+    adapter.seed_world(tmp_path / 'root', world.WORLD_READS)
+    tasks = tmp_path / 'root' / 'tasks'
+    stored = lambda task_id: json.loads((tasks / f'{task_id}.meta.json').read_text()).get('chain_root_task_id', '<absent>')
+    assert stored(world.C) == world.A     # continuation of the first task
+    middle, last, raw, none = (f'12345678-0000-4000-8000-0000000000{n}' for n in ('a1', 'a2', 'a3', 'a4'))
+    adapter.add_task(tmp_path / 'root', world.settled(middle, continuation_of=world.C))
+    assert stored(middle) == world.A      # the predecessor's chain root, not the predecessor
+    adapter.add_task(tmp_path / 'root', world.settled(last, continuation_of=world.B))
+    assert stored(last) == world.B        # a predecessor without a stored root is the root itself
+    adapter.add_task(tmp_path / 'root', world.settled(raw, continuation_of=world.A, chain_root='not valid'))
+    assert stored(raw) == 'not valid'
+    adapter.add_task(tmp_path / 'root', world.settled(none, continuation_of=world.A, chain_root=None))
+    assert stored(none) == '<absent>'
+
+
+def test_launch_receipts_are_qualified_and_replace_in_place(tmp_path):
+    adapter = PythonLayoutAdapter()
+    adapter.initialize_empty(tmp_path / 'root')
+    tasks = tmp_path / 'root' / 'tasks'
+    one, two = world.launch_id('1'), world.launch_id('2')
+    adapter.add_launch(tmp_path / 'root', world.launch(one, 'waiting_for_resources', resources={'names': ['x']}))
+    adapter.add_launch(tmp_path / 'root', world.launch(two, 'reserved', refusal={'check': 'format'}))
+    adapter.add_invalid_launch_name(tmp_path / 'root', 'bad name')
+    before = sorted(path.name for path in tasks.iterdir())
+    document = json.loads((tasks / f'{one}.launch.json').read_text())
+    assert (document['format'], document['state'], document['task_id'], document['root']) == ('harflow.task-launch', 'waiting_for_resources', one, str(tmp_path / 'root'))
+    assert document['resources'] == {'names': ['x']} and len(document['generation']) == 32 and len(document['request_sha256']) == 64
+    assert json.loads((tasks / f'{two}.launch.json').read_text())['format'] == 'harflow.other'
+    adapter.add_launch(tmp_path / 'root', world.launch(one, 'granted', title='again'))
+    assert sorted(path.name for path in tasks.iterdir()) == before
+    assert json.loads((tasks / f'{one}.launch.json').read_text())['title'] == 'again'
+    for check in ('oversize', 'resource_names', 'field_shape'):
+        adapter.add_launch(tmp_path / 'root', world.launch(world.launch_id('3'), 'reserved', refusal={'check': check}))
+    assert (tasks / f'{world.launch_id("3")}.launch.json').stat().st_size > 0
+    with pytest.raises(ValueError):
+        adapter.add_launch(tmp_path / 'root', world.launch(one, 'reserved', refusal={'check': 'unknown'}))
+
+
+def test_new_cases_run_through_the_external_adapter_protocol(tmp_path):
+    path, digest = make_tool(tmp_path)
+    names = ['continuation-stop.invalid_root', 'pending-launch.cursor_lifecycle', 'pending-launch.empty_objects']
+    results = run_selected(tmp_path / 'run', 'passthrough', names, port=ExternalAdapter(path, digest))
+    assert all(row['ok'] for row in results.values()), {name: row['failures'][:2] for name, row in results.items()}
+
+
+def _pending_cursor(value):
+    import base64
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+
+
+@pytest.mark.parametrize('cursor', ['!!not base64!!', _pending_cursor([1, 2]), _pending_cursor({'v': 1}), _pending_cursor({'last': 5}),
+                                    _pending_cursor({'last': 'other'})])
+def test_uncraftable_pending_cursors_record_the_named_skip(tmp_path, cursor):
+    from conformance.e1 import cases_pending
+    ctx = harness.Ctx('x.y', tmp_path / 'c', ['unused'], ())
+    assert cases_pending.reposition(ctx, cursor, 'one', 'zero') is None
+    assert [skip['name'] for skip in ctx.skips] == ['pending-launch.cursor_position'] and ctx.skips[0]['kind'] == 'unverified'
+
+
+def test_reposition_keeps_the_form_of_the_position(tmp_path):
+    import base64
+    from conformance.e1 import cases_pending
+    ctx = harness.Ctx('x.y', tmp_path / 'c', ['unused'], ())
+    for last in ('one', 'one.launch.json'):
+        crafted = cases_pending.reposition(ctx, _pending_cursor({'last': last, 'v': 1}), 'one', 'zero')
+        assert json.loads(base64.urlsafe_b64decode(crafted + '=' * (-len(crafted) % 4)))['last'] == last.replace('one', 'zero')
+    assert not ctx.skips

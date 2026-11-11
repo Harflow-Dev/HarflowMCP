@@ -34,7 +34,7 @@ def framework_identity():
     return {str(p.relative_to(root)): digest(read_regular(p)) for p in paths}
 
 
-DELTAS = ('interim-6.1', 'U10')
+DELTAS = ('interim-6.1', 'U10', 'pending-prefix-paging')
 
 
 def run_cases(command, identity, check, output, selected=None, probe=False, port=None, deltas=()):
@@ -150,7 +150,7 @@ def main(argv=None):
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--manifest-sha256', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--fixture-adapter', help='absolute path of a pinned external fixture tool (default: the Python 0.0.11 layout adapter)')
+    parser.add_argument('--fixture-adapter', help='absolute path of a pinned external fixture tool (default: the Python 0.0.13 layout adapter)')
     parser.add_argument('--fixture-adapter-sha256')
     parser.add_argument('--delta', action='append', choices=DELTAS, help='expect a proposed delta profile instead of the Python baseline (recorded in the report); repeatable')
     parser.add_argument('--exclude-unverified', action='append', metavar='NAME', help='record an owner-accepted exclusion of a named unverified item')

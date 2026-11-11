@@ -34,7 +34,7 @@ def _version(value):
         raise ConformanceError('invalid product version')
     return tuple(int(x) for x in match.groups())
 
-def validate_envelope(doc, format, expected_version='0.0.11'):
+def validate_envelope(doc, format, expected_version='0.0.13'):
     if not isinstance(doc, dict) or doc.get('product') != 'harflow' or doc.get('format') != format or type(doc.get('v')) is not int or doc['v'] != 1:
         raise ConformanceError('incompatible wire envelope')
     version = _version(doc.get('product_version'))
@@ -42,7 +42,7 @@ def validate_envelope(doc, format, expected_version='0.0.11'):
         raise ConformanceError('incompatible product line')
     return doc
 
-def validate_version_info(doc, root, required_capabilities=(), expected_os=None, expected_arch=None, expected_version='0.0.11'):
+def validate_version_info(doc, root, required_capabilities=(), expected_os=None, expected_arch=None, expected_version='0.0.13'):
     validate_envelope(doc, 'harflow.version-info', expected_version)
     if doc.get('component') != 'engine' or doc.get('state_root') != str(root) or not os.path.isabs(str(root)) or 'error' in doc:
         raise ConformanceError('incompatible engine/root')
@@ -142,7 +142,7 @@ def validate_cancel_observation(doc):
     return value
 
 
-def validate_event_page(doc, expected_version='0.0.11'):
+def validate_event_page(doc, expected_version='0.0.13'):
     validate_envelope(doc, 'harflow.ctl', expected_version)
     result = doc.get('result')
     if not isinstance(result, dict) or not isinstance(result.get('events'), list):
@@ -175,7 +175,7 @@ def required_capabilities(argv):
     return tuple(caps)
 
 
-def validate_reply(argv, doc, expected_version='0.0.11'):
+def validate_reply(argv, doc, expected_version='0.0.13'):
     """Envelope and, for task-events, the embedded event-page checks every controlled profile applies."""
     validate_envelope(doc, 'harflow.ctl', expected_version)
     if argv and argv[0] == 'task-events' and 'error' not in doc:

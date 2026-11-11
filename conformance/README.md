@@ -218,14 +218,17 @@ approve C0 or authorize the next migration session.
 
 `conformance/e1` checks the bounded ctl reads from outside the engine: `list`, `status`,
 `status-batch`, `task-list-page` (including successor discovery), `task-events`, `task-prompt`,
-`task-artifacts`, `recovery-activity`, `interaction-events` and `statistics-page`, plus the caller and
-scoped-read refusals around them. It is a separate entry point from S07 and imports no engine code.
+`task-artifacts` (including its `data.reason` cursor errors), `recovery-activity`, `interaction-events` and
+`statistics-page`, the `continuation_stop` diagnostic on status, brief and batch (`task-continuation-stop.v1`) and
+pending launch discovery (`task-pending-page`, `task-pending-status`, `task-pending-launch.v1`), plus the caller and
+scoped-read refusals around them. Case groups live in `cases.py`, `cases_stop.py`, `cases_pending.py`,
+`cases_pending_gate.py` and `cases_artifact_reasons.py`. It is a separate entry point from S07 and imports no engine code.
 
 - **Fixture port.** Cases create, damage and inspect state only through the named operations in
   `port.py` (`seed_world`, `add_task`, `add_live_caller`, `damage_task`, `append_event`,
   `append_partial_line`, `truncate_log`, `remove_log`, `tamper_prompt`, `write_artifacts`,
-  `authoritative_digest`, and root helpers). No case writes under the state root and no store layout is
-  part of the interface. `PythonLayoutAdapter` is the only code that knows Python 0.0.11's files and
+  `authoritative_digest`, `stop_chain`, `add_launch`, `add_invalid_launch_name`, and root helpers). No case writes under the state root and no store layout is
+  part of the interface. `PythonLayoutAdapter` is the only code that knows Python 0.0.13's files and
   writes the documented private formats as literal bytes with the standard library. An external adapter
   is selected with `--fixture-adapter PATH --fixture-adapter-sha256 DIGEST` (invoked `ADAPTER OP --root ROOT`,
   JSON arguments on stdin, JSON result on stdout) and is never reachable from the public engine binary.
@@ -236,7 +239,7 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
   `docs/contracts.md`. Nothing shares a codec with an engine, cursors are opaque, and error wording is
   never pinned (codes and identities only).
 - **Tags.** A check tagged `[contract]` follows the published text. Every other check is `[baseline]`
-  (the default tag): it pins observed 0.0.11 behaviour the contracts do not spell out, so an engine that
+  (the default tag): it pins observed 0.0.13 behaviour the contracts do not spell out, so an engine that
   differs must record a contract delta. `[baseline, pending U2]`, `[baseline, U4]`, `[pending U10]` and
   `[proposed]` mark owner decisions still open (see `docs/decisions/C1-caller-and-scoped-reads.md`).
 - **Caller rules.** `agent_caller` is produced by registering the test process itself as a live task
@@ -253,7 +256,24 @@ scoped-read refusals around them. It is a separate entry point from S07 and impo
   only when `ok` and `complete`.
 - **Delta profiles.** `--delta interim-6.1` and `--delta U10` replace the Python baseline expectations with
   the proposed alternatives of C1 section 6.1 and U10 (tagged `[proposed, ...]`) and are recorded in the
-  report. Python fails them on purpose.
+  report. `--delta pending-prefix-paging` replaces the one assertion that pins a Python 0.0.13 paging defect
+  (`task-pending-page` resumes by bare task id, so with receipts `ab-c` and `ab` and `--limit 1` it skips
+  `ab`) with the complete traversal. Python fails these profiles on purpose.
+- **Launch receipts and markers.** `add_launch` writes a qualified receipt (a receipt with a `refusal` fails exactly
+  that qualification) and replaces an existing name in place, so the set of names, and therefore the namespace
+  revision and cursors, is unchanged. `stop_chain` writes the continuation-stop marker (`valid`, `invalid`,
+  `malformed` or `oversize` attribution), a non-regular entry (`fault`) or removes it (`absent`). A `chain_root` on
+  `add_task` follows Python (the predecessor's stored chain root, else the predecessor) unless given verbatim or as
+  `null`. Cases that craft a cursor (position and artifact offset errors) decode its base64 JSON members; a cursor
+  of another shape is an `unverified` skip.
+- **Namespace revision.** The cases assert `namespace_revision` as SHA-256 over the receipt filenames
+  (`<name>.launch.json`) in sorted order, each followed by a NUL byte; the empty namespace is the SHA-256 of nothing.
+  Cursor tokens are otherwise opaque.
+- **Not covered.** The 65,536-entry and 8 MiB namespace caps of the pending reads need a test-only seam in each
+  engine (Python's own tests patch `MAX_ENTRIES`); no case seeds that many files. Resource-name truncation
+  (256 bytes per name, more than 100 names) is unreachable: Python's `validate_names` limits a receipt to 16 names of
+  at most 64 characters. Cursor expiry by name removal is not covered either: the port has no removal operation, so
+  only addition expires a cursor.
 - **Bounds.** Paging walks fail when the bound is exhausted. Re-issuing a read that reports preparation
   follows a harness bootstrap policy (40 attempts, 250 ms), not the contract.
 - **Framework identity.** `conformance/*.py` and `conformance/e1/**` are hashed before the run, checked
@@ -274,7 +294,7 @@ The self-checks include deviating-engine doubles (dropped fields, wrong status, 
 authority refusals, ignored environment markers, unbound cursors, state rewritten by a read,
 nonterminating paging, vacuous digests). For each, the same case must pass against the undoubled
 engine, fail against the double for the stated reason, and the double must have logged its mutation.
-Passing against Python 0.0.11 establishes the scenarios, not any other engine. The S08 and S09
+Passing against Python 0.0.13 establishes the scenarios, not any other engine. The S08 and S09
 profiles cannot be rerun on their old 0.0.7 manifest digest until the E2 port gives them a per-source
 digest.
 

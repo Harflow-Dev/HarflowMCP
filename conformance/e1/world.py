@@ -10,7 +10,7 @@ D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'   # completed, long prompt in a verif
 E = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'   # completed, long prompt whose sidecar is missing
 MISSING = '99999999-9999-4999-8999-999999999999'
 BROKEN = 'ffffffff-ffff-4fff-8fff-ffffffffffff'  # metadata that is not a Harflow task
-PRODUCT_VERSION = '0.0.11'
+PRODUCT_VERSION = '0.0.13'
 
 LONG_PROMPT = ''.join(f'line {n:04d} é spaced   text\n' for n in range(120))  # > 2000 characters
 PREVIEW_CHARS = 2000
@@ -102,3 +102,38 @@ def artifact(artifact_id, name, target='absent'):
     if target == 'absent':
         item['observation'] = dict(ABSENT_OBSERVATION)
     return item
+
+
+# --- continuation chains and launch receipts (0.0.13) ---------------------------------------------------
+
+LAUNCH_BACKEND = 'claude'
+LAUNCH_TITLE = 'Fixture pending launch'
+LAUNCH_REPO_PATH = '/tmp/harflow-fixture-repo'
+LAUNCH_CREATED_AT = '2026-11-10T00:00:00+00:00'
+LAUNCH_GENERATION = 'c' * 32
+# The receipt filename suffix the namespace hash covers (a published detail of the pending-launch contract).
+NAMESPACE_SUFFIX = '.launch.json'
+LAUNCH_STATES = ('reserved', 'claimed', 'waiting_for_resources', 'granted', 'spawned', 'settled', 'not_started')
+
+
+def launch(name, state='reserved', **fields):
+    """A complete launch-receipt spec. Every value a case asserts is an explicit field here, never an adapter default."""
+    spec = {'name': name, 'state': state, 'generation': LAUNCH_GENERATION, 'backend': LAUNCH_BACKEND,
+            'title': LAUNCH_TITLE, 'repo_path': LAUNCH_REPO_PATH, 'created_at': LAUNCH_CREATED_AT,
+            'not_started_reason': None, 'lineage': {}, 'resources': None, 'worktree': None, 'refusal': None}
+    spec.update(fields)
+    return spec
+
+
+def marker_attribution(kind, cancelled_task_id):
+    return {'kind': kind, 'cancelled_task_id': cancelled_task_id}
+
+
+def launch_id(char):
+    """A canonical-shaped identity made of one repeated hex or letter character, e.g. '1' or 'g'."""
+    return f'{char * 8}-{char * 4}-4{char * 3}-8{char * 3}-{char * 12}'
+
+
+def numbered_id(number):
+    """A canonical-shaped identity whose lexicographic order follows `number` (0 to 99999999)."""
+    return f'{number:08d}-0000-4000-8000-000000000000'
