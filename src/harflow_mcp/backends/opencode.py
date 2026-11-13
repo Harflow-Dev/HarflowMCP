@@ -196,6 +196,11 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class OpencodeBackend(ExtraPathsUnsupported):
+    def list_models(self, context):
+        from .model_sources import opencode_models
+
+        return opencode_models(context, self.binary, self.capabilities.reasoning_effort.levels)
+
     def execution_configuration_namespaces(self, repo):
         import os
         if os.environ.get('OPENCODE_CONFIG_CONTENT'):

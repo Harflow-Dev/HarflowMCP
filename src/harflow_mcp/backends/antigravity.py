@@ -292,6 +292,11 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
 
 
 class AntigravityBackend(ExtraPathsUnsupported):
+    def list_models(self, context):
+        from .model_sources import antigravity_models
+
+        return antigravity_models(context, self.binary)
+
     def execution_configuration_namespaces(self, repo):
         from .config_namespaces import project_namespaces
         return {'external': (Path.home() / '.gemini', Path('/etc/antigravity')),

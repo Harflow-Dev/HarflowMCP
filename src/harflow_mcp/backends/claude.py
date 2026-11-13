@@ -363,6 +363,11 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend(ExtraPathsUnsupported):
+    def list_models(self, context):
+        from .model_sources import claude_aliases
+
+        return claude_aliases(context, self.binary, ("fable", "opus", "sonnet"))
+
     def observe_enforcement(self, enforcement, cwd, env, executable):
         from .claude_settings import observe
         return observe(enforcement, cwd, env, executable)

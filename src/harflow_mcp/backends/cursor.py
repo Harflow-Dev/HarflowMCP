@@ -120,6 +120,12 @@ class CursorBackend(ExtraPathsUnsupported):
         resume_may_start_fresh=True,
     )
 
+    def list_models(self, context):
+        from ..cursor_cli import NAMES, VERSION_RE
+        from .model_sources import cursor_models
+
+        return cursor_models(context, NAMES, VERSION_RE)
+
     def execution_configuration_namespaces(self, repo: Path) -> dict[str, tuple[Path, ...]]:
         return {
             "external": (Path.home() / ".cursor",),

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
 
 from .mcp_approval import MCPApprovalPolicy
+from .model_listing import ModelListContext, ModelListing
 
 Freedom = Literal["read_only", "write_in_repo", "publish", "unrestricted"]
 
@@ -544,6 +545,11 @@ def control_pipe_problem(backend: Any) -> str | None:
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
 
+    def list_models(self, context):
+        """The harness's selectable models (`backend-models.v1`); a backend with no measured source is unsupported."""
+        from .model_listing import unsupported
+        return unsupported()
+
     def observe_enforcement(self, enforcement, cwd, env, executable):
         """Optional, observational only; default backends report no inventory."""
         return enforcement
@@ -802,6 +808,8 @@ class ExtraPathsUnsupported:
 @runtime_checkable
 class Backend(Protocol):
     def verify_launch_identity(self) -> None: ...
+
+    def list_models(self, context: ModelListContext) -> ModelListing: ...
 
     name: str
     binary: str

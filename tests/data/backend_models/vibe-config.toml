@@ -1,0 +1,25 @@
+active_model = "devstral-small"
+vibe_code_enabled = true
+
+[[models]]
+name = "mistral-medium-3.5"
+provider = "mistral"
+alias = "mistral-medium-3.5"
+temperature = 0.2
+thinking = "high"
+
+[[models]]
+name = "devstral-small-latest"
+provider = "mistral"
+alias = "devstral-small"
+thinking = "off"
+
+[[models]]
+name = "local"
+provider = "llamacpp"
+alias = "local"
+
+[[providers]]
+name = "mistral"
+api_base = "https://api.example.invalid/v1"
+api_key_env_var = "MISTRAL_API_KEY"

@@ -1,0 +1,333 @@
+opencode/beam-free
+{
+  "id": "beam-free",
+  "providerID": "opencode",
+  "name": "Beam Free",
+  "family": "beam",
+  "api": {
+    "id": "beam-free",
+    "npm": "@ai-sdk/openai-compatible"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2026-10-05",
+  "variants": {
+    "low": {
+      "reasoningEffort": "low"
+    },
+    "medium": {
+      "reasoningEffort": "medium"
+    },
+    "high": {
+      "reasoningEffort": "high"
+    },
+    "xhigh": {
+      "reasoningEffort": "xhigh"
+    },
+    "max": {
+      "reasoningEffort": "max"
+    }
+  }
+}
+opencode/big-pickle
+{
+  "id": "big-pickle",
+  "providerID": "opencode",
+  "name": "Big Pickle",
+  "family": "big-pickle",
+  "api": {
+    "id": "big-pickle",
+    "npm": "@ai-sdk/openai-compatible"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2025-10-17",
+  "variants": {}
+}
+anthropic/claude-opus-4-5
+{
+  "id": "claude-opus-4-5",
+  "providerID": "anthropic",
+  "name": "Claude Opus 4.5 (latest)",
+  "family": "claude-opus",
+  "api": {
+    "id": "claude-opus-4-5",
+    "npm": "@ai-sdk/anthropic"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": true
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2025-11-24",
+  "variants": {
+    "low": {
+      "thinking": {
+        "type": "enabled",
+        "budgetTokens": 16000
+      },
+      "effort": "low"
+    },
+    "medium": {
+      "thinking": {
+        "type": "enabled",
+        "budgetTokens": 16000
+      },
+      "effort": "medium"
+    },
+    "high": {
+      "thinking": {
+        "type": "enabled",
+        "budgetTokens": 16000
+      },
+      "effort": "high"
+    }
+  }
+}
+openai/gpt-5
+{
+  "id": "gpt-5",
+  "providerID": "openai",
+  "name": "GPT-5",
+  "family": "gpt",
+  "api": {
+    "id": "gpt-5",
+    "npm": "@ai-sdk/openai"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2025-08-07",
+  "variants": {
+    "minimal": {
+      "reasoningEffort": "minimal",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "low": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "medium": {
+      "reasoningEffort": "medium",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "high": {
+      "reasoningEffort": "high",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    }
+  }
+}
+opencode-go/deepseek-v4-pro
+{
+  "id": "deepseek-v4-pro",
+  "providerID": "opencode-go",
+  "name": "DeepSeek V4 Pro",
+  "family": "deepseek-thinking",
+  "api": {
+    "id": "deepseek-v4-pro",
+    "npm": "@ai-sdk/openai-compatible"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": true,
+    "reasoning": true,
+    "attachment": false,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": {
+      "field": "reasoning_content"
+    }
+  },
+  "release_date": "2026-04-24",
+  "variants": {
+    "high": {
+      "reasoningEffort": "high"
+    },
+    "max": {
+      "reasoningEffort": "max"
+    }
+  }
+}
+opencode-go/gpt-5.6-luna
+{
+  "id": "gpt-5.6-luna",
+  "providerID": "opencode-go",
+  "name": "GPT-5.6 Luna",
+  "family": "gpt-luna",
+  "api": {
+    "id": "gpt-5.6-luna",
+    "npm": "@ai-sdk/openai"
+  },
+  "status": "active",
+  "capabilities": {
+    "temperature": false,
+    "reasoning": true,
+    "attachment": true,
+    "toolcall": true,
+    "input": {
+      "text": true,
+      "audio": false,
+      "image": true,
+      "video": false,
+      "pdf": true
+    },
+    "output": {
+      "text": true,
+      "audio": false,
+      "image": false,
+      "video": false,
+      "pdf": false
+    },
+    "interleaved": false
+  },
+  "release_date": "2026-07-09",
+  "variants": {
+    "none": {
+      "reasoningEffort": "none",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "low": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "medium": {
+      "reasoningEffort": "medium",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "high": {
+      "reasoningEffort": "high",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "xhigh": {
+      "reasoningEffort": "xhigh",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "max": {
+      "reasoningEffort": "max",
+      "reasoningSummary": "auto",
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    }
+  }
+}

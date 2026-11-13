@@ -268,6 +268,11 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class VibeBackend(ExtraPathsUnsupported):
+    def list_models(self, context):
+        from .model_sources import vibe_config
+
+        return vibe_config(context, self.binary)
+
     def execution_configuration_namespaces(self, repo):
         from .config_namespaces import environment_path, project_namespaces
         home = Path.home()

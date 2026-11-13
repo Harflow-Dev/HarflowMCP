@@ -234,6 +234,11 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class CodexBackend(ExtraPathsUnsupported):
+    def list_models(self, context):
+        from .model_sources import codex_cache
+
+        return codex_cache(context, self.binary, self.capabilities.reasoning_effort.levels)
+
     def qualification_features(self):
         from .codex_qualification import feature_specs
         return feature_specs()

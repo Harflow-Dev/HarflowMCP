@@ -1,0 +1,118 @@
+{
+  "fetched_at": "2026-11-13T05:47:45.888101Z",
+  "etag": "W/\"x\"",
+  "client_version": "0.164.0",
+  "identity": "0000000000000000000000000000000000000000000000000000000000000000",
+  "models": [
+    {
+      "slug": "gpt-6-astra",
+      "display_name": "GPT-6-Astra",
+      "description": "d",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "d"
+        },
+        {
+          "effort": "medium",
+          "description": "d"
+        },
+        {
+          "effort": "high",
+          "description": "d"
+        },
+        {
+          "effort": "xhigh",
+          "description": "d"
+        },
+        {
+          "effort": "max",
+          "description": "d"
+        },
+        {
+          "effort": "ultra",
+          "description": "d"
+        }
+      ],
+      "visibility": "list",
+      "priority": 2,
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-6.1-sol",
+      "display_name": "GPT-6.1-Sol",
+      "description": "d",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "d"
+        },
+        {
+          "effort": "medium",
+          "description": "d"
+        },
+        {
+          "effort": "high",
+          "description": "d"
+        },
+        {
+          "effort": "xhigh",
+          "description": "d"
+        },
+        {
+          "effort": "max",
+          "description": "d"
+        },
+        {
+          "effort": "ultra",
+          "description": "d"
+        }
+      ],
+      "visibility": "list",
+      "priority": 1,
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-reserve",
+      "display_name": "GPT Reserve",
+      "description": "d",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "d"
+        }
+      ],
+      "visibility": "hide",
+      "priority": 3
+    },
+    {
+      "slug": "gpt-6-luna",
+      "display_name": "GPT-6-Luna",
+      "description": "d",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "max",
+          "description": "d"
+        },
+        {
+          "effort": "high",
+          "description": "d"
+        }
+      ],
+      "visibility": "list",
+      "priority": 2,
+      "supported_in_api": true
+    },
+    {
+      "slug": "gpt-5.6-luna",
+      "display_name": "GPT-5.6-Luna",
+      "description": "d",
+      "supported_reasoning_levels": [],
+      "visibility": "list",
+      "priority": 9
+    }
+  ]
+}

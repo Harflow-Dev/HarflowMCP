@@ -1484,3 +1484,76 @@ execution policy remains authoritative. Deterministic clock and blocked-writer
 fixtures cover long responses, deferred interruption, timeout and cancellation
 while durable unknown bookkeeping is blocked. No OS descendant containment is
 inferred from closing stdin or receiving a native cancellation acknowledgement.
+
+## Model listing (`backend-models.v1`, measured 2026-11-13, macOS arm64)
+
+Measured with an empty temporary directory as the working directory, stdin from `/dev/null` and no model call.
+Versions: opencode 1.18.21, agy 1.5.7, cursor-agent 2026.10.22-27dcf5f (logged out) and 2026.11.11-b912975 (logged
+in), codex-cli 0.167.1, claude 2.1.322, vibe 3.0.2. The result is advisory and user-scoped: project and admin
+configuration layers are not read, and a harness may accept an id it does not list. `harflow-ctl backend-models`
+runs one bounded source per backend (8 s per subprocess, 10 s for the whole command, 1 MiB stdout except opencode's
+32 MiB, 64 KiB stderr, 8 MiB per file) and reports a source failure as `unavailable` with a reason, never as an
+empty list.
+
+### opencode (`cli_output`)
+
+- `opencode models` prints one `provider/model` id per line (199 ids). `opencode models --verbose` prints, per
+  model, a header line `provider/model` followed by a pretty-printed multi-line JSON object (not NDJSON), 15377
+  lines and about 288 KB in total, exit 0 in under 1 s. Keys include `id`, `providerID`, `name`, `family`, `api`,
+  `status`, `capabilities`, `release_date` and `variants`.
+- Harflow uses the verbose form: the id is the header, the label is `name`, and the header must equal
+  `providerID + "/" + id` or the whole output is `unparseable`.
+- `variants` is an object keyed by level name; 161 of 199 models have one, the rest an empty or absent one. Keys
+  seen: `low`, `medium`, `high`, `xhigh`, `max`, `none`, `minimal`. The levels reported are the keys that are also in
+  Harflow's `low`..`xhigh` vocabulary, in that order; no variants means `effort_levels: null`.
+- It works offline from `~/.cache/opencode/models.json` (mtime unchanged by the run) and wrote no files. Harflow
+  never passes `--refresh`.
+
+### antigravity (`cli_output`)
+
+- `agy models` exits 0 in about 2 s. stdout is one `<id>\t<label>` line per model (a real tab, 6 lines); stderr
+  carries the notice `Fetching available models...`. Effort is part of the id and label; there is no separate
+  field, so `effort_levels` is always `null`. No files were written. Offline behavior was not measured.
+
+### cursor (`cli_output`)
+
+- Logged out: `cursor-agent models` exits 1 with empty stdout and stderr
+  `Error: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.`
+  Harflow treats exit non-zero plus a stderr line beginning `Error: Authentication required.` as `auth_required`;
+  any other non-zero exit is `exit_nonzero`.
+- Logged in: exit 0 in about 2 s, stderr empty. stdout is `Available models`, a blank line, `<id> - <label>` per
+  model (140 models), a blank line and a `Tip:` line. The default is marked in the label
+  (`auto - Auto (current, default)`); a `(current)` or `(default)` suffix is stripped from the label and
+  `(default)` sets `default: true`. Effort and speed are encoded in the ids, so `effort_levels` is `null`.
+- `agent` is a generic name: before listing, each of `cursor-agent` and `agent` found on PATH is run with
+  `--version` inside the same bounded runner and accepted only when it prints `YYYY.MM.DD-<hex>`. A probe that
+  times out, floods or fails to spawn is `unavailable`, not `not_installed`, unless another candidate verifies.
+
+### codex (`harness_cache`)
+
+- `$CODEX_HOME` else `~/.codex`, file `models_cache.json` (465 KB). Top-level keys `fetched_at` (RFC 3339),
+  `etag`, `client_version` (0.164.0 here, older than the 0.167.1 CLI, so the cache can be stale), `identity` and
+  `models` (10). Each model has `slug`, `display_name`, `visibility` (`list` or `hide`), `priority`,
+  `supported_reasoning_levels` (a list of `{effort, description}`) and more.
+- Harflow lists only `visibility == "list"` rows, stably sorted by `priority`, id `slug`, label `display_name`;
+  `effort_levels` are the supported efforts that are also in `low`..`xhigh` (the cache also lists `max` and
+  `ultra`). `source_observed_at` is `fetched_at` normalised to UTC, or null when it is not RFC 3339.
+- `codex app-server` has a paginated `model/list`, but it needs a live initialize and was not invoked; Harflow reads
+  the cache and never spawns codex for a listing.
+
+### claude (`documented_aliases`)
+
+- `claude --help` documents `--model` as "an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a
+  model's full name" and `--effort` as `low`, `medium`, `high`, `xhigh`, `max`. There is no listing command, so the
+  three documented aliases are reported with `default: null` and `effort_levels: null`, and nothing is spawned.
+  The `claude` path is never symlink-resolved.
+
+### vibe (`config_aliases`)
+
+- `$VIBE_HOME/config.toml` else `~/.vibe/config.toml` (360 lines here). Each `[[models]]` table has `name`,
+  `provider`, `alias`, `temperature`, prices, `thinking` and more; `[[providers]]` tables reference secrets by
+  environment variable name and are not read. `active_model` may name a model that no `[[models]]` alias matches
+  (it does on this machine).
+- Harflow reports each alias as the id and `name` as the label, with `default: true` only for the alias equal to
+  `active_model` (the others `false`) and all `null` when none matches. The final path component may be a symlink
+  whose target must be a regular file. There is no effort field, so `effort_levels` is `null`.
