@@ -198,3 +198,24 @@ def test_selector_creation_failure_is_also_cleaned_up(monkeypatch):
     with pytest.raises(OSError):
         _run("import time; time.sleep(30)")
     assert pids[0].poll() is not None and pids[0].stdout.closed
+
+
+def test_group_is_killed_before_the_leader_is_reaped_on_a_normal_exit(monkeypatch):
+    processes, states = [], []
+    real_popen = bounded_process.subprocess.Popen
+    real_killpg = os.killpg
+
+    def spy(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def killpg(pgid, sig):
+        states.append(processes[0].returncode)  # None while the leader is still unreaped
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(bounded_process.subprocess, "Popen", spy)
+    monkeypatch.setattr(bounded_process.os, "killpg", killpg)
+    done = _run("print('hi')")
+    assert done.cause is None and done.returncode == 0 and done.stdout == b"hi\n"
+    assert states and states[0] is None

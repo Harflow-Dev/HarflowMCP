@@ -7,6 +7,7 @@ cap. It never raises for command problems: the outcome is a `Completed` with a `
 from __future__ import annotations
 
 import os
+import select
 import selectors
 import signal
 import subprocess
@@ -51,6 +52,44 @@ def _reap(process: subprocess.Popen) -> None:
         process.wait()
     except Exception:
         pass
+
+
+def _leader_exited(process: subprocess.Popen, deadline: float) -> bool:
+    """Wait until the leader has exited, without reaping it, so its process group id stays reserved.
+
+    Uses `waitid(WNOWAIT)` where Python has it and a kqueue exit event otherwise. A platform with neither (or a
+    registration failure) falls back to a reaping wait. False means the deadline passed first.
+    """
+    pid = process.pid
+    if hasattr(os, "waitid"):
+        while True:
+            try:
+                if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+                    return True
+            except ChildProcessError:
+                return True
+            if deadline - time.monotonic() <= 0:
+                return False
+            time.sleep(0.005)
+    if hasattr(select, "kqueue"):
+        try:
+            queue = select.kqueue()
+        except OSError:
+            queue = None
+        if queue is not None:
+            try:
+                event = select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                      select.KQ_NOTE_EXIT)
+                return bool(queue.control([event], 1, max(deadline - time.monotonic(), 0.0)))
+            except OSError:
+                pass  # already gone or not watchable: fall back
+            finally:
+                queue.close()
+    try:
+        process.wait(timeout=max(deadline - time.monotonic(), 0.0))
+        return True
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def run(
@@ -110,12 +149,9 @@ def run(
                     cause = OUTPUT_CEILING
                     break
                 buffers[descriptor] += chunk
-        if cause is None and process.poll() is None:
+        if cause is None and not _leader_exited(process, deadline):
             # Never wait past the deadline for the leader to exit.
-            try:
-                process.wait(timeout=max(deadline - time.monotonic(), 0.0))
-            except subprocess.TimeoutExpired:
-                cause = TIMEOUT
+            cause = TIMEOUT
     finally:
         # Guaranteed for any exception after the spawn: kill the group (also after a normal exit, so no
         # grandchild outlives the command), reap within a bound, close the pipes and the selector.
