@@ -3224,6 +3224,177 @@
         "task-pending-launch.v1"
       ],
       "valid": false
+    },
+    "invalid-s05-missing-backend-models.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.version-info",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": false,
+      "provenance": "Synthetic missing-capability handshake derived from canonical version-info; only backend-models.v1 removed; fixed platform and state root, no provider execution."
+    },
+    "ctl-backend-models-agent-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-antigravity.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-claude.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-codex.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-cursor.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-opencode.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-available-vibe.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-not-installed.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-truncated.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Synthetic: 401 generated opencode models, so the 400-row cap applies. Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-unavailable-auth-required.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-unavailable-exit-nonzero.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-unavailable-source-missing.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-unavailable-timeout.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-unavailable-unparseable.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-models.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-backend-models-usage-unknown-backend.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.13",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true,
+      "exit_code": 2,
+      "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
     }
   },
   "files": {
@@ -3257,7 +3428,7 @@
     "version-info-build-metadata.json": "716cd4511d89138ecbfd83023e4b90b7b2701198faec97f8ea5cfcac598126d2",
     "version-info-patch-backward.json": "b1750d92e988612e19d0476262db94aa4710e1a4905cd7b653fe31907a55ea9e",
     "version-info-patch-forward.json": "fef70f89fa6902d01279db5c48cc824c92a417f7d659dd96b9e635a7f0b7bb90",
-    "version-info.json": "42a8ace227ca80723db53a0a9b34cfb3e9801d2658075c3fefe725d5e2f33b83",
+    "version-info.json": "9b99124c5a76949981d8199e30457c4004886d3f6de7016a3ec70e96df262226",
     "workflow-definition-patch.json": "dec7079d69e46ff4d63da100bb12fc3fbfc1f120057da1d7346dd1f8fad05625",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -3418,14 +3589,14 @@
     "ctl-launch-resume-accepted.json": "fa3476357cd7a1ff3e4f6892d05276366491b1208bb17442ac62710646c2d2f6",
     "ctl-launch-resume-refused.json": "c24bd1e6e9b2e677329b92baee8287ed2fb2062c358fabaefbe9740b9c6133e3",
     "ctl-launch-resume-unknown.json": "72cb803f7d38172c13395a569c6753870dc60958d24361cbdd5aaf252602f799",
-    "ctl-launch-unknown-operation.json": "f7b52f5e643090f6cede4e2b6cf29b4448c6ea867868bf17328d6954bb2e5073",
-    "version-info-s05-additive.json": "e5b0192f7aac03049351e9aa0b959ecd8048dfd5abe10c721aa09c2b52a9866b",
-    "invalid-s05-missing-task-event-page.json": "d4553787fb2025a3cb5becfa3e2da38274fcde00930fe523034696dc74299db4",
-    "invalid-s05-missing-task-prompt.json": "5c95c3af6f89d963cd94ab0c15e5e69a32134b7101ccf9c21c28e58bfd2c99e7",
-    "invalid-s05-missing-task-successors.json": "0522231b641a6e2cb97dee8c13f7774de937bb7a5010f41240b9a4768667af4b",
-    "invalid-s05-missing-workflow-live-activity.json": "275f69b359cae35286e29b40415d85f09b810e9d80549aba4d3e61ebda3bfa69",
-    "invalid-s05-missing-statistics-cost-model.json": "73fe9a0cdbe88f3668c8d08245933e4c66aec54ce8185c7f0c7bc4446976067c",
-    "invalid-s05-missing-task-changes.json": "b806e9968128bcfba7a1cf4108274f791586655669fbf8271d34d2276e2d3599",
+    "ctl-launch-unknown-operation.json": "e6bf219ae0d71c23ea1fb763adf9457620d6ad30f898367151d605308ca2d4d4",
+    "version-info-s05-additive.json": "605bb0f3291ff6624d21b0004b403958c405bb764ce9854e62388b27a96f7aed",
+    "invalid-s05-missing-task-event-page.json": "f34a99e55ba55f98c19838fc7944efaf3c2d41fbc06bf4af3389bfd42d97a3bf",
+    "invalid-s05-missing-task-prompt.json": "f0faaed4e94e49b316d9734fe0b5ed07f91899eb012e756f424f8a75b7bb5c8d",
+    "invalid-s05-missing-task-successors.json": "fdc36490a77da0a38f8cd73778fe84371173e47f663138ad2e92b9b14e479398",
+    "invalid-s05-missing-workflow-live-activity.json": "e7b7c08aaa44b41b7ac4a6c991fb844e38e9e98c0991093c570e35ffe484cacf",
+    "invalid-s05-missing-statistics-cost-model.json": "d44063acdb67cda1b4b666e7bf67cba8e6b8ab00f5bcb1420bd9739a3773eec5",
+    "invalid-s05-missing-task-changes.json": "86a473a1044a957684fceaa5994f6aa927c33b2afe02ddacc2ccd650996e6e23",
     "ctl-task-list-watch-baseline.json": "eb1605bc8eaf4e071175a771d21ba8f85f6cf193ec3cd6321d0abf911a89e333",
     "ctl-task-list-watch-changed.json": "ea5903b44e3aa184df5d3767436c20591c38b28e1a32891405c9691d76187f7f",
     "ctl-task-list-watch-timeout.json": "bb18a7e0850c8d5b7b9e1bbb642f75d0b850a393160675d25c529f250ca4996b",
@@ -3433,7 +3604,7 @@
     "ctl-task-list-watch-unavailable.json": "9a2d5c20d5aa22248440a47a8d7deb77ea33569d2e253ea93ef8cc678f824584",
     "ctl-task-list-watch-cursor-invalid.json": "2ab11ab3831632e41980b133823652b64ca9ed2f903bfb783389d90b1a52968c",
     "ctl-task-list-watch-direct-caller-refused.json": "0f5a752b3d4d3e5fb16fc9421d8febc6d5222c858a8cbdc09ddd46ff6a0ea9ea",
-    "invalid-s05-missing-task-list-watch.json": "0cf870574ef88e5934b4f69380a59cc277a9bdc9c7bba999b0e3a239f30d76e3",
+    "invalid-s05-missing-task-list-watch.json": "d127fc409c0e2626a611b9bb71ff32ed91a15ad2a991683c3db3f30f2d5670cd",
     "ctl-steering-builder-ready.json": "217ede387a7544bb6f8ed5c8d8e33e2624a0a530f9f277340232ea18c81dc1d4",
     "ctl-steering-builder-admitted.json": "fa7add222d7e13471de1880de4b3c38d5ea0ab6434b6b11f97dc01b44873a1cc",
     "ctl-steering-builder-replayed.json": "eca7400452da88eaaa7d71ee8e2c118619eb9241fe817cc6d5080ddf10ebaed9",
@@ -3443,8 +3614,8 @@
     "ctl-steering-builder-command-refused.json": "aec6d103c2d0115ecf34e1abf07f2242e502b69a72271d917c68efbe57ac4eb2",
     "ctl-steering-builder-queued.json": "a6948ae0ccf34de4bff511d0b895a95396ec8c96e7632c29d584f1f63813bbf2",
     "ctl-steering-builder-summary.json": "16ace9b04b848a7bdc9d6d5114f8ef39829779e0b0a958910f4252ebd35dff49",
-    "invalid-steering-missing-workflow-steering-read.json": "fae41237146f2e0494a92b989abc6b2c97a6287eea7f6c8411e35adb11ee23a2",
-    "invalid-steering-missing-workflow-steering-builder.json": "64e287fca9dd83f73f26fbc5276407ecb5ffb02c77761118697a7cdf108a0f81",
+    "invalid-steering-missing-workflow-steering-read.json": "0ca04f5cdbeb1ab712b120c5ab763f964f92bc945edf567061173c45d4408e0b",
+    "invalid-steering-missing-workflow-steering-builder.json": "0fbebde777072efc835371d0863902dea283b38504cbbe31a8f497fd26191714",
     "ctl-steering-builder-committed.json": "ee2f8d0d6493cbf49f8981625246b34f2ac20fe1abfcc8d03f30741083ce0106",
     "ctl-steering-orchestrator-ready.json": "595ca16351ca9e20f335779a3e538537e507f3bd24be736886f760d2fd183982",
     "ctl-steering-orchestrator-admitted.json": "9cf21d5ca7694a678a3c7d555570ab68b9f8dad467cf3b546d76a78daf69193e",
@@ -3454,7 +3625,7 @@
     "ctl-steering-orchestrator-committed.json": "f2afb34f9f335f76ac782bbd5014f16d83ecea060e842f8882643b6d836c354f",
     "ctl-steering-orchestrator-history.json": "4ba9dc1769f067af44b2638315dcaed6e1fbcbc0f1eccdff0d871714eb0cfdc7",
     "ctl-steering-orchestrator-summary.json": "0d36a98a0f29269444227d6f96a666853ca595b50bdee4dcb29eb5f52bac9453",
-    "invalid-steering-missing-workflow-steering-orchestrator.json": "87f8a2c376524cec459af5bd8ddf025bfc00f4594e2ca20a153604401cf22e28",
+    "invalid-steering-missing-workflow-steering-orchestrator.json": "edce32a18d48d88f8630fe35f5990eeb75b25e3dd04e7941ac2f27a216a20067",
     "ctl-steering-orchestrator-queued.json": "67dcd8053899b3618103e3b9672d68ad31846b48c5a6149927df06b980618a3e",
     "ctl-steering-orchestrator-capture-unknown.json": "eac8c0ae9fc9e41d7ad9916b93ca76aa271bbde21647eb1d54b55337faae5933",
     "ctl-steering-orchestrator-stale.json": "745a6a5a87059aeba470c166bbec6589560e70d873bc9e46e2e7676e26c64261",
@@ -3473,8 +3644,8 @@
     "ctl-steering-worker-committed.json": "0a3c1ca32d0ca0635e025dd17d5e735728116177e21a4bdbdf3818c98d85f0c9",
     "ctl-steering-worker-capture-unknown.json": "fd07fc8262c4a0a28d4eec57ae9cd1fa46e12b9fee97dc6f06c1d5c022b1f5e0",
     "ctl-steering-worker-stale.json": "1c82e6d0e1dc9d9907ce52777852554fe090e66875ec294c0746bfdaf4ac1093",
-    "invalid-steering-missing-workflow-steering-worker.json": "0e2d5d32f2104f7fd4ed5f7e3bbc164e87dd146b2d8ed1804c87843967af9ab8",
-    "invalid-steering-missing-workflow-steering-window.json": "187e14e8f24924010ca922c4a2eeb0e776925a07f08780477bb21d59bb0f4dd4",
+    "invalid-steering-missing-workflow-steering-worker.json": "d4997e24525d00dc1fbdf5e92a16f9a757a7ac1aa66db071417864d0fc844066",
+    "invalid-steering-missing-workflow-steering-window.json": "ad31880b24f42499ac08ebc409f09bd654644510403f4e442718c0e50e392b6b",
     "ctl-steering-replan-ready.json": "9d08e96ad75f132d8dce5178ebc6b5445d42d9d52b801f1ea6e65accd5c6bb3a",
     "ctl-steering-replan-admitted.json": "3650e64f63bca0d93a89d9b207fca9913d796fab6541ea1e679a504a258741da",
     "ctl-steering-replan-settling.json": "ecdba0f08a4d408a8847fc3557316df7ada08b952441ade1a5fad1c42467d83e",
@@ -3484,7 +3655,7 @@
     "ctl-steering-replan-window-history.json": "2d1d017c8dd4e2a604818fee32fad32a64fb07e1b9f0eb63a240988ca3e3b05d",
     "ctl-steering-replan-expired.json": "b29d4f88e88e15f7097ae220eeaea9e40ac0c58df354445740e3e24af6480754",
     "ctl-steering-replan-spawn-race-unknown.json": "80425c54e7b414162478a461f945682ee11502e7e61f593e13be459224dad491",
-    "invalid-steering-missing-workflow-steering-replan.json": "fecb4032485f1649c2d25341f1311fbb64c955722bed0b396d28e9acb6d30294",
+    "invalid-steering-missing-workflow-steering-replan.json": "ccee835fd32ed274078949cb3c72518add856dc4196d25af7ed824722f4f913f",
     "ctl-conversation-empty.json": "da876550f833d219083aae969ba8b740be25f89b91d1660532c868820b32ebd4",
     "ctl-conversation-queue-fifo.json": "407630db05112fb7e6ad0a0d478edc5eac91984de6fc77eaeb9e836dba5fd2bb",
     "ctl-conversation-queue-replayed.json": "407630db05112fb7e6ad0a0d478edc5eac91984de6fc77eaeb9e836dba5fd2bb",
@@ -3521,7 +3692,7 @@
     "ctl-launch-continue-accepted.json": "fa3476357cd7a1ff3e4f6892d05276366491b1208bb17442ac62710646c2d2f6",
     "ctl-launch-continue-refused.json": "c24bd1e6e9b2e677329b92baee8287ed2fb2062c358fabaefbe9740b9c6133e3",
     "ctl-launch-continue-unknown.json": "72cb803f7d38172c13395a569c6753870dc60958d24361cbdd5aaf252602f799",
-    "invalid-s05-missing-task-continue.json": "b39efe0513e61f0cbed68dbf27dc3843344bfab5cfa820631422e7bd867824a6",
+    "invalid-s05-missing-task-continue.json": "f4801757f62d117a272e907f63199c608e0253bd7a9ec3e4d820da9d30f11554",
     "ctl-task-artifacts-empty.json": "8ce492a3e0b81620c30f3294cedb44f6458e723415a1f12531008261b5046a57",
     "ctl-task-artifacts-error.json": "4ef07af0792f2f5bfca427a61e5c43fb2c23ee1f8b2bba1d8bfd16f6ab946f42",
     "ctl-task-artifacts-next-page.json": "ace71a0616aca9f0d4d4c375812e1a0a40b860bae342a8dc5b527b1efdd94649",
@@ -3529,14 +3700,14 @@
     "ctl-task-artifacts-populated.json": "e0fabd66fbc2ec5d9abdbe3b0447809a3cf044313ce9e281e44f00361958e308",
     "ctl-task-artifacts-preparing.json": "180c083db49629fdcd2a578f0c33f7da3e0717fdc5dc6a56bcc77a179613e68d",
     "ctl-task-artifacts-unavailable.json": "f2776a28af1d2f4a2de6759bd8a0da057ddd6b8b4f5d44dd6cc5fdaeba0adc25",
-    "invalid-s05-missing-task-artifacts.json": "0b9cf127078322faedd77d84dc78958224b4c989ba8d61e88910ee4c31a222ab",
+    "invalid-s05-missing-task-artifacts.json": "483d8bf7c0d8331b8d2dc36081c2fa23c4d7b6c5a9a0246d424b6a53d90eb345",
     "ctl-continue-chain-stopped.json": "e6915b5bc5549a95a4815afbe3b39cc653877f24fe562adc57ff43226743a51b",
     "ctl-task-status-batch-continuation-stop.json": "7a4c68a79543eb22062168fc354a2b9877795001aa5191a0d1458bcc21d47da2",
     "ctl-task-status-brief-continuation-stopped.json": "cb43433a63131bb723e964047951420341576146efe7e51384480f2c7a5d2552",
     "ctl-task-status-continuation-not-stopped.json": "14de02360b981909985d0705b5e75af5406049172f2a05a9a0d78c8a0268925a",
     "ctl-task-status-continuation-stopped.json": "e20c60b65d0c5f9787af7a5f5cd3cbda84ff3d96b621c1e3c775803842bd158a",
     "ctl-task-status-continuation-unknown.json": "bd73907b4049d8f2c6f3c94f7f34d6bd2b6a4fd8d7954fe897c9c6ac3f4935ad",
-    "invalid-s05-missing-task-continuation-stop.json": "bc138cb7b9ebf299d9ce040d631ea250a4248e6f1a237452137869190192293e",
+    "invalid-s05-missing-task-continuation-stop.json": "e26a335ecec4ab709a94c3cd4416831e01141a640101f8178e54bdba17817431",
     "ctl-task-cancel-incomplete.json": "757673fa8b5ee0e0ae6cb6a8381d72da287fbe7dcd73bae68a21d2e4e0339eb0",
     "ctl-task-cancel-partial.json": "1eaad856b5cad7fbed7785d08c28bc38917a93e0d476266b4783020640ebfacc",
     "ctl-task-cancel-pending-child-withdrawal-unsettled.json": "74090cd8fb715fec110e5ccf660b50bfa5158bc7fc4a1822947e1e29441d6fd2",
@@ -3546,7 +3717,7 @@
     "ctl-task-cancel-truncated.json": "61124ea8c31165328ca7242b31d9a668deac112f50983ae9bd8ee67475751a45",
     "ctl-task-cancel-unknown.json": "d2c6b0db1c4fefb4645abf94b38eed6eea0f1274936c03faec7b10620e7689ed",
     "ctl-task-cancel-unrecorded.json": "74a39500e010f502bd066a4ba46fe0d35b819f84a01b3a66f5b919a1b4ec8f78",
-    "invalid-s05-missing-task-cancel-cascade.json": "1264c3441194b50821cb8f71c1b83909c163d84931672322ccd415b6ad758ec7",
+    "invalid-s05-missing-task-cancel-cascade.json": "5872f468a81e247d90b8180113664777789b3110812b158790170b0023b95b45",
     "ctl-task-pending-bound.json": "09e30c5ab7d72fac8f18c27a42110b8f4d526de3b4ccfa4ea02f110a5d0b0469",
     "ctl-task-pending-cursor-invalid.json": "89eb8d3bba8515dd164e5a053a62fcda81ecb0ca3965e07941809ca706fd8fdf",
     "ctl-task-pending-empty.json": "efb0a1af47ba3a053449ef839165497062bb4bdd956fb5286f0d9af905f65b7b",
@@ -3560,6 +3731,22 @@
     "ctl-task-pending-status-recorded.json": "c1bf2b0e56b668809109774c11d2bfb3ecf27bb48e1e64aa642df2d8e670dd34",
     "ctl-task-pending-status-refused.json": "e8a9eda941a8c51b81f93e2d5f95e32b0e75fc7bc45a12640758bb2164a4fb90",
     "ctl-task-pending-status-unknown.json": "5e8a863b7ff24c18e008ae5c0c8aafe9d171fea38980f91d7985cb69f2ef7ff0",
-    "invalid-s05-missing-task-pending-launch.json": "911c20a7b4bd2c39143ba27f4fe10f8c38c9d61b62cc1c8701cea7f13965ce85"
+    "invalid-s05-missing-task-pending-launch.json": "058dc1eb3b062bbea49d0e9c19feaf5a1a7ab1548605c8ba786929ccbc98a439",
+    "invalid-s05-missing-backend-models.json": "42a8ace227ca80723db53a0a9b34cfb3e9801d2658075c3fefe725d5e2f33b83",
+    "ctl-backend-models-agent-refused.json": "d6f330a9e77af8842c343735a657427a215ebd6ea2291d99e51994daf9a0160b",
+    "ctl-backend-models-available-antigravity.json": "712d4440a86fed421592aab7af0dc8db7c94621caf1908a7cd668181636ea3af",
+    "ctl-backend-models-available-claude.json": "a7a862863e7f6f0742ef8de0b57937751f903a876e4416c5c3b9a8ee91004901",
+    "ctl-backend-models-available-codex.json": "b3428b0ab2a059c1a42cd5f43791c84578e58f114bf081dc4a82651067cde283",
+    "ctl-backend-models-available-cursor.json": "de87d00025abfdd1b8785487ce5f2c2d3fced50a91445f7db7c91a66deb75a26",
+    "ctl-backend-models-available-opencode.json": "86870bbba215f369fe106e20ab5e74734b765edd17e4e4d390e6141150fd1ea1",
+    "ctl-backend-models-available-vibe.json": "94a07b99d738a07b59990f8ab9f9af847740149876417e5da0737d8ea891aa50",
+    "ctl-backend-models-not-installed.json": "4519064fb85d539ae98fd204fce5c63d3636f4a412080a41e206a0d11ebd608a",
+    "ctl-backend-models-truncated.json": "b36832a0601ce7ec49743942c5f329136c799d0d7dd87694b327ce0edc53868e",
+    "ctl-backend-models-unavailable-auth-required.json": "820a39234183b39ea677e8497e8eebba631632a1fa48adc1a48754585cd014db",
+    "ctl-backend-models-unavailable-exit-nonzero.json": "40072b7c2e67388d38ee873fa540a00f05ca7375cb70014dea4af90a9f23ce63",
+    "ctl-backend-models-unavailable-source-missing.json": "8aa0bb823cb8e3725e5e0d6d9b4d467ddb0794fc7bf16f82498b74ce0846b6a6",
+    "ctl-backend-models-unavailable-timeout.json": "fa91e8a9681b63b5c7d935cf4e0b378641886d340cbebdb3be3d988f93a4be25",
+    "ctl-backend-models-unavailable-unparseable.json": "3344901f833b08896429fd3c07191edde1959e57046439d70d44e3f299959ee7",
+    "ctl-backend-models-usage-unknown-backend.json": "48f3e44ac2dc57e8fc6a673d12314460cfffb7d12754cf076262e894b694b880"
   }
 }

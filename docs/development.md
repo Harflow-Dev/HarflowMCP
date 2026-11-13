@@ -94,3 +94,19 @@ do not qualify installed binaries, process cancellation, paid providers, the nat
 Rust adoption. See [the contract](contracts.md#pending-launch-discovery-task-pending-launchv1)
 for coverage and cursor limits. The complete canonical fixture bundle must be re-vendored before
 consumer adoption; a current source capability must not be inferred from product version alone.
+
+### Backend model listing qualification
+
+`backend-models.v1` is an additive ctl read capability in source, negotiated independently of the product
+version. `tests/test_bounded_process.py` covers the two-pipe runner (deadline kill of a whole process group,
+output ceilings, spawn failure, stdin from `/dev/null`); `tests/test_backend_models.py` covers each backend's
+source against recorded outputs under `tests/data/backend_models` and fake binaries (every state and reason,
+bounds, effort intersection, file-source hardening, and that a harness that is not installed spawns and reads
+nothing); `tests/test_ctl_backend_models.py` covers the caller gate, the shared 10 second budget, config-only
+dispatch and the printed-line bound through `ctl.main`. `scripts/generate-backend-models-fixtures.py --check`
+and `validate_backend_models` in `conformance/oracles.py` cover the fixtures. These checks use fake harnesses
+only: they do not qualify an installed CLI version, a logged-in Cursor account, the native consumer or Rust
+adoption. Re-measure and update `docs/backend-cli-facts.md` when a harness changes its listing output. Run the
+fixture generators in this order after any change that touches the version-info capability list: steering,
+approval, handshake, pending-launch, the remaining generators, then backend-models; then run every generator
+with `--check`.

@@ -11,11 +11,11 @@ import pytest
 
 from conformance.oracles import (
     ConformanceError, strict_json, validate_envelope, validate_version_info,
-    verify_manifest, validate_cancel_observation,
+    verify_manifest, validate_cancel_observation, validate_backend_models,
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = '56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55'
+DIGEST = '092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1'
 
 
 def envelope(format='harflow.ctl'):
@@ -86,7 +86,7 @@ def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)
-    assert len(document['files']) == 334
+    assert len(document['files']) == 350
 
 
 def test_cancellation_fixtures_obey_binding_shape_and_capability():
@@ -101,6 +101,68 @@ def test_cancellation_fixtures_obey_binding_shape_and_capability():
     negative = strict_json((BUNDLE / 'invalid-s05-missing-task-cancel-cascade.json').read_bytes())
     with pytest.raises(ConformanceError, match='missing capabilities'):
         validate_version_info(negative, negative['state_root'], ['task-cancel-cascade.v1'])
+
+
+def test_backend_models_fixtures_obey_the_independent_shape_and_capability():
+    manifest = verify_manifest(BUNDLE / 'manifest.json')
+    names = sorted(name for name in manifest['files'] if name.startswith('ctl-backend-models-'))
+    assert len(names) == 15
+    states = set()
+    for name in names:
+        doc = strict_json((BUNDLE / name).read_bytes())
+        case = manifest['cases'][name]
+        if 'error' in doc:
+            assert case['required_capabilities'] == [] and doc['error']['code'] in {'agent_caller', 'usage'}
+            continue
+        assert case['required_capabilities'] == ['backend-models.v1']
+        assert 'Actual ctl.main' in case['provenance']
+        states.add(validate_backend_models(doc)['state'])
+    assert states == {'available', 'not_installed', 'unavailable'}
+    negative = strict_json((BUNDLE / 'invalid-s05-missing-backend-models.json').read_bytes())
+    with pytest.raises(ConformanceError, match='missing capabilities'):
+        validate_version_info(negative, negative['state_root'], ['backend-models.v1'])
+    assert 'backend-models.v1' in strict_json((BUNDLE / 'version-info.json').read_bytes())['capabilities']
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda r: r.update(extra=1),
+    lambda r: r.update(state='invented'),
+    lambda r: r.update(reason='timeout'),
+    lambda r: r.update(source='elsewhere'),
+    lambda r: r.update(scope='project'),
+    lambda r: r.update(advisory=False),
+    lambda r: r.update(harness_version='1.0'),
+    lambda r: r.update(observed_at='2026-11-13T12:00:00'),
+    lambda r: r.update(source_observed_at='yesterday'),
+    lambda r: r.update(truncated=1),
+    lambda r: r.update(dropped_count=-1),
+    lambda r: r['models'].append(dict(r['models'][0])),
+    lambda r: r['models'][0].update(id='has space'),
+    lambda r: r['models'][0].update(id='x' * 257),
+    lambda r: r['models'][0].update(label='y' * 257),
+    lambda r: r['models'][0].update(default='yes'),
+    lambda r: r['models'][0].update(effort_levels=['max']),
+    lambda r: r['models'][0].update(effort_levels=['high', 'low']),
+    lambda r: r['models'][0].pop('label'),
+    lambda r: r.update(models=[dict(id=f'm{i}', label='l', default=None, effort_levels=None) for i in range(401)]),
+])
+def test_backend_models_oracle_rejects_invalid_documents(mutate):
+    doc = copy.deepcopy(strict_json((BUNDLE / 'ctl-backend-models-available-opencode.json').read_bytes()))
+    mutate(doc['result'])
+    with pytest.raises(ConformanceError):
+        validate_backend_models(doc)
+
+
+def test_backend_models_oracle_requires_empty_lists_for_failure_states_and_a_reason():
+    doc = copy.deepcopy(strict_json((BUNDLE / 'ctl-backend-models-unavailable-timeout.json').read_bytes()))
+    validate_backend_models(doc)
+    doc['result']['models'] = [dict(id='a', label='a', default=None, effort_levels=None)]
+    with pytest.raises(ConformanceError):
+        validate_backend_models(doc)
+    doc['result']['models'] = []
+    doc['result']['reason'] = None
+    with pytest.raises(ConformanceError):
+        validate_backend_models(doc)
 
 
 @pytest.mark.parametrize('changes', [

@@ -1,0 +1,1 @@
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.13","result":{"advisory":true,"backend":"codex","dropped_count":0,"harness_version":null,"models":[],"observed_at":"2026-11-13T12:00:00Z","reason":"source_missing","scope":"user","source":"harness_cache","source_observed_at":null,"state":"unavailable","truncated":false},"v":1}

@@ -12,7 +12,7 @@ from conformance.runner import (isolated_environment, main, publish_report, run_
                                 validate_operation, validate_report)
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts/v1/manifest.json'
-DIGEST = '56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55'
+DIGEST = '092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1'
 
 
 def fake_engine(tmp_path, addition=''):

@@ -108,7 +108,7 @@ def generate():
     capabilities = ('task-event-page.v1', 'task-prompt.v1', 'task-successors.v1',
                     'workflow-live-activity.v1', 'statistics-cost-model.v1', 'task-changes.v1',
                     'task-list-watch.v1', 'task-continue.v1', 'task-artifacts.v1', 'task-continuation-stop.v1',
-                    'task-cancel-cascade.v1')
+                    'task-cancel-cascade.v1', 'backend-models.v1')
     variants = [('version-info-s05-additive.json',
                  {**version, 'optional_future_field': {'value': True},
                   'capabilities': version['capabilities'] + ['future-capability.v99']}, [], True)]
@@ -123,6 +123,8 @@ def generate():
                                       format=VERSION_INFO_FORMAT, required_capabilities=required, valid=valid)
         if name == 'invalid-s05-missing-task-continuation-stop.json':
             manifest['cases'][name]['provenance'] = 'Synthetic missing-capability handshake derived from canonical version-info; only task-continuation-stop.v1 removed; fixed platform and state root, no provider execution.'
+        if name == 'invalid-s05-missing-backend-models.json':
+            manifest['cases'][name]['provenance'] = 'Synthetic missing-capability handshake derived from canonical version-info; only backend-models.v1 removed; fixed platform and state root, no provider execution.'
         if name == 'invalid-s05-missing-task-cancel-cascade.json':
             manifest['cases'][name]['provenance'] = 'Synthetic missing-capability handshake derived from canonical version-info; only task-cancel-cascade.v1 removed; fixed platform and state root, no provider execution.'
     output[bundle / 'manifest.json'] = (json.dumps(manifest, indent=2, ensure_ascii=False) + '\n').encode()

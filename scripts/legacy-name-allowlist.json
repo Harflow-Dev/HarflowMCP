@@ -436,5 +436,17 @@
     "literal": "PB_TASK_ID",
     "reason": "Self-check double that strips the legacy caller variables the engine still honours as agent signals.",
     "count": 2
+  },
+  {
+    "file": "tests/test_ctl_backend_models.py",
+    "literal": "PB_DEPTH",
+    "reason": "Prove the legacy worker-depth marker refuses a model listing before any harness lookup.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_ctl_backend_models.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Prove the legacy caller marker refuses a model listing before any harness lookup.",
+    "count": 1
   }
 ]

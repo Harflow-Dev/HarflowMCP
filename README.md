@@ -27,6 +27,11 @@ Direct human clients can discover pre-record launch attempts after restart with
 uncertainty; cancellation support describes a mechanism and grants no permission. See the
 [pending launch contract](docs/contracts.md#pending-launch-discovery-task-pending-launchv1).
 
+`harflow-ctl backend-models --backend NAME --json` (direct callers only) lists the models one installed harness
+says is selectable: an advisory, user-scoped snapshot from the harness's own output, cache or configuration,
+never a model call. A source that cannot be read is reported as `unavailable` with a reason, not as an empty
+list. See the [backend model listing contract](docs/contracts.md#backend-model-listing-backend-modelsv1).
+
 While bounded reads are still establishing caller authority, preparation responses expose only
 neutral status, source and reason, with empty content and unknown counts. This also applies to a
 cold index for a direct caller; retry until authority is established. See

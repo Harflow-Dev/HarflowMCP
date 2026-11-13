@@ -20,7 +20,9 @@ and `resume` fork a process that owns the new task until it settles (`detached.p
 reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
 `list_backends` — including bounded extra-path support) — plus cached binary-bound feature qualification. Discovery may inspect the installed version and binary hash but never starts provider self-tests. Every command prints one Harflow ctl v1 JSON document
-with `--json`; command payloads retain their existing fields. The separate version-info command
+with `--json`; command payloads retain their existing fields. `backend-models` (`backend-models.v1`) reports what one harness says
+is selectable on this machine through `Backend.list_models`: config-only, advisory and user-scoped, refused for agent callers, and it
+never reads task history beyond the caller gate or opens a state root for writing. The separate version-info command
 reports compatibility without importing the task runtime through the installed lazy entrypoint.
 """
 
@@ -223,6 +225,13 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "backends", help="list the registered backends, PATH presence and declared capabilities"
     )
     backends_p.add_argument("--json", action="store_true")
+
+    models_p = sub.add_parser(
+        "backend-models",
+        help="list the models one harness reports as selectable (advisory, user-scoped, direct callers only; backend-models.v1)",
+    )
+    models_p.add_argument("--backend", required=True, choices=tuple(backends.BACKENDS))
+    models_p.add_argument("--json", action="store_true")
 
     qualify_p = sub.add_parser("qualify", help="run isolated, no-paid backend feature self-tests and refresh cached results")
     qualify_p.add_argument("backend", choices=sorted(backends.BACKENDS))
@@ -745,6 +754,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         events_p,
         prompt_p,
         *workflow_parsers,
+        models_p,
     )
 
 
@@ -841,6 +851,74 @@ def _cmd_backends(args: argparse.Namespace) -> int:
         for entry in entries:
             state = "installed" if entry["installed"] else "not found on PATH"
             print(f"{entry['backend']}  {state}")
+    return 0
+
+
+def _model_listing_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _backend_models_gate(budget: Any) -> tuple[str, str] | None:
+    """`(code, reason)` when the caller is, or may be, an agent; None for a verified direct caller.
+
+    Environment markers refuse first, with no I/O. Then, like `task-list-watch`, lineage runs under a shared
+    `initialize=False` state session, which never creates or writes state. Only a missing state root proceeds
+    (no task in a store that does not exist can be the caller); any other store problem fails closed.
+    """
+    refusal = takeover.env_agent_refusal()
+    if refusal is not None:
+        return refusal
+    from .state_layout import resolve_layout
+    from . import task_list_watch
+    try:
+        layout = resolve_layout()
+        with state_session(layout, initialize=False,
+                           timeout=min(task_list_watch.SETUP_OVERHEAD_SECONDS, max(0.0, budget.remaining()))):
+            return takeover.caller_refusal(layout.tasks_directory)
+    except StateOwnershipError as exc:
+        if getattr(exc, "reason", None) == "missing_root":
+            return None
+        return ("caller_undecidable", f"selected state is unavailable ({getattr(exc, 'reason', None) or 'unknown'})")
+    except Exception as exc:
+        return ("caller_undecidable", f"caller detection failed ({type(exc).__name__})")
+
+
+def _cmd_backend_models(args: argparse.Namespace) -> int:
+    import logging
+    import tempfile
+    from .backends import model_listing as ml
+    budget = ml.Budget()  # one allowance for the gate and every spawn
+    refusal = _backend_models_gate(budget)
+    if refusal is not None:
+        return _fail(args, refusal[0], "Backend model listing requires a verified direct caller.",
+                     {"coverage": "unknown", "check": "direct_caller_required"})
+    backend = backends.get(args.backend)
+    observed_at = _model_listing_clock()
+    if budget.expired():
+        listing = ml.unavailable(ml.TIMEOUT, None)
+    else:
+        try:
+            with tempfile.TemporaryDirectory(prefix="harflow-models-") as cwd:
+                context = ml.ModelListContext(environ=dict(os.environ), cwd=cwd, budget=budget, now=_model_listing_clock)
+                listing = backend.list_models(context)
+        except OSError:
+            listing = ml.unavailable(ml.SPAWN_FAILED, None)
+        except Exception:
+            logging.getLogger(__name__).exception("backend model listing failed for %s", args.backend)
+            listing = ml.unavailable(ml.UNPARSEABLE, None)
+
+    def encode(result: dict[str, Any]) -> str:
+        return json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result}))
+
+    result = ml.fit_to_line(ml.result_document(backend.name, listing, observed_at), encode)
+    if args.json:
+        print(encode(result))
+    elif result["state"] == ml.AVAILABLE and result["models"]:
+        for row in result["models"]:
+            print(f"{row['id']}\t{row['label']}")
+    else:
+        detail = f": {result['reason']}" if result["reason"] else (": no models listed" if result["state"] == ml.AVAILABLE else "")
+        print(f"{result['state']}{detail}")
     return 0
 
 
@@ -2009,6 +2087,9 @@ def _main(argv: list[str] | None = None) -> int:
                 print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
                 return 0
             return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), exc.as_dict())
+    if args.command == "backend-models":
+        # Config-only: the gate may inspect lineage under a read-only state session, but no state is created or written.
+        return _cmd_backend_models(args)
     if args.command == "task-list-page" and args.predecessor_task_id is not None:
         from .takeover import caller_refusal
         refusal = caller_refusal(default_log_dir())

@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '56ac4ce3c762ebb3b40855fc6defa47636076cb9b2ebdda9d7b207dce350fb55'
+PINNED_MANIFEST_SHA256 = '092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -91,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 334 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 350 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
@@ -142,6 +142,70 @@ def validate_cancel_observation(doc):
     return value
 
 
+BACKEND_MODEL_STATES = {'available', 'not_installed', 'unsupported', 'unavailable'}
+BACKEND_MODEL_SOURCES = {'cli_output', 'harness_cache', 'documented_aliases', 'config_aliases'}
+BACKEND_MODEL_KEYS = {'backend', 'state', 'reason', 'source', 'scope', 'advisory', 'harness_version', 'source_observed_at',
+                      'observed_at', 'truncated', 'dropped_count', 'models'}
+BACKEND_MODEL_EFFORTS = ('low', 'medium', 'high', 'xhigh')
+BACKEND_MODEL_LINE_LIMIT = 262144
+
+
+def _rfc3339(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})', value):
+        raise ConformanceError('invalid backend-models timestamp')
+    try:
+        if datetime.fromisoformat(value).utcoffset() is None:
+            raise ValueError('missing timezone')
+    except ValueError as exc:
+        raise ConformanceError('invalid backend-models timestamp') from exc
+
+
+def validate_backend_models(doc, expected_version='0.0.13'):
+    """Shape of a successful `backend-models` reply (`backend-models.v1`), checked without the engine."""
+    validate_envelope(doc, 'harflow.ctl', expected_version)
+    result = doc.get('result')
+    if not isinstance(result, dict) or set(result) != BACKEND_MODEL_KEYS:
+        raise ConformanceError('invalid backend-models result')
+    if not isinstance(result['backend'], str) or not result['backend']:
+        raise ConformanceError('invalid backend-models backend')
+    state, reason, source = result['state'], result['reason'], result['source']
+    if state not in BACKEND_MODEL_STATES:
+        raise ConformanceError('invalid backend-models state')
+    if (reason is not None and (not isinstance(reason, str) or not reason)) or (state == 'unavailable') != (reason is not None):
+        raise ConformanceError('invalid backend-models reason')
+    if source is not None and source not in BACKEND_MODEL_SOURCES:
+        raise ConformanceError('invalid backend-models source')
+    if result['scope'] != 'user' or result['advisory'] is not True or result['harness_version'] is not None:
+        raise ConformanceError('invalid backend-models scope')
+    if result['source_observed_at'] is not None:
+        _rfc3339(result['source_observed_at'])
+    _rfc3339(result['observed_at'])
+    if type(result['truncated']) is not bool or type(result['dropped_count']) is not int or result['dropped_count'] < 0:
+        raise ConformanceError('invalid backend-models counters')
+    models = result['models']
+    if not isinstance(models, list) or len(models) > 400 or (state != 'available' and (models or result['truncated'])):
+        raise ConformanceError('invalid backend-models list')
+    seen = set()
+    for row in models:
+        if not isinstance(row, dict) or set(row) != {'id', 'label', 'default', 'effort_levels'}:
+            raise ConformanceError('invalid backend-models row')
+        identifier, label = row['id'], row['label']
+        if (not isinstance(identifier, str) or not identifier or len(identifier.encode('utf-8')) > 256
+                or re.search(r'[\s\x00-\x1f\x7f]', identifier) or identifier in seen
+                or not isinstance(label, str) or len(label.encode('utf-8')) > 256 or re.search(r'[\x00-\x1f\x7f]', label)):
+            raise ConformanceError('invalid backend-models identity')
+        seen.add(identifier)
+        levels = row['effort_levels']
+        if row['default'] not in (None, True, False) or (levels is not None and (
+                not isinstance(levels, list) or len(set(levels)) != len(levels)
+                or any(level not in BACKEND_MODEL_EFFORTS for level in levels)
+                or levels != [level for level in BACKEND_MODEL_EFFORTS if level in levels])):
+            raise ConformanceError('invalid backend-models row values')
+    if len(json.dumps(doc).encode('utf-8')) > BACKEND_MODEL_LINE_LIMIT:
+        raise ConformanceError('backend-models line exceeds its byte limit')
+    return result
+
+
 def validate_event_page(doc, expected_version='0.0.13'):
     validate_envelope(doc, 'harflow.ctl', expected_version)
     result = doc.get('result')
@@ -163,7 +227,7 @@ def validate_fake_observation(observation, ledger):
 
 # Capabilities a fresh handshake must show before each public command is run (shared by the controlled profiles).
 COMMAND_CAPABILITIES = {'task-events': 'task-event-page.v1', 'task-prompt': 'task-prompt.v1', 'send': 'messaging.v1',
-                        'cancel-message': 'messaging.v1'}
+                        'cancel-message': 'messaging.v1', 'backend-models': 'backend-models.v1'}
 
 
 def required_capabilities(argv):

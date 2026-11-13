@@ -39,13 +39,14 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `task-pending-launch.v1`, `conversation-delivery.v1`, `workflow-steering-replan.v1`, `workflow-steering-worker.v1`, `workflow-steering-window.v1`, `workflow-steering-read.v1`, `workflow-steering-builder.v1`, `workflow-steering-orchestrator.v1`, `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, `task-list-watch.v1`, `task-continue.v1`, `task-artifacts.v1`, `task-continuation-stop.v1`, `task-cancel-cascade.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`, `task-list-watch.v1` for `task-list-watch`, `task-continue.v1` for `continue`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities` listing every capability this engine implements (currently `task-pending-launch.v1`, `conversation-delivery.v1`, `workflow-steering-replan.v1`, `workflow-steering-worker.v1`, `workflow-steering-window.v1`, `workflow-steering-read.v1`, `workflow-steering-builder.v1`, `workflow-steering-orchestrator.v1`, `workflow-shared-interactions.v1`, `interaction-events.v1`, `workflow-attention-checkpoints.v1`, `phase-slots.v1`, `ctl.v1`, `setup.v1`, `events.v1`, `version-info.v1`, `state-recovery.v1`, `caller-approvals.monitor-respond.v1`, `statistics-page.v1`, `backend-qualification.v1`, `messaging.v1`, `limit-hits.v1`, `workflow-limit-hits.v1`, `task-event-page.v1`, `task-prompt.v1`, `task-successors.v1`, `workflow-live-activity.v1`, `statistics-cost-model.v1`, `task-changes.v1`, `task-list-watch.v1`, `task-continue.v1`, `task-artifacts.v1`, `task-continuation-stop.v1`, `task-cancel-cascade.v1`, `backend-models.v1`, in that order; the authoritative list is `wire_contracts.CAPABILITIES`). Each additive capability qualifies its own command and operations (`task-event-page.v1` for `task-events`, `task-prompt.v1` for `task-prompt`, `task-successors.v1` for `task-list-page --predecessor-task-id`, `workflow-live-activity.v1` for live `workflow-inspect --view activity`, `statistics-cost-model.v1` for the cost and observed-model facts and `cost_coverage` of `statistics-page`, `task-changes.v1` for `task-changes`, `task-list-watch.v1` for `task-list-watch`, `task-continue.v1` for `continue`). `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
 `task-artifacts.v1`, `task-continuation-stop.v1` and `task-cancel-cascade.v1` qualify bounded artifact metadata
 reads, advisory ctl continuation-stop observations and final ctl cancellation observations;
-`task-pending-launch.v1` qualifies `task-pending-page` and `task-pending-status`.
+`task-pending-launch.v1` qualifies `task-pending-page` and `task-pending-status`; `backend-models.v1` qualifies
+`backend-models`.
 
 Consumers perform one fresh version-info probe immediately before each ordinary ctl or setup operation, with the same effective HOME, environment and working-directory policy. Setup probes the paired ctl from the selected runtime. Validate product line, required formats/capabilities, platform and selected state-root equality before launching the requested command. Historical ctl without version-info is incompatible. Approval is not cached across operations. This handshake does not establish authenticity or immutable runtime identity, and does not permit concurrent incompatible writers to share a store. Production managed runtime integration remains unavailable.
 
@@ -2823,3 +2824,81 @@ incomplete inventory. A final page or a crafted cursor alone cannot certify inve
 Normal pagination can advance through an empty filtered window with `has_more: true`. No page
 provides a transactional absence claim. Public operation errors carry `error.data.coverage:
 "unknown"`; consumers retain uncertainty rather than clearing pending state or Continue receipts.
+
+## Backend model listing (`backend-models.v1`)
+
+`harflow-ctl backend-models --backend NAME [--json]` reports which models one harness says is selectable on
+this machine. It is a read-only, advisory, user-scoped view: the harness may accept an id it does not list,
+list one it will refuse, or have changed since the source was written. It never starts a model call, never
+passes `--repo`, and does not read project or admin configuration layers (`scope: "user"`). It has no MCP
+counterpart and is separate from `backends`, which stays probe-free and never lists models. `NAME` is one of the
+registered backends; an unknown name is the standard usage error (exit 2, a `usage` error document with
+`--json`). Negotiate the capability from a fresh `version-info` handshake; an older engine answers the command
+with a usage error, which a consumer treats as unsupported.
+
+**Caller gate.** Agent callers are refused before anything else, with exit 1 and
+`error.code` `agent_caller` or `caller_undecidable`, message `Backend model listing requires a
+verified direct caller.` (the reason is not repeated) and `error.data` `{"coverage": "unknown", "check": "direct_caller_required"}`. The
+gate runs, in order and before any harness lookup, file read or subprocess: the environment markers
+(the task-id and worker-depth variables, including the legacy spellings the takeover gate also refuses) with no I/O; then the lineage check under a
+shared `initialize=False` state session with a 2 second lock timeout, which never creates, initializes or
+writes state. Only a missing selected state root (no task record can exist, so no Harflow task can be the
+caller) proceeds; an unmarked existing root, a busy lock, an incompatible store, any other ownership failure or
+an unexpected error refuses with `caller_undecidable`. A fresh install with no `~/.harflow` therefore works.
+Stated limits: a non-Harflow agent that carries no marker is not detected, as with other environment-gated
+reads; and a Codex agent started by an engine on a non-default root loses `HARFLOW_STATE_ROOT` in its shell
+(`shell_environment_policy.inherit = "core"`), so it is checked against the default root.
+
+**Result.** Success exits 0 with `result`:
+
+| Field | Meaning |
+| --- | --- |
+| `backend` | The requested backend name. |
+| `state` | `available`, `not_installed`, `unsupported` or `unavailable`. |
+| `reason` | `null`, or for `unavailable`: `timeout`, `exit_nonzero`, `auth_required`, `unparseable`, `source_missing`, `output_ceiling` or `spawn_failed`. |
+| `source` | `cli_output`, `harness_cache`, `documented_aliases`, `config_aliases` or `null` (also `null` for `unsupported`, and when the budget ran out before a source was chosen). |
+| `scope` | Always `"user"`. |
+| `advisory` | Always `true`. |
+| `harness_version` | Always `null` in v1; the field is nullable for later sources. |
+| `source_observed_at` | RFC 3339 UTC time the source says it was written (Codex `fetched_at`), else `null`. |
+| `observed_at` | RFC 3339 UTC time of this read. |
+| `truncated` | `true` when valid rows were removed by the 400-row cap or the byte limit. |
+| `dropped_count` | Rows removed as invalid or duplicate; rows removed for `truncated` are not counted here. |
+| `models` | Rows of `id`, `label`, `default` (`true`, `false` or `null` when the source does not say) and `effort_levels`. |
+
+A per-backend failure is a successful `unavailable` result with an empty list, never "no models". A harness that
+is not on PATH is `not_installed` and nothing is read or spawned for it. Consumers must tolerate unknown `state`,
+`reason` and `source` values. `effort_levels` lists the source's levels that are also in the backend's declared
+`reasoning_effort` levels, in the backend's order: `null` means the source says nothing, `[]` means it lists
+levels and none is selectable. It is always `null` for Vibe, Cursor, Antigravity and Claude.
+
+| Backend | Installed check | Source |
+| --- | --- | --- |
+| claude | `claude` on PATH (never symlink-resolved) | `documented_aliases`: `fable`, `opus`, `sonnet`; no subprocess |
+| codex | `codex` on PATH | `harness_cache`: `$CODEX_HOME` else `~/.codex`, `models_cache.json`, `visibility == "list"` rows by `priority` |
+| opencode | `opencode` on PATH | `cli_output`: `opencode models --verbose`; levels from `variants` keys |
+| antigravity | `agy` on PATH | `cli_output`: `agy models` |
+| cursor | `cursor-agent`, else `agent`, whose `--version` prints Cursor's version line | `cli_output`: `cursor-agent models` |
+| vibe | `vibe` on PATH | `config_aliases`: `$VIBE_HOME` else `~/.vibe`, `config.toml` `[[models]]` |
+
+A missing, empty or relative `CODEX_HOME` / `VIBE_HOME` is `source_missing`. Cursor's logged-out signature
+(non-zero exit and a line beginning `Error: Authentication required.`) is `auth_required`. A Cursor identity
+probe that times out, floods or fails to spawn, with no other candidate verified, is `unavailable`, not
+`not_installed`. The measured formats are in [backend-cli-facts.md](backend-cli-facts.md#model-listing-backend-modelsv1-measured-2026-11-13-macos-arm64).
+
+**Bounds.** At most 400 rows; ids are non-empty, at most 256 UTF-8 bytes, with no whitespace or control
+characters; labels are at most 256 bytes without control characters; rows that break these rules, and repeated
+ids, are dropped and counted. Rows are validated first, then the first 400 valid rows are kept, then rows are
+removed from the tail while the complete printed line (the whole envelope, as `json.dumps` prints it, without the
+newline) exceeds 262144 bytes, with the final `truncated` and `dropped_count`. Each subprocess has an 8 second
+deadline, a 1 MiB stdout cap (32 MiB for opencode) and a 64 KiB stderr cap; files are read as regular files of
+at most 8 MiB. One 10 second budget starts when the command starts, covers the caller gate and is shared by every
+subprocess (each gets the smaller of 8 seconds and what remains); an exhausted budget is `unavailable` with
+reason `timeout`. Subprocesses run with the caller's environment, an empty temporary working directory, stdin
+from `/dev/null` and their own process group, which is killed on expiry.
+
+Without `--json` the command prints one `<id>\t<label>` line per model, or one line stating the state and
+reason. Canonical specimens are the `ctl-backend-models-*.json` fixtures, generated by
+`scripts/generate-backend-models-fixtures.py`; `conformance/oracles.py` `validate_backend_models` checks their
+shape independently. Integration order: this producer specification and fixtures, then byte-identical fixture
+vendoring and a consumer adapter and version gate in HarflowMac, then Rust adoption of the same ctl contract.
