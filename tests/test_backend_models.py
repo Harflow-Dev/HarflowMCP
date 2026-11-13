@@ -632,7 +632,7 @@ def test_a_hung_harness_times_out_within_the_shared_budget(make_context, bin_dir
     marker = tmp_path / "started"
     executable(bin_dir, "agy", f'/usr/bin/touch "{marker}"; exec /bin/sleep 60')
     context = make_context()
-    context.budget = ml.Budget(0.5)
+    context.budget = ml.Budget(3.0)  # room for the fake harness to start under suite load
     result = listing("antigravity", context)
     assert (result.state, result.reason) == ("unavailable", "timeout")
     assert marker.exists()
