@@ -39,5 +39,14 @@ used to produce the fixtures or tests. The generators were run in dependency ord
 `--check` passes. Pinned manifest count and digest moved in `tests/test_approval_seams.py`,
 `conformance/oracles.py`, `conformance/tests/test_oracles.py`, `conformance/tests/test_runner.py` and
 `conformance/README.md`. The Rust `ctl_capability_order.rs` is not touched, because it changes only when Rust
-emits the capability. This receipt makes no full-suite, installed-engine, live-harness, native UI, Rust or
+emits the capability. This receipt makes no installed-engine, native UI, Rust or
 release qualification claim.
+
+## Later verification (2026-11-14)
+
+Full pytest at `78c6982`: 15006 passed, 559 skipped, 4 failed. Three failures were `ENOSPC` on the host temp
+volume and the fourth a start-up timing margin in a new test (widened in `300c021`); all four pass when re-run.
+`5ce07d1` (bounded_process only) was verified with its targeted suites. Live check from the development
+environment, read-only against the developer's own state root: `--backend opencode` returned `available`,
+`cli_output`, 199 models (158 with effort levels), 24,670 bytes in 1.8 s; `--backend codex` returned
+`available`, `harness_cache`, 8 models, 1,318 bytes in 0.9 s; neither dropped nor truncated rows.
