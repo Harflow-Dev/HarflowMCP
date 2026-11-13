@@ -11,9 +11,9 @@ seam (default `unsupported`), six measured sources, a bounded two-pipe process r
 tools, `backends`, ordinary status shapes and launch admission are unchanged; `task_changes_capture` keeps
 its own runner. Consumers must negotiate the capability from the selected engine, vendor the entire
 byte-identical final bundle, and treat an older engine's usage error for the command as unsupported.
-Fixtures keep `product_version` 0.0.13; release preparation re-stamps them. The bundle has 350 fixtures
-(0.0.13's 334, fifteen `ctl-backend-models-*.json` specimens and `invalid-s05-missing-backend-models.json`).
-Its manifest SHA256 is `092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1`. `ctl-launch-unknown-operation.json` changes because argparse lists every
+Fixtures keep `product_version` 0.0.13; release preparation re-stamps them. The bundle has 351 fixtures
+(0.0.13's 334, sixteen `ctl-backend-models-*.json` specimens and `invalid-s05-missing-backend-models.json`).
+Its manifest SHA256 is `7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba`. `ctl-launch-unknown-operation.json` changes because argparse lists every
 subcommand in its usage message; HarflowMac must re-vendor it with the rest of the bundle.
 
 Integration order: this producer and its fixtures, then HarflowMac fixture vendoring, adapter and version gate,

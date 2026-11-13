@@ -252,12 +252,12 @@ def opencode(bin_dir):
     executable(bin_dir, "opencode")
 
 
-def test_opencode_verbose_output(make_context, opencode):
+def test_opencode_verbose_output(make_context, opencode, bin_dir):
     recorder = Recorder(default=ok(data("opencode-models-verbose.txt")))
     result = listing("opencode", make_context(recorder))
     assert (result.state, result.source) == ("available", "cli_output")
     argv, kwargs = recorder.calls[0]
-    assert argv == ["opencode", "models", "--verbose"]
+    assert argv == [str(bin_dir / "opencode"), "models", "--verbose"]  # the path the installed check found, not resolved
     assert kwargs["stdout_cap"] == 32 * 1024 * 1024 and kwargs["stderr_cap"] == 64 * 1024
     assert ids(result) == ["opencode/beam-free", "opencode/big-pickle", "anthropic/claude-opus-4-5", "openai/gpt-5",
                            "opencode-go/deepseek-v4-pro", "opencode-go/gpt-5.6-luna"]
@@ -312,10 +312,10 @@ def agy(bin_dir):
     executable(bin_dir, "agy")
 
 
-def test_agy_models_tab_separated(make_context, agy):
+def test_agy_models_tab_separated(make_context, agy, bin_dir):
     recorder = Recorder(default=ok(data("agy-models.out"), b"Fetching available models...\n"))
     result = listing("antigravity", make_context(recorder))
-    assert recorder.calls[0][0] == ["agy", "models"]
+    assert recorder.calls[0][0] == [str(bin_dir / "agy"), "models"]
     assert ids(result) == ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
                            "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"]
     assert result.models[3].label == "Claude Sonnet 4.6 (Thinking)"
@@ -533,6 +533,19 @@ def test_label_rules():
                                raw("f", "ünï")], source="cli_output")
     assert [(row.id, row.label[:3]) for row in result.models] == [("a", "yyy"), ("d", "d"), ("f", "ünï")]
     assert result.dropped_count == 3
+
+
+def test_unencodable_text_drops_only_that_row():
+    result = ml.build_listing([raw("a\ud800b"), raw("ok", "fine"), raw("ok2", "bad\udc00label")], source="cli_output")
+    assert ids(result) == ["ok"] and result.dropped_count == 2
+
+
+def test_symlinked_binary_is_not_resolved(make_context, bin_dir, tmp_path):
+    real = executable(tmp_path, "real-agy")
+    (bin_dir / "agy").symlink_to(real)
+    recorder = Recorder(default=ok(b"a\tA\n"))
+    listing("antigravity", make_context(recorder))
+    assert recorder.calls[0][0][0] == str(bin_dir / "agy")
 
 
 def test_duplicate_ids_keep_the_first_and_count_the_rest():

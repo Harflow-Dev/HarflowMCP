@@ -858,29 +858,47 @@ def _model_listing_clock() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _backend_models_gate(budget: Any) -> tuple[str, str] | None:
-    """`(code, reason)` when the caller is, or may be, an agent; None for a verified direct caller.
+def _backend_models_gate(budget: Any) -> tuple[str, str | None] | None:
+    """`(code, detail)` when the caller is, or may be, an agent; None for a verified direct caller.
 
+    `detail` is a bounded name-free enum for `caller_undecidable` refusals and None otherwise.
     Environment markers refuse first, with no I/O. Then, like `task-list-watch`, lineage runs under a shared
-    `initialize=False` state session, which never creates or writes state. Only a missing state root proceeds
-    (no task in a store that does not exist can be the caller); any other store problem fails closed.
+    `initialize=False` state session, which never creates or writes state. Only a selected state root whose
+    path does not exist at all proceeds (no task in a store that does not exist can be the caller); every
+    other store problem, including an existing unmarked directory, fails closed.
     """
     refusal = takeover.env_agent_refusal()
     if refusal is not None:
-        return refusal
+        return refusal[0], None
     from .state_layout import resolve_layout
     from . import task_list_watch
     try:
         layout = resolve_layout()
         with state_session(layout, initialize=False,
                            timeout=min(task_list_watch.SETUP_OVERHEAD_SECONDS, max(0.0, budget.remaining()))):
-            return takeover.caller_refusal(layout.tasks_directory)
-    except StateOwnershipError as exc:
-        if getattr(exc, "reason", None) == "missing_root":
+            refused = takeover.caller_refusal(layout.tasks_directory)
+        if refused is None:
             return None
-        return ("caller_undecidable", f"selected state is unavailable ({getattr(exc, 'reason', None) or 'unknown'})")
-    except Exception as exc:
-        return ("caller_undecidable", f"caller detection failed ({type(exc).__name__})")
+        return refused[0], ("lineage_undecidable" if refused[0] == "caller_undecidable" else None)
+    except StateOwnershipError as exc:
+        reason = getattr(exc, "reason", None)
+        if reason == "missing_root":
+            try:
+                os.lstat(layout.root)
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return ("caller_undecidable", "store_unavailable")
+            return ("caller_undecidable", "root_present_unmarked")
+        if reason == "unmarked_nonempty":
+            return ("caller_undecidable", "root_present_unmarked")
+        if reason == "infrastructure_unavailable":
+            return ("caller_undecidable", "store_unavailable")
+        if getattr(exc, "code", None) == "state_busy":
+            return ("caller_undecidable", "lock_timeout")
+        return ("caller_undecidable", "incompatible_store")
+    except Exception:
+        return ("caller_undecidable", "detection_failed")
 
 
 def _cmd_backend_models(args: argparse.Namespace) -> int:
@@ -890,22 +908,33 @@ def _cmd_backend_models(args: argparse.Namespace) -> int:
     budget = ml.Budget()  # one allowance for the gate and every spawn
     refusal = _backend_models_gate(budget)
     if refusal is not None:
-        return _fail(args, refusal[0], "Backend model listing requires a verified direct caller.",
-                     {"coverage": "unknown", "check": "direct_caller_required"})
+        data = {"coverage": "unknown", "check": "direct_caller_required"}
+        if refusal[1] is not None:
+            data["detail"] = refusal[1]
+        return _fail(args, refusal[0], "Backend model listing requires a verified direct caller.", data)
     backend = backends.get(args.backend)
     observed_at = _model_listing_clock()
     if budget.expired():
         listing = ml.unavailable(ml.TIMEOUT, None)
     else:
         try:
-            with tempfile.TemporaryDirectory(prefix="harflow-models-") as cwd:
-                context = ml.ModelListContext(environ=dict(os.environ), cwd=cwd, budget=budget, now=_model_listing_clock)
-                listing = backend.list_models(context)
+            directory = tempfile.TemporaryDirectory(prefix="harflow-models-", ignore_cleanup_errors=True)
         except OSError:
+            directory = None
+        if directory is None:
             listing = ml.unavailable(ml.SPAWN_FAILED, None)
-        except Exception:
-            logging.getLogger(__name__).exception("backend model listing failed for %s", args.backend)
-            listing = ml.unavailable(ml.UNPARSEABLE, None)
+        else:
+            try:
+                context = ml.ModelListContext(environ=dict(os.environ), cwd=directory.name, budget=budget, now=_model_listing_clock)
+                listing = backend.list_models(context)
+            except Exception:
+                logging.getLogger(__name__).exception("backend model listing failed for %s", args.backend)
+                listing = ml.unavailable(ml.UNPARSEABLE, None)
+            finally:
+                try:
+                    directory.cleanup()
+                except Exception:
+                    pass
 
     def encode(result: dict[str, Any]) -> str:
         return json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result}))

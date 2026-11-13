@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1'
+PINNED_MANIFEST_SHA256 = '7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -91,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 350 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 351 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
@@ -158,6 +158,28 @@ def _rfc3339(value):
             raise ValueError('missing timezone')
     except ValueError as exc:
         raise ConformanceError('invalid backend-models timestamp') from exc
+
+
+BACKEND_MODEL_DETAILS = {'root_present_unmarked', 'lock_timeout', 'incompatible_store', 'store_unavailable',
+                         'lineage_undecidable', 'detection_failed'}
+
+
+def validate_backend_models_error(doc, expected_version='0.0.13'):
+    """Shape of a refused `backend-models` reply: the caller gate's `agent_caller` / `caller_undecidable`."""
+    validate_envelope(doc, 'harflow.ctl', expected_version)
+    error = doc.get('error')
+    if not isinstance(error, dict) or error.get('code') not in {'agent_caller', 'caller_undecidable'} or not isinstance(error.get('message'), str):
+        raise ConformanceError('invalid backend-models refusal')
+    data = error.get('data')
+    if not isinstance(data, dict) or data.get('coverage') != 'unknown' or data.get('check') != 'direct_caller_required':
+        raise ConformanceError('invalid backend-models refusal data')
+    detail = data.get('detail')
+    if set(data) - {'coverage', 'check', 'detail'}:
+        raise ConformanceError('invalid backend-models refusal data')
+    if error['code'] == 'agent_caller' and 'detail' in data or error['code'] == 'caller_undecidable' and (
+            detail is not None and detail not in BACKEND_MODEL_DETAILS):
+        raise ConformanceError('invalid backend-models refusal detail')
+    return error
 
 
 def validate_backend_models(doc, expected_version='0.0.13'):

@@ -191,7 +191,7 @@ def test_env_markers_refuse_before_any_lookup(world, monkeypatch, capsys, marker
     error = document(out)["error"]
     assert code == 1
     assert error["code"] == "agent_caller"
-    assert error["data"] == {"coverage": "unknown", "check": "direct_caller_required"}
+    assert error["data"] == {"coverage": "unknown", "check": "direct_caller_required"}  # no detail for agent refusals
     assert error["message"] == "Backend model listing requires a verified direct caller." and "direct caller" in err
     spies.assert_nothing_ran()
 
@@ -203,7 +203,7 @@ def test_a_lineage_refusal_refuses_before_any_lookup(world, monkeypatch, capsys)
     code, out, _ = run(capsys, "--backend", "vibe", "--json")
     error = document(out)["error"]
     assert (code, error["code"]) == (1, "agent_caller")
-    assert error["data"]["check"] == "direct_caller_required"
+    assert error["data"] == {"coverage": "unknown", "check": "direct_caller_required"}
     spies.assert_nothing_ran()
 
 
@@ -212,7 +212,8 @@ def test_an_undecidable_lineage_fails_closed(world, monkeypatch, capsys):
     spies = Spies(world, monkeypatch)
     monkeypatch.setattr(takeover, "caller_refusal", lambda *a, **k: ("caller_undecidable", "ps is unavailable"))
     code, out, _ = run(capsys, "--backend", "cursor", "--json")
-    assert (code, document(out)["error"]["code"]) == (1, "caller_undecidable")
+    error = document(out)["error"]
+    assert (code, error["code"], error["data"]["detail"]) == (1, "caller_undecidable", "lineage_undecidable")
     spies.assert_nothing_ran()
 
 
@@ -225,7 +226,9 @@ def test_a_crashing_lineage_check_fails_closed(world, monkeypatch, capsys):
 
     monkeypatch.setattr(takeover, "caller_refusal", crash)
     code, out, _ = run(capsys, "--backend", "claude", "--json")
-    assert (code, document(out)["error"]["code"]) == (1, "caller_undecidable")
+    error = document(out)["error"]
+    assert (code, error["code"], error["data"]["detail"]) == (1, "caller_undecidable", "detection_failed")
+    assert "boom" not in out
     spies.assert_nothing_ran()
 
 
@@ -242,9 +245,44 @@ def test_an_unmarked_nonempty_root_fails_closed(world, monkeypatch, capsys):
     world.state.mkdir()
     (world.state / "stray").write_text("x")
     code, out, _ = run(capsys, "--backend", "claude", "--json")
-    assert (code, document(out)["error"]["code"]) == (1, "caller_undecidable")
+    error = document(out)["error"]
+    assert (code, error["code"]) == (1, "caller_undecidable")
+    assert error["data"] == {"coverage": "unknown", "check": "direct_caller_required", "detail": "root_present_unmarked"}
     spies.assert_nothing_ran()
     assert sorted(path.name for path in world.state.iterdir()) == ["stray"]
+
+
+@pytest.mark.parametrize("contents", [(), (".harflow-store.lock",), (".harflow-store.lock", "tasks/")])
+def test_an_existing_unmarked_root_never_proceeds(world, monkeypatch, capsys, contents):
+    spies = Spies(world, monkeypatch)
+    world.state.mkdir()
+    for entry in contents:
+        if entry.endswith("/"):
+            (world.state / entry).mkdir()
+        else:
+            (world.state / entry).write_text("")
+    before = sorted(str(p.relative_to(world.state)) for p in world.state.rglob("*"))
+    code, out, _ = run(capsys, "--backend", "claude", "--json")
+    error = document(out)["error"]
+    assert (code, error["code"], error["data"]["detail"]) == (1, "caller_undecidable", "root_present_unmarked")
+    spies.assert_nothing_ran()
+    assert sorted(str(p.relative_to(world.state)) for p in world.state.rglob("*")) == before
+
+
+def test_an_unlstatable_root_fails_closed(world, monkeypatch, capsys):
+    spies = Spies(world, monkeypatch)
+    world.state.mkdir()
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if str(path) == str(world.state):
+            raise PermissionError("denied")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    code, out, _ = run(capsys, "--backend", "claude", "--json")
+    assert (code, document(out)["error"]["data"]["detail"]) == (1, "store_unavailable")
+    spies.assert_nothing_ran()
 
 
 def test_a_held_store_lock_fails_closed_within_the_timeout(world, monkeypatch, capsys):
@@ -264,7 +302,8 @@ def test_a_held_store_lock_fails_closed_within_the_timeout(world, monkeypatch, c
     finally:
         holder.kill()
         holder.wait()
-    assert (code, document(out)["error"]["code"]) == (1, "caller_undecidable")
+    error = document(out)["error"]
+    assert (code, error["code"], error["data"]["detail"]) == (1, "caller_undecidable", "lock_timeout")
     assert elapsed < 6
     spies.assert_nothing_ran()
 
@@ -372,3 +411,30 @@ def test_a_line_of_exactly_the_limit_is_kept_and_one_byte_more_removes_one_row(w
     cut = document(out)["result"]
     assert len(out.rstrip("\n").encode()) <= limit
     assert len(cut["models"]) == count and cut["truncated"] is True and cut["models"][-1]["id"] != "tail"
+
+
+def test_a_successful_listing_survives_a_temp_dir_cleanup_error(world, monkeypatch, capsys):
+    import tempfile
+    executable(world.bin, "claude")
+
+    class Failing(tempfile.TemporaryDirectory):
+        def cleanup(self):
+            super().cleanup()
+            raise OSError("cleanup failed")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", Failing)
+    code, out, _ = run(capsys, "--backend", "claude", "--json")
+    assert code == 0 and document(out)["result"]["state"] == "available"
+
+
+def test_temp_dir_creation_failure_is_spawn_failed(world, monkeypatch, capsys):
+    import tempfile
+    executable(world.bin, "claude")
+
+    def boom(*args, **kwargs):
+        raise OSError("no space")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", boom)
+    code, out, _ = run(capsys, "--backend", "claude", "--json")
+    result = document(out)["result"]
+    assert code == 0 and (result["state"], result["reason"], result["source"]) == ("unavailable", "spawn_failed", None)

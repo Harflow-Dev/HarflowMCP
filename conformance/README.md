@@ -23,7 +23,7 @@ S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
   --commit "$(git rev-parse v0.0.13^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
-  --manifest-sha256 092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1 \
+  --manifest-sha256 7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba \
   --output "/private/tmp/harflow-s07-$S07_ID" \
   --invocation-id "$S07_ID"
 ```
@@ -38,14 +38,14 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 350-fixture bundle (0.0.13 plus the unreleased `backend-models.v1` contract). The examples use this bundle, not the 0.0.12 manifest. Earlier S07/S08/S09
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 351-fixture bundle (0.0.13 plus the unreleased `backend-models.v1` contract). The examples use this bundle, not the 0.0.12 manifest. Earlier S07/S08/S09
 receipts retain their original source and manifest identities; this repin does not requalify
 their scenarios, a managed runtime, or any consumer. The S08 and S09 profiles still snapshot the older 0.0.7 sources
 (manifest `383ecf7a…`), which `verify_manifest` no longer accepts since the pinned digest moved
 with 0.0.10; rerunning them needs a per-source digest and is not part of this repin.
 
-The fifteen `ctl-backend-models-*.json` specimens exercise the real `backend-models` command with an injected clock,
-a fake subprocess runner and no state root. `validate_backend_models` checks the document shape independently of the
+The sixteen `ctl-backend-models-*.json` specimens exercise the real `backend-models` command with an injected clock,
+a fake subprocess runner and no state root. `validate_backend_models` and `validate_backend_models_error` check the document shape independently of the
 engine: the closed state, reason and source vocabularies, the `user` scope, the advisory flag, null harness version,
 RFC 3339 timestamps, the row and byte bounds, unique ids and the `effort_levels` null-versus-empty distinction. The
 missing-capability handshake requires `backend-models.v1`, and `COMMAND_CAPABILITIES` maps the command to it.
@@ -291,7 +291,7 @@ scoped-read refusals around them. Case groups live in `cases.py`, `cases_stop.py
 .venv/bin/python -m conformance.e1.scenarios \
   --source-repo "$PWD" --commit "$(git rev-parse v0.0.13^{commit})" --python "$PWD/.venv/bin/python" \
   --manifest "$PWD/contracts/v1/manifest.json" \
-  --manifest-sha256 092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1 \
+  --manifest-sha256 7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba \
   --output /path/to/new-empty-dir
 .venv/bin/python -m pytest conformance/tests_e1 -q   # infrastructure self-checks
 ```
@@ -325,7 +325,7 @@ D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 ```sh
 .venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.13^{commit})" \
   --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
-  --manifest-sha256 092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1 \
+  --manifest-sha256 7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba \
   --product-version 0.0.13 --seam none --output /path/to/new-dir
 .venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
 ```

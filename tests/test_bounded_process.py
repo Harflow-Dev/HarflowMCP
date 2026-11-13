@@ -2,6 +2,8 @@ import os
 import sys
 import time
 
+import pytest
+
 from harflow_mcp import bounded_process
 
 
@@ -133,3 +135,66 @@ def test_expired_deadline_spawns_nothing(tmp_path):
         [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"], env=dict(os.environ), cwd=str(tmp_path),
         deadline=time.monotonic() - 1, stdout_cap=10, stderr_cap=10)
     assert done.cause == bounded_process.TIMEOUT and not marker.exists()
+
+
+def test_pipes_closed_but_leader_still_running_times_out_at_the_deadline():
+    code = "import os, time\nos.close(1)\nos.close(2)\ntime.sleep(30)"
+    start = time.monotonic()
+    done = _run(code, seconds=1.0)
+    elapsed = time.monotonic() - start
+    assert done.cause == bounded_process.TIMEOUT and done.returncode is None
+    assert 0.9 < elapsed < 2.2  # deadline plus the reap allowance, never the old fixed grace
+
+
+def test_grandchild_is_killed_after_a_normal_leader_exit():
+    code = (
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import os,time,sys; sys.stdout.write(str(os.getpid())); "
+        "sys.stdout.flush(); os.close(1); os.close(2); time.sleep(60)'], stdout=subprocess.PIPE)\n"
+        "print(child.stdout.read().decode())\n"
+    )
+    done = _run(code, seconds=5.0)
+    assert done.cause is None and done.returncode == 0
+    assert _wait_dead(int(done.stdout.split()[0]))
+
+
+def test_cleanup_is_guaranteed_when_the_selector_fails(monkeypatch):
+    import selectors
+    pids = []
+    real_popen = bounded_process.subprocess.Popen
+
+    def spy(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        pids.append(process)
+        return process
+
+    class Broken(selectors.DefaultSelector):
+        def register(self, *args, **kwargs):
+            raise OSError("register failed")
+
+    monkeypatch.setattr(bounded_process.subprocess, "Popen", spy)
+    monkeypatch.setattr(bounded_process.selectors, "DefaultSelector", Broken)
+    with pytest.raises(OSError):
+        _run("import time; time.sleep(30)")
+    process = pids[0]
+    assert process.poll() is not None and process.stdout.closed and process.stderr.closed
+    assert not _alive(process.pid)
+
+
+def test_selector_creation_failure_is_also_cleaned_up(monkeypatch):
+    pids = []
+    real_popen = bounded_process.subprocess.Popen
+
+    def spy(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        pids.append(process)
+        return process
+
+    def broken():
+        raise OSError("no selector")
+
+    monkeypatch.setattr(bounded_process.subprocess, "Popen", spy)
+    monkeypatch.setattr(bounded_process.selectors, "DefaultSelector", broken)
+    with pytest.raises(OSError):
+        _run("import time; time.sleep(30)")
+    assert pids[0].poll() is not None and pids[0].stdout.closed

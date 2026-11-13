@@ -2842,9 +2842,13 @@ verified direct caller.` (the reason is not repeated) and `error.data` `{"covera
 gate runs, in order and before any harness lookup, file read or subprocess: the environment markers
 (the task-id and worker-depth variables, including the legacy spellings the takeover gate also refuses) with no I/O; then the lineage check under a
 shared `initialize=False` state session with a 2 second lock timeout, which never creates, initializes or
-writes state. Only a missing selected state root (no task record can exist, so no Harflow task can be the
-caller) proceeds; an unmarked existing root, a busy lock, an incompatible store, any other ownership failure or
-an unexpected error refuses with `caller_undecidable`. A fresh install with no `~/.harflow` therefore works.
+writes state. Only a selected state root whose path does not exist at all (checked with `lstat`; it is never created)
+proceeds, because no task record can exist there; a path that exists in any form (an empty directory, one holding
+only the store lock, one with a `tasks` directory but no marker), an `lstat` failure, a busy lock, an incompatible
+store, any other ownership failure or an unexpected error refuses with `caller_undecidable`. That refusal carries
+a bounded, name-free `error.data.detail`: `root_present_unmarked`, `lock_timeout`, `incompatible_store`,
+`store_unavailable`, `lineage_undecidable` or `detection_failed`; it never contains paths, marker names or
+exception text. `agent_caller` refusals have no `detail`. A fresh install with no `~/.harflow` therefore works.
 Stated limits: a non-Harflow agent that carries no marker is not detected, as with other environment-gated
 reads; and a Codex agent started by an engine on a non-default root loses `HARFLOW_STATE_ROOT` in its shell
 (`shell_environment_policy.inherit = "core"`), so it is checked against the default root.
@@ -2856,7 +2860,7 @@ reads; and a Codex agent started by an engine on a non-default root loses `HARFL
 | `backend` | The requested backend name. |
 | `state` | `available`, `not_installed`, `unsupported` or `unavailable`. |
 | `reason` | `null`, or for `unavailable`: `timeout`, `exit_nonzero`, `auth_required`, `unparseable`, `source_missing`, `output_ceiling` or `spawn_failed`. |
-| `source` | `cli_output`, `harness_cache`, `documented_aliases`, `config_aliases` or `null` (also `null` for `unsupported`, and when the budget ran out before a source was chosen). |
+| `source` | `cli_output`, `harness_cache`, `documented_aliases`, `config_aliases` or `null` (also `null` for `unsupported`, when the budget ran out before a source was chosen, when a source raised an unexpected error, and when the temporary working directory could not be created). |
 | `scope` | Always `"user"`. |
 | `advisory` | Always `true`. |
 | `harness_version` | Always `null` in v1; the field is nullable for later sources. |
@@ -2893,8 +2897,10 @@ removed from the tail while the complete printed line (the whole envelope, as `j
 newline) exceeds 262144 bytes, with the final `truncated` and `dropped_count`. Each subprocess has an 8 second
 deadline, a 1 MiB stdout cap (32 MiB for opencode) and a 64 KiB stderr cap; files are read as regular files of
 at most 8 MiB. One 10 second budget starts when the command starts, covers the caller gate and is shared by every
-subprocess (each gets the smaller of 8 seconds and what remains); an exhausted budget is `unavailable` with
-reason `timeout`. Subprocesses run with the caller's environment, an empty temporary working directory, stdin
+subprocess (each gets the smaller of 8 seconds and what remains; the runner never waits past its deadline); an
+exhausted budget is `unavailable` with reason `timeout`. The worst-case wall time of one subprocess is its
+deadline plus a 0.5 second reap allowance after the process group is killed (a process that survives the kill
+is left to a daemon reaper), so the command is bounded by about 10.5 seconds plus the gate's own limits. Subprocesses run with the caller's environment, an empty temporary working directory, stdin
 from `/dev/null` and their own process group, which is killed on expiry.
 
 Without `--json` the command prints one `<id>\t<label>` line per model, or one line stating the state and

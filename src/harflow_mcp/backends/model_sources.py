@@ -99,9 +99,10 @@ OPENCODE_STDOUT_CAP = 32 * 1024 * 1024
 def opencode_models(context: ModelListContext, binary: str, backend_levels: Sequence[str]) -> ModelListing:
     """`opencode models --verbose`: id is the header, label is `name`, levels are the `variants` keys."""
     source = ml.CLI_OUTPUT
-    if context.which(binary) is None:
+    executable = context.which(binary)
+    if executable is None:
         return ml.not_installed(source)
-    done = context.run([binary, "models", "--verbose"], stdout_cap=OPENCODE_STDOUT_CAP)
+    done = context.run([executable, "models", "--verbose"], stdout_cap=OPENCODE_STDOUT_CAP)
     failure = ml.command_failure(done, source)
     if failure is not None:
         return failure
@@ -122,9 +123,10 @@ def opencode_models(context: ModelListContext, binary: str, backend_levels: Sequ
 def antigravity_models(context: ModelListContext, binary: str) -> ModelListing:
     """`agy models`: `<id>\\t<label>` per stdout line; the "Fetching" notice is on stderr."""
     source = ml.CLI_OUTPUT
-    if context.which(binary) is None:
+    executable = context.which(binary)
+    if executable is None:
         return ml.not_installed(source)
-    done = context.run([binary, "models"])
+    done = context.run([executable, "models"])
     failure = ml.command_failure(done, source)
     if failure is not None:
         return failure

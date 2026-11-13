@@ -19,10 +19,8 @@ TIMEOUT = "timeout"
 OUTPUT_CEILING = "output_ceiling"
 SPAWN_FAILED = "spawn_failed"
 
-# A command that closed both streams at the deadline edge has finished: give its exit a fixed moment.
-EXIT_GRACE_SECONDS = 0.5
 # After SIGKILL, how long to wait for the reap before handing it to a daemon thread.
-REAP_SECONDS = 2.0
+REAP_SECONDS = 0.5
 _CHUNK = 65536
 _POLL_SECONDS = 0.05
 
@@ -79,17 +77,15 @@ def run(
     except (OSError, ValueError):
         return Completed(None, cause=SPAWN_FAILED)
     out_fd, err_fd = process.stdout.fileno(), process.stderr.fileno()
-    buffers: dict[int, bytearray] = {}
-    caps: dict[int, int] = {}
-    selector = selectors.DefaultSelector()
+    buffers: dict[int, bytearray] = {out_fd: bytearray(), err_fd: bytearray()}
+    caps = {out_fd: stdout_cap, err_fd: stderr_cap}
+    selector: selectors.BaseSelector | None = None
     cause: str | None = None
     try:
-        for stream, cap in ((process.stdout, stdout_cap), (process.stderr, stderr_cap)):
-            descriptor = stream.fileno()
-            os.set_blocking(descriptor, False)
-            selector.register(descriptor, selectors.EVENT_READ)
-            buffers[descriptor] = bytearray()
-            caps[descriptor] = cap
+        selector = selectors.DefaultSelector()
+        for stream in (process.stdout, process.stderr):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream.fileno(), selectors.EVENT_READ)
         open_streams = 2
         while open_streams and cause is None:
             remaining = deadline - time.monotonic()
@@ -114,21 +110,29 @@ def run(
                     cause = OUTPUT_CEILING
                     break
                 buffers[descriptor] += chunk
-        if cause is None:
+        if cause is None and process.poll() is None:
+            # Never wait past the deadline for the leader to exit.
             try:
-                process.wait(timeout=max(deadline - time.monotonic(), EXIT_GRACE_SECONDS))
+                process.wait(timeout=max(deadline - time.monotonic(), 0.0))
             except subprocess.TimeoutExpired:
                 cause = TIMEOUT
     finally:
-        selector.close()
-        if cause is not None or process.poll() is None:
-            _kill(process)
+        # Guaranteed for any exception after the spawn: kill the group (also after a normal exit, so no
+        # grandchild outlives the command), reap within a bound, close the pipes and the selector.
+        _kill(process)
         try:
             process.wait(timeout=REAP_SECONDS)
         except subprocess.TimeoutExpired:
             # A process that survives SIGKILL is abandoned to a daemon reaper rather than waited on here.
             cause = cause or TIMEOUT
             threading.Thread(target=_reap, args=(process,), daemon=True).start()
+        except Exception:
+            pass
+        if selector is not None:
+            try:
+                selector.close()
+            except Exception:
+                pass
         for stream in (process.stdout, process.stderr):
             try:
                 stream.close()
@@ -136,5 +140,5 @@ def run(
                 pass
     return Completed(
         None if cause else process.returncode,
-        bytes(buffers.get(out_fd, b"")), bytes(buffers.get(err_fd, b"")), cause,
+        bytes(buffers[out_fd]), bytes(buffers[err_fd]), cause,
     )

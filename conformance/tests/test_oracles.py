@@ -12,10 +12,11 @@ import pytest
 from conformance.oracles import (
     ConformanceError, strict_json, validate_envelope, validate_version_info,
     verify_manifest, validate_cancel_observation, validate_backend_models,
+    validate_backend_models_error,
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = '092299de1f3ed1ac91c55d168ce3f77c47e3d4f6859b9ebefb416393e149aea1'
+DIGEST = '7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba'
 
 
 def envelope(format='harflow.ctl'):
@@ -86,7 +87,7 @@ def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)
-    assert len(document['files']) == 350
+    assert len(document['files']) == 351
 
 
 def test_cancellation_fixtures_obey_binding_shape_and_capability():
@@ -106,18 +107,21 @@ def test_cancellation_fixtures_obey_binding_shape_and_capability():
 def test_backend_models_fixtures_obey_the_independent_shape_and_capability():
     manifest = verify_manifest(BUNDLE / 'manifest.json')
     names = sorted(name for name in manifest['files'] if name.startswith('ctl-backend-models-'))
-    assert len(names) == 15
-    states = set()
+    assert len(names) == 16
+    states, refusals = set(), set()
     for name in names:
         doc = strict_json((BUNDLE / name).read_bytes())
         case = manifest['cases'][name]
         if 'error' in doc:
-            assert case['required_capabilities'] == [] and doc['error']['code'] in {'agent_caller', 'usage'}
+            assert case['required_capabilities'] == [] and doc['error']['code'] in {'agent_caller', 'caller_undecidable', 'usage'}
+            if doc['error']['code'] != 'usage':
+                validate_backend_models_error(doc)
+                refusals.add(doc['error']['code'])
             continue
         assert case['required_capabilities'] == ['backend-models.v1']
         assert 'Actual ctl.main' in case['provenance']
         states.add(validate_backend_models(doc)['state'])
-    assert states == {'available', 'not_installed', 'unavailable'}
+    assert states == {'available', 'not_installed', 'unavailable'} and refusals == {'agent_caller', 'caller_undecidable'}
     negative = strict_json((BUNDLE / 'invalid-s05-missing-backend-models.json').read_bytes())
     with pytest.raises(ConformanceError, match='missing capabilities'):
         validate_version_info(negative, negative['state_root'], ['backend-models.v1'])
@@ -278,3 +282,25 @@ raise SystemExit(3)
                             cwd=Path(__file__).resolve().parents[2],
                             stdin=subprocess.DEVNULL, capture_output=True, timeout=2)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda e: e['data'].update(detail='/some/path'),
+    lambda e: e['data'].update(extra=1),
+    lambda e: e['data'].update(coverage='complete'),
+    lambda e: e.update(code='state_incompatible'),
+])
+def test_backend_models_refusal_oracle_rejects_invalid_documents(mutate):
+    doc = copy.deepcopy(strict_json((BUNDLE / 'ctl-backend-models-undecidable-unmarked-root.json').read_bytes()))
+    assert validate_backend_models_error(doc)['data']['detail'] == 'root_present_unmarked'
+    mutate(doc['error'])
+    with pytest.raises(ConformanceError):
+        validate_backend_models_error(doc)
+
+
+def test_backend_models_agent_refusal_carries_no_detail():
+    doc = copy.deepcopy(strict_json((BUNDLE / 'ctl-backend-models-agent-refused.json').read_bytes()))
+    validate_backend_models_error(doc)
+    doc['error']['data']['detail'] = 'lock_timeout'
+    with pytest.raises(ConformanceError):
+        validate_backend_models_error(doc)

@@ -79,6 +79,7 @@ SCENARIOS = {
     'truncated': dict(backend='opencode', binaries=['opencode'], outputs={'opencode': done(many_models(401))},
                       note='Synthetic: 401 generated opencode models, so the 400-row cap applies.'),
     'agent-refused': dict(backend='codex', binaries=['codex'], codex=True, environment={'HARFLOW_TASK_ID': 'fixture-task'}, code=1),
+    'undecidable-unmarked-root': dict(backend='codex', binaries=['codex'], codex=True, state_dir=True, code=1),
     'usage-unknown-backend': dict(argv=['backend-models', '--backend', 'unknown-backend', '--json'], code=2),
 }
 
@@ -99,6 +100,8 @@ def documents(base):
             (vibe_home / 'config.toml').write_bytes((DATA / 'vibe-config.toml').read_bytes())
         environment = {'PATH': str(bin_dir), 'HOME': str(home), 'CODEX_HOME': str(codex_home), 'VIBE_HOME': str(vibe_home),
                        'HARFLOW_STATE_ROOT': str(root / 'state'), **spec.get('environment', {})}
+        if spec.get('state_dir'):
+            (root / 'state').mkdir()
         argv = spec.get('argv') or ['backend-models', '--backend', spec['backend'], '--json']
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
@@ -112,7 +115,8 @@ def documents(base):
             except SystemExit as exc:
                 code = exc.code
         assert code == spec.get('code', 0), (scenario, code)
-        assert not (root / 'state').exists(), 'the command must not create a state root'
+        assert (root / 'state').exists() == bool(spec.get('state_dir')) and not list((root / 'state').glob('*')), \
+            'the command must not create or write a state root'
         text = output.getvalue()
         assert len(text.strip().splitlines()) == 1, scenario
         docs['ctl-backend-models-' + scenario + '.json'] = (json.loads(text), code, spec.get('note', ''))

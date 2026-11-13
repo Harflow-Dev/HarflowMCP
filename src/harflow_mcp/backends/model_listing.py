@@ -162,12 +162,26 @@ def _plain_text(value: str) -> bool:
     return not any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value)
 
 
+def _utf8_length(value: str) -> int | None:
+    """Encoded length, or None for text that cannot be UTF-8 encoded (a lone surrogate)."""
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
 def _valid_id(value: Any) -> bool:
-    return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= MAX_ID_BYTES and _plain_text(value)
+    if not isinstance(value, str) or not value:
+        return False
+    length = _utf8_length(value)
+    return length is not None and length <= MAX_ID_BYTES and _plain_text(value)
 
 
 def _valid_label(value: Any) -> bool:
-    return (isinstance(value, str) and len(value.encode("utf-8")) <= MAX_LABEL_BYTES
+    if not isinstance(value, str):
+        return False
+    length = _utf8_length(value)
+    return (length is not None and length <= MAX_LABEL_BYTES
             and not any(unicodedata.category(ch).startswith("C") for ch in value))
 
 
