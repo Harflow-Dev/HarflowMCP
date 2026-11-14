@@ -88,6 +88,15 @@ class WorkflowError(ValueError):
     """Invalid definition, state transition, or execution decision."""
 
 
+class NativeControlRefused(WorkflowError):
+    """A task cancel was refused because the target is a workflow-owned native transport.
+
+    Raised only on a positively identified `native_control` association; an unknown ownership
+    stays a plain `WorkflowError`. `reason` is the stable `error.data.reason` of the ctl refusal.
+    """
+    reason = "workflow_native_control"
+
+
 class RetryLimitReached(WorkflowError):
     def __init__(self, edge_id: str, used: int, limit: int):
         self.edge_id = edge_id

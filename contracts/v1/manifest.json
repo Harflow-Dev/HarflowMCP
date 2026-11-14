@@ -3404,6 +3404,17 @@
       "valid": true,
       "exit_code": 1,
       "provenance": "Actual ctl.main and envelope serializer over the production listing seam, with an injected clock, fake subprocess runner, temporary environment and no state root. Inputs are recorded harness outputs (measured 2026-11-13) or the stated synthetic change; no real harness runs. Synthetic evidence, not runtime certification."
+    },
+    "ctl-task-cancel-error-workflow-native-control.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-cascade.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Qualified waiting launch that a workflow run owns as a native_control transport; actual cancel refuses it with the stable workflow_native_control reason before any control effect. Operation refusal: an error envelope without an observation. Actual ctl.main/envelope serializer and production ownership lookup and refusal. Controlled human authority; isolated state; no provider or real signals. Synthetic qualification evidence, not runtime certification."
     }
   },
   "files": {
@@ -3757,6 +3768,7 @@
     "ctl-backend-models-unavailable-timeout.json": "1bf903c2c76d264e92bd9e9661831d9c508d291419dbd00db5e54916e4d4f519",
     "ctl-backend-models-unavailable-unparseable.json": "5062af49127f014d67859ebd65b7772984c0e03a2b6725efc302a8ee4cb47f47",
     "ctl-backend-models-usage-unknown-backend.json": "3b44efea257e72067811fd450c75d19977f83730a810c2196a2d8f9a1598b9c7",
-    "ctl-backend-models-undecidable-unmarked-root.json": "1c2ec28a90f0b6c8d8da9b2233ed5f6e88bf3973b2bcbf1e4c9256749237e524"
+    "ctl-backend-models-undecidable-unmarked-root.json": "1c2ec28a90f0b6c8d8da9b2233ed5f6e88bf3973b2bcbf1e4c9256749237e524",
+    "ctl-task-cancel-error-workflow-native-control.json": "7ceca513cbec9db1d42873fe1d3f95f31a82020588e321c0a6c03d4b19d8a5bb"
   }
 }

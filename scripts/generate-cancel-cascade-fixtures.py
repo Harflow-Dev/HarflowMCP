@@ -18,6 +18,7 @@ from harflow_mcp import ctl, identity, lineage, state_ownership, store, task_res
 from harflow_mcp import task_cancel_observation as observation
 from harflow_mcp import task_withdrawal as withdrawal
 from harflow_mcp import tasks
+from harflow_mcp import workflows
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import CTL_FORMAT, PRODUCT_VERSION, validate_envelope
 from harflow_mcp.workflow_receipt_documents import encode
@@ -28,6 +29,24 @@ STAMP = '2026-10-15T00:00:00+00:00'
 TARGET = 'a' * 32
 CHILD = 'b' * 32
 OWNER = dict(pid=4242, start_time='fixture-owner', markers=[])
+EXIT_CODES = {'error-workflow-native-control': 1}
+ERROR_SPECIMENS = {'ctl-task-cancel-error-workflow-native-control.json'}
+
+
+def native_control_run(layout, stack):
+    """A workflow run whose `native_control` activation owns TARGET (the launch receipt already exists)."""
+    stack.enter_context(patch.object(workflows.backends, 'is_installed', return_value=True))
+    definition = {'name': 'fixture', 'orchestrator': {'backend': 'codex'}, 'nodes': [
+        {'id': 'start', 'type': 'start', 'prompt': 'fixture'},
+        {'id': 'work', 'type': 'agent', 'instructions': 'fixture', 'agent': {'backend': 'codex'}},
+        {'id': 'end', 'type': 'end'}],
+        'connections': [{'id': 'begin', 'source': 'start', 'target': 'work'}, {'id': 'finish', 'source': 'work', 'target': 'end'}]}
+    (layout.root / 'repo').mkdir()
+    storage = workflows.WorkflowStore(layout.root)
+    run = storage.create_run(workflows.validate_definition(definition), 'fixture', layout.root / 'repo')
+    storage.update_run(run['workflow_run_id'], lambda r: r.update(status='running', activations=[
+        {'id': 'transport', 'node_id': 'work', 'role': 'native_control', 'status': 'running', 'created_at': 0.0,
+         'tasks': [{'task_id': TARGET, 'status': 'running'}]}]), 'fixture_native_transport')
 
 
 def canonical(value):
@@ -69,7 +88,8 @@ def unsettled_child(logs):
 def documents(base):
     result = {}
     for scenario in ('settled', 'partial', 'unknown', 'pending', 'incomplete', 'truncated',
-                     'unrecorded', 'refused-documents', 'pending-child-withdrawal-unsettled'):
+                     'unrecorded', 'refused-documents', 'pending-child-withdrawal-unsettled',
+                     'error-workflow-native-control'):
         layout = resolve_layout(root=base / scenario)
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, dict(HOME=str(base), HARFLOW_STATE_ROOT=str(layout.root),
@@ -87,7 +107,7 @@ def documents(base):
             def fixed_fallback():
                 return original_fallback() | dict(observed_at=STAMP)
             stack.enter_context(patch.object(observation, 'fallback', side_effect=fixed_fallback))
-            if scenario == 'pending':
+            if scenario in ('pending', 'error-workflow-native-control'):
                 receipt(logs, TARGET)
             else:
                 record(logs, TARGET)
@@ -100,6 +120,9 @@ def documents(base):
                 note = 'Controlled observer-construction failure after actual cancellation; exact minimal fallback.'
             elif scenario == 'pending':
                 note = 'Qualified waiting launch, controlled dead owner; actual cancel_launch settles it before execution; generation/binding reread.'
+            elif scenario == 'error-workflow-native-control':
+                native_control_run(layout, stack)
+                note = 'Qualified waiting launch that a workflow run owns as a native_control transport; actual cancel refuses it with the stable workflow_native_control reason before any control effect. Operation refusal: an error envelope without an observation.'
             elif scenario == 'incomplete':
                 stack.enter_context(patch.object(tasks, 'CASCADE_MAX_ROUNDS', 1))
                 scan = tasks.TaskRegistry._cascade_targets
@@ -130,11 +153,17 @@ def documents(base):
                 stack.enter_context(patch.object(withdrawal, 'reconcile_withdrawal', return_value=None))
                 note = 'Qualified pending child and real accepted no-spawn claim; controlled unsettled cleanup. Later clean recorded pass cannot erase private withdrawal evidence.'
             out, err = io.StringIO(), io.StringIO()
+            receipt_path = logs / f'{TARGET}.launch.json'
+            receipt_bytes = receipt_path.read_bytes() if receipt_path.exists() else None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = ctl.main(['cancel', TARGET, '--json'])
-            assert code == 0, (scenario, out.getvalue(), err.getvalue())
+            assert code == EXIT_CODES.get(scenario, 0), (scenario, out.getvalue(), err.getvalue())
             doc = json.loads(out.getvalue())
             validate_envelope(doc, CTL_FORMAT, live=True, expected_version=PRODUCT_VERSION)
+            if scenario == 'error-workflow-native-control':
+                assert 'result' not in doc and doc['error']['code'] == 'invalid_params'
+                assert doc['error']['data'] == {'reason': 'workflow_native_control'}
+                assert receipt_bytes == receipt_path.read_bytes()
             if scenario == 'incomplete':
                 assert doc['result']['cascade']['unconverged']
             if scenario == 'pending-child-withdrawal-unsettled':
@@ -154,8 +183,8 @@ def generate():
         output[BUNDLE / name] = canonical(doc)
         manifest['files'][name] = hashlib.sha256(output[BUNDLE / name]).hexdigest()
         manifest['cases'][name] = dict(encoding='json', expected_product_version=PRODUCT_VERSION,
-            format=CTL_FORMAT, required_capabilities=['task-cancel-cascade.v1'], valid=True, exit_code=0,
-            provenance=note + ' Actual ctl.main/envelope serializer and production collector/projection, except explicitly injected fault. Controlled human authority, clocks and process probes; isolated state, path redaction; no provider or real signals. Synthetic qualification evidence, not runtime certification.')
+            format=CTL_FORMAT, required_capabilities=['task-cancel-cascade.v1'], valid=True, exit_code=EXIT_CODES.get(name.removeprefix('ctl-task-cancel-').removesuffix('.json'), 0),
+            provenance=note + (' Actual ctl.main/envelope serializer and production ownership lookup and refusal. Controlled human authority; isolated state; no provider or real signals. Synthetic qualification evidence, not runtime certification.' if name in ERROR_SPECIMENS else ' Actual ctl.main/envelope serializer and production collector/projection, except explicitly injected fault. Controlled human authority, clocks and process probes; isolated state, path redaction; no provider or real signals. Synthetic qualification evidence, not runtime certification.'))
     output[BUNDLE / 'manifest.json'] = (json.dumps(manifest, indent=2, ensure_ascii=False) + '\n').encode()
     output[BUNDLE / 'manifest.sha256'] = (hashlib.sha256(output[BUNDLE / 'manifest.json']).hexdigest() + '  manifest.json\n').encode()
     return output

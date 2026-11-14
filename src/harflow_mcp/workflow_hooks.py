@@ -28,8 +28,8 @@ def refuse_native_control(log_dir: Path, task_id: str) -> None:
     """Internal parent turns are controlled through the owning workflow only."""
     association = owner(log_dir, task_id, strict=True)
     if association is not None and association.get("role") == "native_control":
-        from .workflows import WorkflowError
-        raise WorkflowError("Internal native transports cannot be controlled independently; control the root workflow instead")
+        from .workflows import NativeControlRefused
+        raise NativeControlRefused("Internal native transports cannot be controlled independently; control the root workflow instead")
 
 
 def pause_for_task(log_dir: Path, task_id: str, reason: str) -> None:

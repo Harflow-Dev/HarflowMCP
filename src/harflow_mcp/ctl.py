@@ -1309,8 +1309,11 @@ def _cmd_cancel(args: argparse.Namespace, *, _observation=None, _observation_fal
         cascade = await registry.cancel_cascade(task_id, **({'_observation': _observation} if _observation is not None else {}))
         return cascade, await registry.settle_phase_writes(PHASE_WRITE_SETTLE_SECONDS)
 
+    from .workflows import NativeControlRefused
     try:
         cascade, unrecorded = asyncio.run(cancel_and_settle())
+    except NativeControlRefused as exc:
+        return _fail(args, "invalid_params", str(exc), {"reason": exc.reason})
     except (backends.UnsupportedCapability, ValueError) as exc:
         return _fail(args, "invalid_params", str(exc))
     except control.PhaseWriteError as exc:
@@ -1343,9 +1346,12 @@ def _cmd_cancel(args: argparse.Namespace, *, _observation=None, _observation_fal
 def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str, *, _observation=None, _observation_fallback=None) -> int:
     """`cancel` for a launch with no record: ask its owner to stop waiting, in the existing result shape."""
     from . import task_resources
+    from .workflows import NativeControlRefused
     registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
     try:
         outcome = asyncio.run(registry.cancel_pending(task_id, **({'_observation': _observation} if _observation is not None else {})))
+    except NativeControlRefused as exc:
+        return _fail(args, "invalid_params", str(exc), {"reason": exc.reason})
     except (backends.UnsupportedCapability, ValueError) as exc:
         return _fail(args, "invalid_params", str(exc))
     if outcome is None:

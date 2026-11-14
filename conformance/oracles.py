@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = 'c61bac6e1c3ca00eab4aab4bd1a8f063e98dd91c88365d4f5023127417f432cf'
+PINNED_MANIFEST_SHA256 = '7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -91,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 351 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 352 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
@@ -104,6 +104,28 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         if case.get('encoding') == 'json' and case.get('valid'):
             strict_json(raw)
     return manifest
+
+
+CANCEL_REFUSAL_REASONS = frozenset({'workflow_native_control'})
+
+
+def validate_cancel_refusal(doc, expected_version='0.0.14'):
+    """Permissive shape of a refused `cancel` reply (an operation refusal, not an observation).
+
+    `error.data` and `error.data.reason` are optional. An unknown reason is accepted as a generic
+    refusal; consumers select special handling only from a known reason.
+    """
+    validate_envelope(doc, 'harflow.ctl', expected_version)
+    error = doc.get('error')
+    if 'result' in doc or not isinstance(error, dict) or not isinstance(error.get('code'), str) or not isinstance(error.get('message'), str):
+        raise ConformanceError('invalid cancel refusal')
+    if 'data' in error:
+        data = error['data']
+        if not isinstance(data, dict):
+            raise ConformanceError('invalid cancel refusal data')
+        if 'reason' in data and (not isinstance(data['reason'], str) or not data['reason']):
+            raise ConformanceError('invalid cancel refusal reason')
+    return error
 
 
 def validate_cancel_observation(doc):

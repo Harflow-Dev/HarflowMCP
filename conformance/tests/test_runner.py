@@ -7,12 +7,12 @@ import sys
 
 import pytest
 
-from conformance.oracles import ConformanceError
+from conformance.oracles import ConformanceError, strict_json, validate_cancel_refusal
 from conformance.runner import (isolated_environment, main, publish_report, run_binary_suite,
-                                validate_operation, validate_report)
+                                validate_operation, validate_report, verify_manifest)
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts/v1/manifest.json'
-DIGEST = 'c61bac6e1c3ca00eab4aab4bd1a8f063e98dd91c88365d4f5023127417f432cf'
+DIGEST = '7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68'
 
 
 def fake_engine(tmp_path, addition=''):
@@ -236,3 +236,13 @@ def test_read_only_smoke_refuses_new_broken_state_root_symlink(tmp_path):
     assert state.is_symlink()
     assert os.readlink(state) == '/nonexistent-conformance-target'
     assert not state.exists()
+
+
+def test_runner_verifies_the_manifest_and_the_native_control_refusal_specimen():
+    # The runner selects no validator by fixture name; it verifies the pinned manifest through
+    # `verify_manifest`, and the refusal oracle then accepts the specimen the manifest lists.
+    manifest = verify_manifest(BUNDLE, DIGEST)
+    name = 'ctl-task-cancel-error-workflow-native-control.json'
+    assert manifest['cases'][name]['exit_code'] == 1
+    document = strict_json((BUNDLE.parent / name).read_bytes())
+    assert validate_cancel_refusal(document)['data'] == {'reason': 'workflow_native_control'}

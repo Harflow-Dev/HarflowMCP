@@ -12,11 +12,11 @@ import pytest
 from conformance.oracles import (
     ConformanceError, strict_json, validate_envelope, validate_version_info,
     verify_manifest, validate_cancel_observation, validate_backend_models,
-    validate_backend_models_error,
+    validate_backend_models_error, validate_cancel_refusal, CANCEL_REFUSAL_REASONS,
 )
 
 BUNDLE = Path(__file__).resolve().parents[2] / 'contracts' / 'v1'
-DIGEST = 'c61bac6e1c3ca00eab4aab4bd1a8f063e98dd91c88365d4f5023127417f432cf'
+DIGEST = '7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68'
 
 
 def envelope(format='harflow.ctl'):
@@ -87,15 +87,22 @@ def test_manifest_matches_reviewed_fixture_identity():
     manifest = BUNDLE / 'manifest.json'
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DIGEST
     document = verify_manifest(manifest, expected_sha256=DIGEST)
-    assert len(document['files']) == 351
+    assert len(document['files']) == 352
 
 
 def test_cancellation_fixtures_obey_binding_shape_and_capability():
     manifest = verify_manifest(BUNDLE / 'manifest.json')
     names = sorted(name for name in manifest['files'] if name.startswith('ctl-task-cancel-'))
-    assert len(names) == 9
+    assert len(names) == 10
+    errors = [name for name in names if 'error' in strict_json((BUNDLE / name).read_bytes())]
+    assert errors == ['ctl-task-cancel-error-workflow-native-control.json']
+    assert len(names) - len(errors) == 9
     for name in names:
-        validate_cancel_observation(strict_json((BUNDLE / name).read_bytes()))
+        document = strict_json((BUNDLE / name).read_bytes())
+        if name in errors:
+            validate_cancel_refusal(document)
+        else:
+            validate_cancel_observation(document)
         case = manifest['cases'][name]
         assert case['required_capabilities'] == ['task-cancel-cascade.v1']
         assert 'Actual ctl.main' in case['provenance']
@@ -304,3 +311,42 @@ def test_backend_models_agent_refusal_carries_no_detail():
     doc['error']['data']['detail'] = 'lock_timeout'
     with pytest.raises(ConformanceError):
         validate_backend_models_error(doc)
+
+
+def test_workflow_native_control_refusal_specimen_is_exact():
+    name = 'ctl-task-cancel-error-workflow-native-control.json'
+    manifest = verify_manifest(BUNDLE / 'manifest.json')
+    case = manifest['cases'][name]
+    assert case['valid'] is True and case['exit_code'] == 1
+    assert case['required_capabilities'] == ['task-cancel-cascade.v1']
+    document = strict_json((BUNDLE / name).read_bytes())
+    assert 'result' not in document
+    error = validate_cancel_refusal(document)
+    assert error == {
+        'code': 'invalid_params',
+        'data': {'reason': 'workflow_native_control'},
+        'message': 'Internal native transports cannot be controlled independently; control the root workflow instead',
+    }
+    assert 'workflow_native_control' in CANCEL_REFUSAL_REASONS
+
+
+def refusal(**error):
+    document = envelope()
+    document['error'] = dict(code='invalid_params', message='refused', **error)
+    return document
+
+
+@pytest.mark.parametrize('error', [{}, {'data': {}}, {'data': {'reason': 'future_reason'}},
+                                   {'data': {'reason': 'workflow_native_control', 'extra': 1}}])
+def test_cancel_refusal_oracle_accepts_absent_and_unknown_reasons(error):
+    assert validate_cancel_refusal(refusal(**error))['code'] == 'invalid_params'
+
+
+@pytest.mark.parametrize('document', [
+    refusal(data=[]), refusal(data='x'), refusal(data={'reason': ''}), refusal(data={'reason': 3}),
+    {**envelope(), 'result': {}}, {**envelope(), 'error': {'code': 1, 'message': 'x'}},
+    {**envelope(), 'error': {'code': 'invalid_params'}}, {**envelope(format='harflow.setup'), 'error': {'code': 'x', 'message': 'y'}},
+])
+def test_cancel_refusal_oracle_rejects_malformed_values(document):
+    with pytest.raises(ConformanceError):
+        validate_cancel_refusal(document)

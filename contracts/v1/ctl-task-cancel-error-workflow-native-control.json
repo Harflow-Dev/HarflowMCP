@@ -1,0 +1,1 @@
+{"error":{"code":"invalid_params","data":{"reason":"workflow_native_control"},"message":"Internal native transports cannot be controlled independently; control the root workflow instead"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.14","v":1}

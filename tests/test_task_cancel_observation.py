@@ -500,6 +500,10 @@ def test_contract_fixtures_reproduce_twice_and_exact_shape():
         assert path.read_bytes() == raw, path
         if not path.name.startswith('ctl-task-cancel-'):
             continue
+        if path.name == 'ctl-task-cancel-error-workflow-native-control.json':
+            assert json.loads(raw)['error'] == {'code': 'invalid_params', 'data': {'reason': 'workflow_native_control'},
+                'message': 'Internal native transports cannot be controlled independently; control the root workflow instead'}
+            continue
         observation_doc = json.loads(raw)['result']['cascade']['observation']
         assert set(observation_doc) == {'scope', 'observed_at', 'coverage', 'truncated', 'items'}
         assert len(json.dumps(observation_doc).encode()) <= 65536

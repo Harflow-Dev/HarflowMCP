@@ -2232,14 +2232,42 @@ read-only with respect to execution and settlement: it never signals, releases r
 claims process containment or phase-slot settlement.
 
 `scripts/generate-cancel-cascade-fixtures.py` exercises actual ctl dispatch/serialization with
-isolated qualified state and controlled process/clock facts. Nine `ctl-task-cancel-*.json`
+isolated qualified state and controlled process/clock facts. Nine successful `ctl-task-cancel-*.json`
 specimens include round-bound nonempty `unconverged`, refused documents excluded from rows,
-and a parent with an unsettled pending-child withdrawal. Manifest case metadata records seeded
+and a parent with an unsettled pending-child withdrawal; a tenth, the error envelope
+`ctl-task-cancel-error-workflow-native-control.json`, specimens the refusal reason above. Manifest case metadata records seeded
 state, controlled seams and qualification limits. The handshake generator owns
 `invalid-s05-missing-task-cancel-cascade.json`. Existing non-handshake fixtures and the MCP schema
 bundle retain their bytes. Engine and companion app build independently: engine contract/bundle
 land first; later app adoption must vendor identical fixture bytes and manifest digest and
 require this capability on a fresh handshake. `PRODUCT_VERSION` is unchanged.
+
+#### Refusal reasons
+
+A refused `cancel` is an ordinary error envelope. One refusal additionally carries
+`error.data = {"reason": "workflow_native_control"}`: the target task (a pending launch or a
+recorded task, or a task whose workflow ancestry resolves to one) is positively identified as a
+workflow `native_control` transport, which is controlled only through its root workflow. The
+`error.code` (`invalid_params`), the message text and the exit code (1) are unchanged, and no
+control effect happens first (no workflow pause, cancel request, withdrawal or signal).
+
+- Every other `cancel` refusal keeps its existing shape and carries no `workflow_native_control`
+  reason: a managed caller, undecidable or unverifiable caller authority, an unknown task, an
+  unrelated validation failure, an unsupported capability, and an ownership that cannot be
+  established (cyclic lineage, a receipt that no longer matches its run, an unreadable run or
+  receipt document). Authority refusals still precede target lookup.
+- `task-cancel-cascade.v1` qualifies successful observations only. It does not guarantee the
+  reason and no new capability is added; an absent `error.data.reason` (an older engine or any
+  other refusal) means the consumer shows its generic refusal, and so does a `reason` value it does
+  not recognise. A consumer selects workflow-specific handling only from a received
+  `workflow_native_control`.
+- The MCP `cancel_task` tool and its schema are unchanged. A Rust engine must emit the same reason.
+- A launch that spawns between the ctl record read and the cancel keeps its existing outcome (the
+  native reason when the check runs, otherwise `unknown_task`); this change does not alter that race.
+
+`ctl-task-cancel-error-workflow-native-control.json` specimens the refusal as an error envelope with
+no observation ("Operation refusals remain errors"); its manifest case has `valid: true` and
+`exit_code: 1`.
 
 ### Continuation-stop observations (`task-continuation-stop.v1`)
 
