@@ -20,7 +20,7 @@ S07_REPO="$PWD"
 S07_ID="$(.venv/bin/python -c 'import uuid; print(uuid.uuid4().hex)')"
 .venv/bin/python -m conformance \
   --source-repo "$S07_REPO" \
-  --commit "$(git rev-parse v0.0.14^{commit})" \
+  --commit "$(git rev-parse HEAD^{commit})" \
   --python "$S07_REPO/.venv/bin/python" \
   --manifest "$S07_REPO/contracts/v1/manifest.json" \
   --manifest-sha256 7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68 \
@@ -38,7 +38,7 @@ The source target is a Git archive of the full exact commit, extracted under the
 fresh output directory after rejecting unsafe archive entries. The public CLI
 loads from its captured `src` directory under isolated Python; its loader must
 resolve inside that snapshot. Source/runtime fingerprints are checked around
-execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 352-fixture 0.0.14 bundle (0.0.13 plus the `backend-models.v1` contract). The examples use this bundle, not the 0.0.12 manifest. Earlier S07/S08/S09
+execution. No editable checkout is selected as the tested engine. The current infrastructure pins the complete 352-fixture bundle on main after v0.0.14 (still stamped 0.0.14; 0.0.13 plus the `backend-models.v1` contract and the native-control cancel refusal specimen). The tagged v0.0.14 engine does not produce that specimen, so the examples below that pin the 352-fixture manifest digest are not satisfied by an engine built from the v0.0.14 tag. The examples use this bundle, not the 0.0.12 manifest, and select an exact committed engine revision on main (`HEAD` here) because the v0.0.14 tag does not match the pinned digest. Earlier S07/S08/S09
 receipts retain their original source and manifest identities; this repin does not requalify
 their scenarios, a managed runtime, or any consumer. The S08 and S09 profiles still snapshot the older 0.0.7 sources
 (manifest `383ecf7a…`), which `verify_manifest` no longer accepts since the pinned digest moved
@@ -289,7 +289,7 @@ scoped-read refusals around them. Case groups live in `cases.py`, `cases_stop.py
 
 ```sh
 .venv/bin/python -m conformance.e1.scenarios \
-  --source-repo "$PWD" --commit "$(git rev-parse v0.0.14^{commit})" --python "$PWD/.venv/bin/python" \
+  --source-repo "$PWD" --commit "$(git rev-parse HEAD^{commit})" --python "$PWD/.venv/bin/python" \
   --manifest "$PWD/contracts/v1/manifest.json" \
   --manifest-sha256 7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68 \
   --output /path/to/new-empty-dir
@@ -323,7 +323,7 @@ never acceptance evidence (its extra environment keys are reported). The fake-ba
 D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
 
 ```sh
-.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse v0.0.14^{commit})" \
+.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse HEAD^{commit})" \
   --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
   --manifest-sha256 7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68 \
   --product-version 0.0.14 --seam none --output /path/to/new-dir

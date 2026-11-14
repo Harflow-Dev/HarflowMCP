@@ -238,18 +238,33 @@ def test_other_refusals_keep_their_shape_on_both_paths(world, monkeypatch, capsy
     assert code == 1 and error(out) == {"code": "invalid_params", "message": str(exc)}
 
 
-def test_launch_that_spawns_between_read_and_cancel_reports_reason_or_unknown_task(world, monkeypatch, capsys):
+def test_still_pending_native_launch_reports_the_exact_reason(world, capsys):
     world.gen.receipt(world.logs, world.target)
     world.native_run()
-    real = store.read
-    calls = []
-    def stale_first(log_dir, task_id, *a, **k):
-        calls.append(task_id)
-        return None if len(calls) == 1 else real(log_dir, task_id, *a, **k)
-    monkeypatch.setattr(ctl.store, "read", stale_first)
+    code, out, _ = world.run("cancel", world.target, "--json", capsys=capsys)
+    assert code == 1 and error(out) == {"code": "invalid_params", "data": REASON, "message": MESSAGE}
+
+
+def test_launch_that_spawns_between_read_and_cancel_keeps_unknown_task(world, monkeypatch, capsys):
+    """Known pre-existing gap: the spawn race reports unknown_task, with no control effect."""
+    world.gen.receipt(world.logs, world.target)
+    world.native_run()
+    seen = effects(monkeypatch)
+    real_view = task_resources.pending_view
+    def spawn_after_lookup(log_dir, task_id, **kwargs):
+        view = real_view(log_dir, task_id, **kwargs)
+        assert view is not None  # ctl saw a pending launch with no record
+        world.gen.record(world.logs, task_id, status="running", exit_code=None, output_drained=False, finished_at=None)
+        return view
+    monkeypatch.setattr(task_resources, "pending_view", spawn_after_lookup)
+    receipt_path = world.logs / f"{world.target}.launch.json"
+    receipt_before = receipt_path.read_bytes()
     code, out, _ = world.run("cancel", world.target, "--json", capsys=capsys)
     refusal = error(out)
-    assert code == 1 and (refusal.get("data") == REASON or refusal["code"] == "unknown_task")
+    assert code == 1 and refusal["code"] == "unknown_task" and refusal["message"] == f"unknown task_id: {world.target}"
+    assert "data" not in refusal or "reason" not in refusal["data"]
+    assert seen == [] and receipt_path.read_bytes() == receipt_before
+    assert not list(world.logs.glob("*withdraw*")) and not list(world.logs.glob("*cancel*"))
 
 
 async def test_registry_refusal_text_and_type_hierarchy_are_unchanged_for_mcp_callers(world):
