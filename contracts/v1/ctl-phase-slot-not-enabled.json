@@ -1,1 +1,1 @@
-{"error":{"code":"phase_slots_not_enabled","message":"phase slots are disabled; a human must quiesce all owners and run harflow-ctl slot enable"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.13","v":1}
+{"error":{"code":"phase_slots_not_enabled","message":"phase slots are disabled; a human must quiesce all owners and run harflow-ctl slot enable"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.14","v":1}

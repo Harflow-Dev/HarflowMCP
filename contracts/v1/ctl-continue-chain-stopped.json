@@ -1,1 +1,1 @@
-{"error":{"code":"start_failed","data":{"chain_root_task_id":"task-continuation-stop","reason":"chain_stopped"},"message":"ValueError: Continuation chain was cancelled; start a new task explicitly"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.13","v":1}
+{"error":{"code":"start_failed","data":{"chain_root_task_id":"task-continuation-stop","reason":"chain_stopped"},"message":"ValueError: Continuation chain was cancelled; start a new task explicitly"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.14","v":1}

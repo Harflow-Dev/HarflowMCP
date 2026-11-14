@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '7f4ae95ba97e7391dc9cbe4d24b10db64730848143c6690886056f9f9b8d46ba'
+PINNED_MANIFEST_SHA256 = 'c61bac6e1c3ca00eab4aab4bd1a8f063e98dd91c88365d4f5023127417f432cf'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""

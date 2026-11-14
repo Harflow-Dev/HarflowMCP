@@ -190,7 +190,7 @@ def test_env_agent_refusal_does_not_create_root(tmp_path, monkeypatch, capsys):
 def test_capability_advertised():
     from harflow_mcp.wire_contracts import CAPABILITIES, version_info
     assert "task-list-watch.v1" in CAPABILITIES
-    assert PRODUCT_VERSION == "0.0.13"
+    assert PRODUCT_VERSION == "0.0.14"
     info = version_info({"HOME": "/tmp", "HARFLOW_STATE_ROOT": "/tmp/harflow-fixture-home/.harflow"})
     assert "task-list-watch.v1" in info["capabilities"]
 
