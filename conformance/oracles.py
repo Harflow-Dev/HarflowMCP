@@ -7,7 +7,7 @@ import re
 import stat
 from datetime import datetime
 
-PINNED_MANIFEST_SHA256 = '7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68'
+PINNED_MANIFEST_SHA256 = 'bc4d4cf5d8caaab46020188075e68854e50cd16bfc77bab56fb25bbeb51af8c8'
 
 class ConformanceError(ValueError):
     """Evidence is missing, unsafe, or incompatible."""
@@ -91,7 +91,7 @@ def verify_manifest(path, expected_sha256=PINNED_MANIFEST_SHA256):
         raise ConformanceError('manifest digest mismatch')
     manifest = strict_json(data)
     files = manifest.get('files')
-    if not isinstance(files, dict) or len(files) != 352 or set(manifest.get('cases', {})) != set(files):
+    if not isinstance(files, dict) or len(files) != 381 or set(manifest.get('cases', {})) != set(files):
         raise ConformanceError('incomplete fixture inventory')
     for name, digest in files.items():
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..') or '\\' in name or not re.fullmatch('[a-f0-9]{64}', digest):
@@ -250,6 +250,148 @@ def validate_backend_models(doc, expected_version='0.0.13'):
     return result
 
 
+MESSAGE_STATUSES = frozenset({'queued', 'delivering', 'delivered', 'undeliverable', 'cancelled'})
+MESSAGE_DELIVERIES = frozenset({'queue', 'now'})
+MESSAGE_SHAPES = frozenset({'send', 'cancel', 'error', 'task-status', 'workflow-messages', 'workflow-detail'})
+
+# The messaging.v1 fixtures, by name. The oracle is applied to exactly these, never selected by sniffing
+# a `messages` key: conversation-delivery fixtures and `queued_followups` carry other vocabularies.
+MESSAGING_FIXTURE_SHAPES = {
+    'ctl-messaging-queued.json': 'send',
+    'ctl-workflow-messages.json': 'workflow-messages',
+    'ctl-messaging-queued-ack.json': 'send',
+    'ctl-messaging-queued-target-settled.json': 'send',
+    'ctl-messaging-cancel.json': 'cancel',
+    'ctl-messaging-cancel-refused-not-queued.json': 'error',
+    'ctl-messaging-status-queued-cancelled.json': 'task-status',
+    'ctl-messaging-status-reserved.json': 'task-status',
+    'ctl-messaging-status-delivery-unknown.json': 'task-status',
+    'ctl-messaging-status-delivered.json': 'task-status',
+    'ctl-messaging-status-superseded.json': 'task-status',
+    'ctl-messaging-status-workflow-node.json': 'task-status',
+    'ctl-messaging-status-workflow-orchestrator.json': 'task-status',
+    'ctl-messaging-send-error-superseded.json': 'error',
+    'ctl-messaging-send-error-too-large.json': 'error',
+    'ctl-messaging-send-error-too-many.json': 'error',
+    'ctl-messaging-now-continuation-started.json': 'send',
+    'ctl-messaging-now-continuation-refused.json': 'send',
+    'ctl-messaging-now-continuation-uncertain.json': 'send',
+    'ctl-messaging-now-checkpoint-required.json': 'send',
+    'ctl-messaging-workflow-send.json': 'send',
+    'ctl-messaging-workflow-cancel.json': 'cancel',
+    'ctl-messaging-workflow-queued-target-settled-cancelled.json': 'send',
+    'ctl-messaging-workflow-queued-target-settled-completed.json': 'send',
+    'ctl-messaging-workflow-queued-failed-run.json': 'send',
+    'ctl-messaging-workflow-queued-completed-builder.json': 'send',
+    'ctl-messaging-workflow-now-terminal.json': 'send',
+    'ctl-messaging-workflow-now-delivery-started.json': 'send',
+    'ctl-messaging-workflow-status-undeliverable.json': 'workflow-messages',
+    'ctl-messaging-workflow-status-truncated.json': 'workflow-messages',
+    'ctl-messaging-workflow-detail-messages.json': 'workflow-detail',
+}
+
+
+def _text_field(container, key, label):
+    if key in container and not isinstance(container[key], str):
+        raise ConformanceError('invalid messaging ' + label)
+
+
+def _refusal(container):
+    if 'refusal' in container:
+        refusal = container['refusal']
+        if not isinstance(refusal, dict) or not isinstance(refusal.get('code'), str) or not refusal['code'] or not isinstance(refusal.get('message'), str):
+            raise ConformanceError('invalid messaging refusal')
+
+
+def _lifecycle(container, label):
+    if container.get('status') not in MESSAGE_STATUSES:
+        raise ConformanceError('invalid messaging ' + label + ' status')
+    if 'delivery' in container and container['delivery'] not in MESSAGE_DELIVERIES:
+        raise ConformanceError('invalid messaging delivery')
+    for key in ('message_id', 'reason', 'note', 'target_status', 'successor_task_id', 'delivery_task_id', 'task_id', 'workflow_run_id'):
+        _text_field(container, key, key)
+    for key in ('target_settled', 'delivery_started', 'text_truncated'):
+        if key in container and type(container[key]) is not bool:
+            raise ConformanceError('invalid messaging ' + key)
+    _refusal(container)
+
+
+def validate_message_entry(entry):
+    """One message in a `messages` projection (task status or workflow run). Timestamps are not typed:
+    task ledgers use ISO strings and workflow ledgers use numbers. Unknown optional fields are tolerated."""
+    if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not entry['id'] or type(entry.get('seq')) is not int:
+        raise ConformanceError('invalid messaging entry')
+    _lifecycle(entry, 'entry')
+    if entry['status'] in {'delivered', 'cancelled'} and 'text' in entry:
+        raise ConformanceError('delivered or cancelled messages keep no text')
+    if 'text' in entry and not isinstance(entry['text'], str):
+        raise ConformanceError('invalid messaging text')
+    if 'target' in entry and (not isinstance(entry['target'], dict) or entry['target'].get('kind') not in {'task', 'workflow'}):
+        raise ConformanceError('invalid messaging target')
+    return entry
+
+
+def validate_messaging(doc, shape, expected_version='0.0.14'):
+    """Permissive shape of a messaging.v1 reply, for the explicitly named `shape` only.
+
+    `send`: a send acknowledgement (lifecycle `status`, optional `refusal`, settled fields). `cancel`: a
+    cancellation result. `error`: an error envelope (`error.code`/`error.message`; `error.data` tolerated).
+    `task-status`: only the entries of `task.messages` (the task snapshot has no message lifecycle of its own).
+    `workflow-messages`: only the entries of `result.messages` (the workflow's top-level `status` is the run's).
+    `workflow-detail`: the `workflow-detail --view messages` page envelope and, for a complete single page,
+    the decoded entries. `queued_followups` and conversation-delivery documents are out of scope.
+    """
+    if shape not in MESSAGE_SHAPES:
+        raise ConformanceError('unknown messaging shape')
+    validate_envelope(doc, 'harflow.ctl', expected_version)
+    if shape == 'error':
+        error = doc.get('error')
+        if 'result' in doc or not isinstance(error, dict) or not isinstance(error.get('code'), str) or not error['code'] or not isinstance(error.get('message'), str):
+            raise ConformanceError('invalid messaging error')
+        if 'data' in error and not isinstance(error['data'], dict):
+            raise ConformanceError('invalid messaging error data')
+        return error
+    if 'error' in doc:
+        raise ConformanceError('unexpected messaging error')
+    if shape == 'task-status':
+        task = doc.get('task')
+        messages = task.get('messages') if isinstance(task, dict) else None
+        if not isinstance(messages, list):
+            raise ConformanceError('invalid messaging task status')
+        return [validate_message_entry(entry) for entry in messages]
+    result = doc.get('result')
+    if not isinstance(result, dict):
+        raise ConformanceError('invalid messaging result')
+    if shape in {'send', 'cancel'}:
+        if not isinstance(result.get('message_id'), str) or not result['message_id']:
+            raise ConformanceError('invalid messaging acknowledgement')
+        _lifecycle(result, 'result')
+        if 'seq' in result and type(result['seq']) is not int:
+            raise ConformanceError('invalid messaging seq')
+        if shape == 'cancel' and (result['status'] != 'cancelled' or 'text' in result):
+            raise ConformanceError('invalid messaging cancellation')
+        return result
+    if shape == 'workflow-messages':
+        messages = result.get('messages')
+        if not isinstance(messages, list) or ('messages_truncated' in result and type(result['messages_truncated']) is not bool):
+            raise ConformanceError('invalid messaging workflow messages')
+        return [validate_message_entry(entry) for entry in messages]
+    # workflow-detail: a lossless page; the message chunk is decoded only when it is the complete document.
+    if (type(result.get('response_version')) is not int or result.get('view') != 'messages' or result.get('encoding') != 'json'
+            or not isinstance(result.get('workflow_run_id'), str) or not re.fullmatch('[a-f0-9]{64}', str(result.get('content_sha256')))
+            or type(result.get('offset')) is not int or result['offset'] < 0 or type(result.get('total_characters')) is not int
+            or not isinstance(result.get('chunk'), str) or result.get('next_cursor') is not None and not isinstance(result['next_cursor'], str)):
+        raise ConformanceError('invalid messaging detail page')
+    if result['next_cursor'] is None and result['offset'] == 0:
+        if len(result['chunk']) != result['total_characters'] or hashlib.sha256(result['chunk'].encode()).hexdigest() != result['content_sha256']:
+            raise ConformanceError('messaging detail digest mismatch')
+        entries = strict_json(result['chunk'].encode())
+        if not isinstance(entries, list):
+            raise ConformanceError('invalid messaging detail messages')
+        return [validate_message_entry(entry) for entry in entries]
+    return None
+
+
 def validate_event_page(doc, expected_version='0.0.13'):
     validate_envelope(doc, 'harflow.ctl', expected_version)
     result = doc.get('result')
@@ -271,7 +413,8 @@ def validate_fake_observation(observation, ledger):
 
 # Capabilities a fresh handshake must show before each public command is run (shared by the controlled profiles).
 COMMAND_CAPABILITIES = {'task-events': 'task-event-page.v1', 'task-prompt': 'task-prompt.v1', 'send': 'messaging.v1',
-                        'cancel-message': 'messaging.v1', 'backend-models': 'backend-models.v1'}
+                        'cancel-message': 'messaging.v1', 'workflow-send': 'messaging.v1',
+                        'workflow-cancel-message': 'messaging.v1', 'backend-models': 'backend-models.v1'}
 
 
 def required_capabilities(argv):

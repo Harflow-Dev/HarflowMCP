@@ -95,6 +95,16 @@ Rust adoption. See [the contract](contracts.md#pending-launch-discovery-task-pen
 for coverage and cursor limits. The complete canonical fixture bundle must be re-vendored before
 consumer adoption; a current source capability must not be inferred from product version alone.
 
+### Messaging fixture qualification
+
+`scripts/generate-messaging-fixtures.py --check` regenerates the `ctl-messaging-*.json` specimens of
+`messaging.v1` through actual `ctl.main` dispatch twice in separate state roots and compares them with
+`contracts/v1`; `validate_messaging` in `conformance/oracles.py` checks them independently of the
+engine. The generator controls clocks, UUIDs, process identities and caller detection, seeds
+qualified records, and, where its case provenance says so, replaces `TaskRegistry.continue_task` or
+`workflows._launch`; no agent or provider runs. These checks do not qualify a real continuation
+launch, the native consumer or Rust adoption.
+
 ### Backend model listing qualification
 
 `backend-models.v1` is an additive ctl read capability in source, negotiated independently of the product

@@ -1775,7 +1775,11 @@ uses its existing builder continuation route. Pending questions, approvals, unce
 attempt budgets and unsupported interruption remain barriers. No current backend adapter certifies
 a safe mid-turn interrupt primitive. A now refusal is an accepted queued response carrying
 `refusal: {code, message}` and the message ID; it does not roll back admission. Codes include
-`interrupt_unsupported`, `workflow_checkpoint_required` and `continuation_refused`. Successful
+`interrupt_unsupported`, `workflow_checkpoint_required`, `continuation_refused` and
+`continuation_uncertain`. The last is reported when a continuation launch failed after the queued
+messages were reserved: they are no longer queued, the response status is `delivering` (or
+`delivered` when the ledger already shows consumption), and the caller must inspect the
+continuation instead of resending. Successful
 continuation adds `successor_task_id` or `delivery_started`; it does not claim the model has read it.
 
 Responses contain `message_id`, `seq`, `status`, `delivery`, and task/run IDs. A queued send to a
@@ -1798,8 +1802,31 @@ Cancel accepts only queued records; claiming and cancellation serialize through 
 
 Messages are limited to 32 KiB UTF-8 each and 16 outstanding per task/run. Workflow ledgers retain
 at most 256 KiB of text and bounded terminal history. Compact workflow status returns text previews
-and `messages_truncated`; `workflow-detail --view messages` pages the full retained messages.
+and `messages_truncated`, emitted by `harflow-ctl workflow-status RUN --monitor-view`; plain
+`workflow-status RUN --json` returns the full run messages without that field.
+`workflow-detail --view messages` pages the full retained messages.
 The queue limits are admission limits, not additional execution or filesystem authority.
+
+`scripts/generate-messaging-fixtures.py` exercises actual ctl dispatch/serialization of the
+behaviour above with isolated qualified state and controlled clocks, UUIDs, process identities and
+caller detection; `--check` regenerates the bundle twice in separate state roots, requires
+identical bytes and compares them with `contracts/v1`. Its `ctl-messaging-*.json` specimens
+(stamped 0.0.14, requiring `messaging.v1`) cover send and cancel acknowledgements for tasks and
+workflows, `target_settled` for a settled task and for cancelled and completed runs (and its
+absence for failed runs and completed builders), task `messages` for queued, cancelled, reserved,
+uncertain (delivering with a reason), delivered and superseded (`undeliverable`) entries, the
+delivering and delivered entries of node and orchestrator tasks, `undeliverable` workflow messages,
+the compact `workflow-status --monitor-view` read with `messages_truncated`, the `workflow-detail --view messages` page, the Send now
+refusals and continuations (`workflow_terminal`, `workflow_checkpoint_required`,
+`continuation_refused`, `continuation_uncertain`, `successor_task_id`, `delivery_started`) and the
+admission and cancel error envelopes (`superseded`, `message_too_large`, `queue_full`,
+`not_cancellable`). Manifest provenance names each controlled seam. Delivered and cancelled
+records carry no message text in any of them: the engine has no path that returns a delivered
+message with its text, so no such specimen exists. The two older 0.0.4 specimens
+(`ctl-messaging-queued.json`, `ctl-workflow-messages.json`) are unchanged. The conformance oracle
+`validate_messaging` checks these documents permissively and only for the named fixtures. These are
+synthetic qualification specimens, not runtime certification, and consumers must re-vendor the
+complete bundle and manifest.
 
 `workflow-build --monitor` (qualified by `messaging.v1`) records human Monitor ownership in the initial builder document before launch. The public MCP builder keeps caller ownership by default. Builder follow-up, including the legacy builder-followup tool, rechecks the current owner inside its feedback mutation; Send now additionally requires an idle builder there. A terminal workflow Send now response is `undeliverable` with `workflow_terminal`, never a promise that the message remains queued.
 

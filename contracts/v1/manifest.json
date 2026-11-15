@@ -3415,6 +3415,470 @@
       "valid": true,
       "exit_code": 1,
       "provenance": "Qualified waiting launch that a workflow run owns as a native_control transport; actual cancel refuses it with the stable workflow_native_control reason before any control effect. Operation refusal: an error envelope without an observation. Actual ctl.main/envelope serializer and production ownership lookup and refusal. Controlled human authority; isolated state; no provider or real signals. Synthetic qualification evidence, not runtime certification."
+    },
+    "ctl-messaging-cancel-refused-not-queued.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; the real send is rewritten to consumed (with its successor id) through the production ledger writer, a completed successor record is seeded, then a real cancel-message is refused.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-cancel.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; a real send then a real cancel-message withdraws it while still queued.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-now-checkpoint-required.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Paused workflow run with an open input question seeded through the production WorkflowStore; a real workflow-send --delivery now is refused as workflow_checkpoint_required and the message stays queued (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-now-continuation-refused.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record whose full prompt source is absent; the real continue_task refuses under its continuation lock before any reservation, and the message stays queued.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-now-continuation-started.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; TaskRegistry.continue_task is replaced at class level by a stub that returns a successor id (called with consume_followups=True). This is a synthetic continuation return: nothing is reserved, launched or spawned, so it is not proof of a real reservation and is never paired with a status read.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-now-continuation-uncertain.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; TaskRegistry.continue_task is replaced at class level by a fault that reserves the queued message through the real follow-up reservation and then raises, so the item is no longer queued. Synthetic fault, not a real launch failure.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-queued-ack.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Running claude task record with a controlled live pid; a real send queues it on the follow-up ledger.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-queued-target-settled.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; a real send reports target_settled, target_status and a note.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-send-error-superseded.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task with a qualified successor record; a real send is refused.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-send-error-too-large.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; a 32,769 byte message is refused (an exactly 32 KiB message is accepted in the same scenario).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-send-error-too-many.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record with sixteen real outstanding messages; the seventeenth send is refused.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-delivered.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; the real send is rewritten to consumed through the production ledger writer and a completed successor record is seeded. Delivered records keep metadata only (no text). Only the messages and queued_followups entries are the subject.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-delivery-unknown.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; the real send is rewritten to reserved by a controlled dead owner with no successor record, and the production read-time rules resolve it to delivery_unknown (delivering with a reason, text kept). Only the messages and queued_followups entries are the subject.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-queued-cancelled.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; two real sends and a real cancel-message, then a real status read. Only the messages and queued_followups entries are the subject.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-reserved.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; the real send is rewritten to reserved for a successor with no record, owned by a controlled live process, so the production read-time rules leave it delivering. Only the messages and queued_followups entries are the subject.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-superseded.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed task record; a real send is admitted, then a qualified successor record is added; the production read-time rules mark the message undeliverable (superseded, text kept). Only the messages and queued_followups entries are the subject.",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-workflow-node.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Workflow run with a completed node attempt and a real node-targeted workflow-send; the production dispatch claim (workflow_messages.claim inside a WorkflowStore mutation, as the dispatcher does) reserves a later attempt of the same node, whose task record is a controlled live running record, so a real status read of that node task shows the message delivering with delivery_task_id. Only the messages entry is the subject (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-status-workflow-orchestrator.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Workflow run with a completed orchestrator attempt and two real messages (one addressed to the orchestrator task, one to the workflow); the production dispatch claim reserves a later orchestrator attempt, which is then settled through the store so reconciliation marks both delivered (metadata only, with delivery_task_id), and a real status read of that orchestrator task shows them. Workflow-level messages are only ever claimed by orchestrator or builder activations (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-cancel.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Running workflow run; a real workflow-send then a real workflow-cancel-message (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-detail-messages.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Running workflow run with a real workflow-level and a real node-targeted message; a real workflow-detail --view messages returns the complete single-page lossless chunk (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-now-delivery-started.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Paused workflow run seeded through the production WorkflowStore with no live attempt or open question; a real workflow-send --delivery now resumes it through the existing control (workflows._launch replaced, so no supervisor or agent starts).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-now-terminal.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Cancelled workflow run seeded through the production WorkflowStore; a real workflow-send --delivery now is refused as workflow_terminal and the message is undeliverable (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-queued-completed-builder.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed builder run whose status is seeded through the production WorkflowStore; a real workflow-send reports no target_settled fields because the run can still consume a message (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-queued-failed-run.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Failed workflow run whose status is seeded through the production WorkflowStore; a real workflow-send reports no target_settled fields because the run can still consume a message (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-queued-target-settled-cancelled.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Cancelled workflow run whose status is seeded through the production WorkflowStore; a real workflow-send reports target_settled, target_status, reason and note (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-queued-target-settled-completed.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Completed workflow run whose status is seeded through the production WorkflowStore; a real workflow-send reports target_settled, target_status, reason and note (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-send.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Running workflow run created through the production WorkflowStore; a real workflow-send queues a workflow-level message (workflows._launch replaced so no supervisor starts).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-status-truncated.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Cancelled workflow run with ten real workflow-send messages, all undeliverable; the compact workflow-status --monitor-view keeps the newest eight final messages, truncates text to 200 characters and reports messages_truncated (the only status read that carries that field) (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
+    },
+    "ctl-messaging-workflow-status-undeliverable.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "messaging.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": {
+        "producer": "scripts/generate-messaging-fixtures.py through ctl.main dispatch and the production messaging, ledger and projection code",
+        "controlled_facts": "Controlled seams: isolated qualified state root (redacted to /workspace); fixed clocks (task duration, ledger, workflow and continuation-stop observation stamps), deterministic UUIDs, pinned own process identity and process liveness probes, human caller detection; seeded qualified records; follow-up ledger state rewritten through the production follow-up writer and workflow owner receipts written through task_supervision, where stated. Running workflow run with one completed node attempt; a real node-targeted workflow-send queues a message, the run is then cancelled through the store so the production reconciliation marks it undeliverable (text and reason kept), and a real workflow-status reads the complete run document. Only the messages entry is the subject (workflows._launch replaced).",
+        "synthetic": true,
+        "runtime_qualification": false
+      }
     }
   },
   "files": {
@@ -3769,6 +4233,35 @@
     "ctl-backend-models-unavailable-unparseable.json": "5062af49127f014d67859ebd65b7772984c0e03a2b6725efc302a8ee4cb47f47",
     "ctl-backend-models-usage-unknown-backend.json": "3b44efea257e72067811fd450c75d19977f83730a810c2196a2d8f9a1598b9c7",
     "ctl-backend-models-undecidable-unmarked-root.json": "1c2ec28a90f0b6c8d8da9b2233ed5f6e88bf3973b2bcbf1e4c9256749237e524",
-    "ctl-task-cancel-error-workflow-native-control.json": "7ceca513cbec9db1d42873fe1d3f95f31a82020588e321c0a6c03d4b19d8a5bb"
+    "ctl-task-cancel-error-workflow-native-control.json": "7ceca513cbec9db1d42873fe1d3f95f31a82020588e321c0a6c03d4b19d8a5bb",
+    "ctl-messaging-cancel-refused-not-queued.json": "f8686d9565aa77768c61cc8d6382a923a4a3ddda75755ce5f3589b5596a497ed",
+    "ctl-messaging-cancel.json": "e3fc32e344ff672c75de2012dcecc6ca384291c070ac5afc5be64714138339a9",
+    "ctl-messaging-now-checkpoint-required.json": "8d13e61034deed09aa5cac30a4740aa286648320a5c553d155b08ed115b296e7",
+    "ctl-messaging-now-continuation-refused.json": "44c0f0e6280a6838e8127a22aa4e563dffd89a1c3810a967da653644af2fd93b",
+    "ctl-messaging-now-continuation-started.json": "03ab2e2f20cba2890c53990d81253deaf7dc9f8babbb8be1f2628e804d92e7bd",
+    "ctl-messaging-now-continuation-uncertain.json": "b1b7f27aad61c00a124e042d8c41619f98f39c25447c20aefd2b98387ccd8921",
+    "ctl-messaging-queued-ack.json": "d297c1680f650574bb4179c2ac806d478b13ebd7ddab789ce530321206537522",
+    "ctl-messaging-queued-target-settled.json": "f2765e1e72fe4dec5265d358b86860b8db22f7585c58a0b536ca95baa5a9c69c",
+    "ctl-messaging-send-error-superseded.json": "4de3066f8bfd643354e85a789b7fe91eaea675334bbc106cf30338e105c231a8",
+    "ctl-messaging-send-error-too-large.json": "b538c4cd14e674650f9c742cf9b42f01cd4652e97a90086467354dad6172aff3",
+    "ctl-messaging-send-error-too-many.json": "ed44fd4d60b0e139e982f4aedf5b784c4647fcfbea53f6c21d310845b7bb071a",
+    "ctl-messaging-status-delivered.json": "d41bc97db03b48dd5dfa829df6f458b86b1734539ca7a6bdfffd5b45061669ee",
+    "ctl-messaging-status-delivery-unknown.json": "60452543564a31e18c3194610c0ba4d5abb7ff9af7ed5aa39e967fec7ca5a6c0",
+    "ctl-messaging-status-queued-cancelled.json": "0179a80e7826f78dc1e0fc365c7e522e2939619495c42e5e4e1d2a08c1281db8",
+    "ctl-messaging-status-reserved.json": "b6c4b73aa51d48ba5fad4f056cf2f98872821cd80e61215da46a93140c22b1dd",
+    "ctl-messaging-status-superseded.json": "fa9bb67b1933e93dddddfc7337ff1bc9ea5dff7019ee119ed51d97ae00957f82",
+    "ctl-messaging-status-workflow-node.json": "c4b319307db17f4b8808f45af750ff76994f6546fdb3d28566776ce6f95a7a27",
+    "ctl-messaging-status-workflow-orchestrator.json": "4d2fa828906e48f9f0c0c84372c7f4bdb5a4fdcfe0def739c46c2cc35673dda0",
+    "ctl-messaging-workflow-cancel.json": "b2af2330a4c1de05e0c4635e337690adda94f62b18a372c244701597c79d7a71",
+    "ctl-messaging-workflow-detail-messages.json": "bac3c5ef07a292672241bb8d4e7cd4250ce59d905a6c3f36e5f35dfe556fc54b",
+    "ctl-messaging-workflow-now-delivery-started.json": "a4944adde18e55f106aa821629575469be5be0198cd77f0779dc434b42aed6c8",
+    "ctl-messaging-workflow-now-terminal.json": "ab9002c55ad1c74f9611102c61f4f5a75663fb87b2083e0d6fb8708b8d762fe0",
+    "ctl-messaging-workflow-queued-completed-builder.json": "aaa2697009d7050436a9990be3d05ab5afa2b5423f5f3218614d55058f4453fd",
+    "ctl-messaging-workflow-queued-failed-run.json": "9248f1e7b94ecf2135c984427a37df802df6cddd909a28f98400a69fb8d710bd",
+    "ctl-messaging-workflow-queued-target-settled-cancelled.json": "aa7a5a904556fd68a7b180d290033b2459fc00b8eba4677509a17bdbc8197820",
+    "ctl-messaging-workflow-queued-target-settled-completed.json": "95e3abae34acbf6e6fbaefdb3e38ed2cc7586548baf92134632dde28617cbb23",
+    "ctl-messaging-workflow-send.json": "5cddaf57041f08af6c64b11ad0ce1e5b4e85c9c7991f2bb86a8a5c7bab5b594f",
+    "ctl-messaging-workflow-status-truncated.json": "b57e76a35c7fae863c8dc43433c5c0a6289513a8a8e8e1c727ca87ef7494475a",
+    "ctl-messaging-workflow-status-undeliverable.json": "f94a96d1c1ce0913b78160e3fdc8ac1de50e3bddd3e33061fb42149f0afab766"
   }
 }
