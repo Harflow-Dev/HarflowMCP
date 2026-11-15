@@ -1,8 +1,10 @@
 # E2 lifecycle conformance: the generic pinned-target adapter and the fake-backend seam
 
-Status: the adapter exists (`conformance/lifecycle`); the **fake-backend seam is an open design item** and
-only a proposal is written here, which also depends on the D6 decision below. Nothing in this document changes a
-contract, the engine or Python behaviour.
+Status: the adapter exists (`conformance/lifecycle`). **The owner decided O1 on 2026-11-12: option A plus 5**
+(a separately built fake `claude` first on the case `PATH`, launched only at explicit `--freedom unrestricted`; no
+engine selector, allow-list or evidence file), and the seam is built: `--seam path-fake`, the scripted fake in
+`conformance/claude_fake` and its recording bundle. Open questions 2, 4, 5 and 6 below remain. Nothing in this
+document changes a contract, the engine or Python behaviour.
 
 ## What the adapter is
 
@@ -54,19 +56,19 @@ and the empty task list and then reports `blocked` for lack of independent no-sp
 controlled-source profile (in-process backend replacement, a shim, extra environment) to prove the case logic:
 all six pass on Python 0.0.11. That seam is a test of the **cases**, not of any pinned binary.
 
-**The validated run used the S08 observer**, which relies on participants registered by the Python injection. The
-new `OsObserver` (kernel peer PID, ancestry rendezvous, kqueue watches) is unit-tested with a process tree of
-its own, but its integration into the case logic is **unproved**: no case has run on it. Before any fake is built
-the seam interface it must satisfy is:
+**The first validated run used the S08 observer**, which relies on participants registered by the Python injection. The
+`OsObserver` (kernel peer PID, ancestry rendezvous, kqueue watches) is now integrated into the case logic by
+`PathFakeSeam` and the six cases pass on it against Python 0.0.14. The seam interface the cases require, and how
+`PathFakeSeam` provides it:
 
-| Need | Provided today by |
+| Need | `PathFakeSeam` (the S08 injection seam provides the same through its own profile) |
 | --- | --- |
-| `launch` / `resume` returning the task, the fake and the owner (the fake's registered parent) | S08 `Case` (injection only) |
-| `exited(participant)`, `alive(participant)` | S08 observer tokens; `OsObserver.exited/wait_exited` exist but are keyed by PID and start time |
-| `kill_owner(launch)` | S08 control socket; for the fake, `participant.kill_parent` (not wired) |
-| `raw_evidence(launch)` from the fake's own ledger | S08 fake ledger; the new fake must write an equivalent |
-| cleanup that proves every participant is gone | S08 `profile.__exit__`; `OsObserver` has no equivalent yet |
-| `fakes_spawned`, `watch_spawns` (agents only) | S08 observer registrations; `OsObserver.records` |
+| `launch` / `resume` returning the task, the fake and the owner (the fake's registered parent) | the engine's public `run`/`resume` at `--freedom unrestricted`; the fake is the fresh `fake` registration whose ledger names the task's session and session flag; the owner is the first observed chain hop, which must be the fake's parent with an armed exit watch |
+| `exited(participant)`, `alive(participant)` | `OsObserver.wait_exited/exited`, keyed by PID and start time |
+| `kill_owner(launch)` | a control file named by the fake's observer token; the fake calls `participant.kill_parent` and logs the result |
+| `raw_evidence(launch)` from the fake's own ledger | the fake's ledger, re-checked digest by digest; untrusted corroboration, never the source of an exit code |
+| cleanup that proves every participant is gone | gates and a stop file released, then every armed `(pid, lstart)` observed exited, the observer not failed, every engine command drained |
+| `fakes_spawned`, `watch_spawns` (agents only) | observer registrations with role `fake`; ledgers of `kind: agent` (refused-argument ledgers are reported separately) |
 
 ## The open item: how the engine runs a fake agent
 
@@ -96,7 +98,7 @@ injected into the engine. Options considered:
   `init`, assistant and `result` lines on stdout for the single `--input-format stream-json` input frame, and
   exits with the scripted code. Behaviour (complete, nonzero exit 7, hold until a gate file, hold and
   survive EOF) is scripted in the prompt text, as S08 does, so no environment is needed. It registers with the
-  observer, whose socket path and nonce it reads from a case-local file under `$HOME`.
+  observer, whose socket path and nonce it reads from `fake.json` beside the installed fake (never from the environment).
 - Spike (not committed): on Python 0.0.11 a trivial executable named `claude` on `PATH` was accepted by the
   stock Claude backend with only a `--version` probe, was started with the real argv
   (`-p --output-format stream-json --input-format stream-json --session-id ... --permission-mode ...`), and the
@@ -146,26 +148,40 @@ Costs to state plainly:
 - **This needs the owner.** D6 literally says "0.0.11 freedom levels on stock Claude" are tool-level policy;
   whether an explicit `unrestricted` request is outside that sentence is an owner reading, not mine to assume.
 
-Option 4 remains the fallback if the owner reads D6 so that `unrestricted` also needs evidence. **No fake is
-built for E2 until the decision is made.**
+**Decided (2026-11-12): option 5.** Option 4 remains the fallback if the owner reads D6 so that `unrestricted` also
+needs evidence.
 
 ### What is built and what is not
 
-Built, independent of the seam: the target and environment checks, the OS observer and rendezvous, the
-participant client, the case logic behind a seam interface, `NoSeam`, the Python validation seam, the runner
-and the self-checks. **Not built:** the fake CLI of option A, its `PATH` wiring, and any engine-side
-discovery change. Until a seam is chosen and built, none of the six cases (`refusals` included, for lack of an observable agent)
-can pass against a pinned binary; all are reported as blocked.
+Built: the target and environment checks, the OS observer and rendezvous, the participant client, the case logic behind
+a seam interface, `NoSeam`, the Python validation seam, the runner and the self-checks, and (O1) `PathFakeSeam` with
+the scripted fake `claude` (`conformance/claude_fake`) and its scrubbed recording bundle. The fake is installed per case
+with its bundle, hashed (files, launcher and interpreter) and re-checked before every launch; `claude` must resolve to
+the installed launcher through the case `PATH` before every engine call. That is a guard, not a sandbox: an engine
+that resolves `claude` through the case `PATH` can only reach the fake, while one that resolves it another way (an
+absolute path, its own `PATH` handling) is detected only after launch, by the missing registration, so a real CLI
+could already have run. The Rust adapter must resolve `claude` only through the `PATH` it is given. It registers with the observer, writes
+an untrusted ledger, ends its own recorded parent on request (`participant.kill_parent`) and exits by itself at a
+lifetime bound. The cases are proved against Python 0.0.14 on the OS observer: all six pass on that seam with no
+extra environment key. The recorded behaviour is protocol shape only; SIGTERM behaviour and refused-argument wording
+are scripted and unmeasured, and `escape` is a fixture for survivor reporting, not evidence that reporting works.
+**Not built:** the Rust Claude adapter and stream parser that will consume it (Engine repository), the survivor oracle
+(E2-D) and any engine-side discovery change. Until a pinned Rust binary exists, a `path-fake` run against a source
+target is never acceptance evidence.
 
 ## Open questions (recorded for the owner)
 
-1. Decide the D6 conflict above (recommended: option 5, explicit `unrestricted`; fallback: option 4), then whether
-   the seam of option A is built.
+1. *Answered (2026-11-12).* The D6 conflict is resolved by option 5, explicit `unrestricted`, and the seam of option A
+   is built. The disclosure costs above still apply: the task's `enforcement` block must say no permission evidence was
+   bound, and `permission-mode-report-v1` needs an unrestricted representation before a report can say it.
 2. Whether Rust's Claude adapter probes beyond the version (capability and feature detection) and how the
    fake answers them without becoming a copy of the real CLI.
-3. Where the fake lives and how it is pinned (this repository, the Engine repository, or a shared
-   artifact), given that builds must not depend on sibling checkouts.
-4. The owner-identification rule above for non-trivial process layouts.
+3. *Answered.* The fake lives in this repository (`conformance/claude_fake`, with its recording bundle and `SHA256SUMS`)
+   and is pinned by hash. A consumer (the Rust conformance runner, E2-C and E2-D) copies the directory, hashes it, and puts
+   `bin/claude` first on the case `PATH`; no build or test here depends on a sibling checkout.
+4. The owner-identification rule above for non-trivial process layouts. The seam implements the rule as: the observer's
+   first chain hop must be the fake's parent and have its exit watch armed; a broken or truncated chain is recorded and
+   accepted only beyond that first hop.
 5. Darwin only: the observer uses `LOCAL_PEERPID` and kqueue; Linux needs its own mechanism before Web.
 6. Survivor cases: #118's criteria ask for a bounded timeout while D12 has none (see
    `C1-task-survivors.md`); a lifecycle `cancel` case that leaves a survivor cannot be specified until that is

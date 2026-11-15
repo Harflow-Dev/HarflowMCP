@@ -1,0 +1,38 @@
+{
+ "name": "r08_error_bad_model",
+ "argv": [
+  "claude",
+  "-p",
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--include-partial-messages",
+  "--permission-mode",
+  "plan",
+  "--max-turns",
+  "2",
+  "--model",
+  "no-such-model-xyz",
+  "--max-budget-usd",
+  "0.05",
+  "--setting-sources",
+  "",
+  "--strict-mcp-config",
+  "--mcp-config",
+  "{\"mcpServers\":{}}",
+  "--no-session-persistence",
+  "--input-format",
+  "stream-json",
+  "--session-id",
+  "00000000-0000-4000-8000-000000000001"
+ ],
+ "cwd": "/workspace/recordings/work/r08_error_bad_model",
+ "exit_code": 1,
+ "signals": [],
+ "t_ms": [
+  600,
+  604,
+  1368,
+  1371
+ ]
+}

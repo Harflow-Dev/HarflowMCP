@@ -3,7 +3,9 @@
     python -m conformance.lifecycle --engine-bin /abs/engine --engine-sha256 DIGEST --product-version X.Y.Z \\
         --release-sha256 DIGEST --release-commit SHA --manifest M --output NEW_DIR
     python -m conformance.lifecycle --source-repo REPO --commit SHA --python PY --product-version X.Y.Z \\
-        --manifest M --output NEW_DIR [--seam python-injection]
+        --manifest M --output NEW_DIR [--seam python-injection|path-fake]
+    python -m conformance.lifecycle --engine-bin /abs/engine --engine-sha256 DIGEST --product-version X.Y.Z \\
+        --manifest M --output NEW_DIR --seam path-fake [--release-sha256 DIGEST --release-commit SHA]
 
 Vocabulary of the printed summary and report:
 
@@ -11,7 +13,9 @@ Vocabulary of the printed summary and report:
 - `all_passed`: every selected case passed and none was blocked.
 - `complete`: all six cases ran and passed. A `--case` subset can be `all_passed` but never `complete`.
 - `acceptance_eligible`: complete, the seam is eligible, and the pinned binary equals an *independently supplied*
-  release digest and commit. Source launchers and the Python injection seam are never eligible.
+  release digest and commit. Source launchers and the Python injection seam are never eligible. The `path-fake`
+  seam (the scripted fake `claude` of conformance/claude_fake, first on the case `PATH`, run at explicit
+  `--freedom unrestricted`) adds no environment key and is eligible; it needs a pinned binary for acceptance.
 
 Linux is unavailable: the observer needs Darwin kqueue and LOCAL_PEERPID. The exit status is zero only when `complete`.
 """
@@ -27,8 +31,8 @@ import uuid
 from ..e1.harness import source_target as e1_source_target
 from ..oracles import ConformanceError, verify_manifest
 from ..runner import isolated_environment, publish_report
-from .cases import CASES, Lifecycle
-from .seams import NoSeam, PythonInjectionSeam, SeamRequired
+from .cases import CASES, Lifecycle, resume_probe
+from .seams import NoSeam, PathFakeSeam, PythonInjectionSeam, SeamRequired
 from .target import Engine, binary_target, release_match, source_target
 
 OBSERVER_AVAILABLE = sys.platform == 'darwin'
@@ -44,6 +48,11 @@ def run_case(name, function, args, output, target):
             if not OBSERVER_AVAILABLE:
                 raise ConformanceError('lifecycle observation is unavailable on this platform (Darwin only)')
             seam = PythonInjectionSeam(args.source_repo, args.commit, args.python, folder / 'p')
+        elif args.seam == 'path-fake':
+            if not OBSERVER_AVAILABLE:
+                raise ConformanceError('lifecycle observation is unavailable on this platform (Darwin only)')
+            env = isolated_environment(folder)
+            seam = PathFakeSeam(Engine(target, env, folder / 'workspace', folder / 'ops'), folder)
         else:
             env = isolated_environment(folder)
             markers = [str(folder), target.command[0] if target.identity.get('pinned_binary') else None]
@@ -61,13 +70,41 @@ def run_case(name, function, args, output, target):
             entry['seam_acceptance_eligible'] = seam.acceptance_eligible
             entry['extra_env_keys'] = seam.extra_env_keys
             entry['operations'] = [{'argv': op['argv'], 'exit_code': op['exit_code']} for op in seam.operations]
+            entry['seam_name'] = seam.name
             try:
                 cleaned = bool(seam.close())
                 error = None
             except Exception as exc:  # cleanup is evidence too: record it, never let it mask the case outcome
                 cleaned, error = False, f'{type(exc).__name__}: {exc}'[:300]
             entry['cleanup'] = {'ok': cleaned, **({'error': error} if error else {})}
+            if seam.name == 'path-fake':
+                entry['seam_evidence'] = seam.evidence
             if not cleaned and entry['status'] in ('passed', 'blocked'):
+                entry.update(status='failed', failure={'type': 'ConformanceError', 'message': 'participant cleanup unproved'})
+    return entry
+
+
+def run_probe(function, args, output, target):
+    """An unscored probe on the path-fake seam: its outcome is reported beside the cases and never changes `complete`."""
+    entry = {'name': function.__name__, 'scored': False, 'status': 'failed'}
+    folder = Path(output) / 'probes' / function.__name__
+    folder.mkdir(parents=True)
+    seam = None
+    try:
+        env = isolated_environment(folder)
+        seam = PathFakeSeam(Engine(target, env, folder / 'workspace', folder / 'ops'), folder)
+        entry['evidence'] = function(Lifecycle(seam))
+        entry['status'] = 'passed'
+    except Exception as exc:
+        entry['failure'] = {'type': type(exc).__name__, 'message': str(exc)[:1500], 'trace': traceback.format_exc(limit=3)}
+    finally:
+        if seam is not None:
+            try:
+                entry['cleanup'] = {'ok': bool(seam.close())}
+            except Exception as exc:
+                entry['cleanup'] = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'[:300]}
+            entry['seam_evidence'] = seam.evidence
+            if not entry['cleanup']['ok'] and entry['status'] == 'passed':
                 entry.update(status='failed', failure={'type': 'ConformanceError', 'message': 'participant cleanup unproved'})
     return entry
 
@@ -108,6 +145,8 @@ def run(args):
         print(f'{entry["status"].upper()} {name}' + (f': {entry["failure"]["message"][:200]}' if entry['status'] == 'failed' else ''), file=sys.stderr)
         if entry['status'] == 'failed':
             break  # fail closed at the first defect, never replay
+    if args.resume_probe:
+        report['resume_probe'] = run_probe(resume_probe, args, output, target)
     summary = assess(report['cases'], args.case)
     seam_eligible = bool(report['cases']) and all(e.get('seam_acceptance_eligible') for e in report['cases'])
     report.update(summary, extra_env_keys=sorted({k for e in report['cases'] for k in e.get('extra_env_keys', [])}),
@@ -123,7 +162,7 @@ def main(argv=None):
     parser.add_argument('--source-repo')
     parser.add_argument('--commit')
     parser.add_argument('--python')
-    parser.add_argument('--seam', choices=('none', 'python-injection'), default='none')
+    parser.add_argument('--seam', choices=('none', 'python-injection', 'path-fake'), default='none')
     parser.add_argument('--product-version', required=True, help='the product line the engine must speak, e.g. 0.0.11')
     parser.add_argument('--release-sha256', help='independently obtained digest of the release binary')
     parser.add_argument('--release-commit', help='independently obtained commit of the release')
@@ -132,12 +171,15 @@ def main(argv=None):
     parser.add_argument('--output', required=True)
     parser.add_argument('--invocation-id')
     parser.add_argument('--case', action='append', choices=tuple(CASES))
+    parser.add_argument('--resume-probe', action='store_true', help='path-fake only: run the unscored resume probe after the cases')
     args = parser.parse_args(argv)
     binary = bool(args.engine_bin)
-    if binary and (args.source_repo or args.commit or args.python or not args.engine_sha256 or args.seam != 'none'):
-        parser.error('a pinned binary needs --engine-sha256, no source options and --seam none')
+    if binary and (args.source_repo or args.commit or args.python or not args.engine_sha256 or args.seam == 'python-injection'):
+        parser.error('a pinned binary needs --engine-sha256, no source options and --seam none or path-fake')
     if not binary and (not all((args.source_repo, args.commit, args.python)) or args.engine_sha256):
         parser.error('source selection needs --source-repo, a full --commit and --python')
+    if args.resume_probe and args.seam != 'path-fake':
+        parser.error('--resume-probe needs --seam path-fake')
     report = run(args)
     keys = ('no_failures', 'all_passed', 'complete', 'subset', 'acceptance_eligible', 'failed', 'blocked', 'seam', 'extra_env_keys')
     print(json.dumps({k: report[k] for k in keys} | {'report': str(Path(args.output).absolute() / 'report.json')}))

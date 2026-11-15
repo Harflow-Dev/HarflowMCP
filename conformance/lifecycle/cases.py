@@ -124,3 +124,19 @@ def owner_death(c):
 
 CASES = {'refusals': refusals, 'complete': complete, 'nonzero': nonzero, 'detached-resume': detached_resume,
          'cancel': cancel, 'owner-death': owner_death}
+
+
+def resume_probe(c):
+    """Unscored: after a settled `complete` launch, one explicit resume starts a new agent in the same session.
+
+    Not a member of `CASES` (the six names are the E2 exit's list); its result is reported beside, never inside, `complete`."""
+    seam = c.seam
+    first = seam.launch()
+    c.terminal(first)
+    before = seam.fakes_spawned()
+    second = seam.resume(first)
+    status = c.terminal(second)
+    require(seam.fakes_spawned() == before + 1, 'resume did not start exactly one new agent', 'contract')
+    require(second['fake']['token'] != first['fake']['token'] and second['session_id'] == first['session_id'], 'resume did not continue the same session', 'contract')
+    return {'first': seam.raw_evidence(first, completed=True), 'resumed': seam.raw_evidence(second, completed=True),
+            'same_session': True, 'resumed_status': {k: status.get(k) for k in ('status', 'exit_code', 'session_id')}}

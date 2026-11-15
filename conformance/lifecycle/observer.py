@@ -167,7 +167,7 @@ class OsObserver:
     def _register(self, conn, request):
         pid = struct.unpack('i', conn.getsockopt(0, 2, 4))[0]  # LOCAL_PEERPID
         if not isinstance(request, dict) or set(request) != {'nonce', 'role', 'pid'} or request['nonce'] != self.nonce \
-                or type(request['pid']) is not int or request['pid'] != pid or request['role'] not in ('fake',):
+                or type(request['pid']) is not int or request['pid'] != pid or request['role'] not in ('fake', 'descendant'):
             raise ValueError('registration shape, nonce or claimed pid')
         me, chain, completeness = chain_of(pid, self.controller_pid)
         with self._condition:
@@ -259,6 +259,15 @@ class OsObserver:
         with self._condition:
             fresh = [r for t, r in self._records.items() if t not in known]
         return fresh[0] if len(fresh) == 1 else None
+
+    def watched_processes(self):
+        """Every `(pid, lstart)` an exit watch was armed for (participants and their recorded ancestors), with its state."""
+        with self._condition:
+            return [dict(w) for w in self._watched.values()]
+
+    def is_armed(self, pid, lstart):
+        with self._condition:
+            return (pid, lstart) in self._watched
 
     def wait_exited(self, pid, lstart, timeout=5):
         return self.wait_for(lambda: self.exited(pid, lstart), timeout)

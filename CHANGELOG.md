@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Conformance infrastructure only: add a scripted fake `claude` (`conformance/claude_fake`) with a scrubbed, audited recording bundle and a `path-fake` seam for `conformance/lifecycle` (`--seam path-fake`, plus an unscored `--resume-probe`), so the six lifecycle cases run on the OS observer against an engine that launches `claude` from `PATH` at explicit `--freedom unrestricted`. No product, contract, wire-shape or engine change; `PRODUCT_VERSION` and the `contracts/v1` bundle are unchanged.
+
 - `harflow-ctl cancel TASK_ID --json` now adds `error.data = {"reason": "workflow_native_control"}` when it refuses a task that is a workflow `native_control` transport, on both the pending-launch and recorded-task paths. The error code (`invalid_params`), message and exit code are unchanged; every other cancel refusal keeps its shape. This is an additive optional field with no new capability (consumers treat an absent or unknown `reason` as a generic refusal), the MCP `cancel_task` surface is unchanged, and `PRODUCT_VERSION` is unchanged. The bundle gains `ctl-task-cancel-error-workflow-native-control.json` (352 fixtures, manifest SHA256 `7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68`); the conformance oracle gains a permissive cancel-refusal check, and consumers must re-vendor the complete bundle. Fixtures still stamp `product_version` 0.0.14, so vendored bundles are identified by manifest digest, not product version.
 
 ## 0.0.14

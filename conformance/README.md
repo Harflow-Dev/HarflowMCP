@@ -319,13 +319,40 @@ A case that needs a running agent on a seam without one is `blocked`, never pass
 (`--release-sha256`, `--release-commit`) and the seam is eligible. `refusals` verifies its codes and the empty task
 list, but "nothing was spawned" needs an observable agent, so without a fake it is `blocked` with its partial
 evidence (a command-text process diff cannot see a detached `/bin/sleep`). `--seam none` therefore blocks all six; `--seam python-injection` re-uses the S08 profile only to prove the case logic on Python and is
-never acceptance evidence (its extra environment keys are reported). The fake-backend seam and its conflict with
-D6 are open design items: see `docs/decisions/E2-lifecycle-conformance-seam.md`.
+never acceptance evidence (its extra environment keys are reported).
+
+`--seam path-fake` (owner decision O1, option A plus 5) runs the six cases against a scripted fake `claude`
+(`conformance/claude_fake`, see its README) installed as `<case>/bin/claude` and placed first on the case `PATH`
+(`<case>/bin:/usr/bin:/bin`). The engine reaches it the way it reaches the real CLI and launches it at explicit
+`--freedom unrestricted`; no environment key or engine selector is added, so `extra_env_keys` is empty and the seam
+is eligible (a source target is not, for lack of a pinned binary). The seam installs the fake and its recording bundle
+into the case, hashes every installed file, the launcher and the interpreter, refuses on drift (including the interpreter's resolved path and digest) before every engine call and refuses when
+`claude` does not resolve to the installed launcher through the case `PATH`. This is a guard, not a sandbox: an engine
+that resolves `claude` through the case `PATH` can only reach the fake, but an engine that resolves it another way (an
+absolute path, its own `PATH` handling) is detected only after the launch, by the missing observer registration, by
+which time a real CLI could already have run. The Rust adapter must resolve `claude` only through the `PATH` it is
+given. The bundle is pinned by `EXPECTED_SHA256SUMS` in `seams.py`. A launch is
+matched to its fake by the fresh observer registration, the ledger's session id and session flag, the owner is the
+fake's first observed ancestor, and the cleanup proof requires every armed participant (fakes, descendants, owners and
+their recorded ancestors) to be observed exited, the observer not failed and every engine command drained.
+The no-spawn check of `refusals` re-reads registrations and ledgers once after a 0.5 s settle; a launch that would register later than that is not caught (a remaining, bounded window).
+`--resume-probe` adds one unscored resume probe to the report (`resume_probe`); it never changes `complete`.
+
+What the fake is: protocol shape replayed from scrubbed recordings of the real CLI (success, resume, tool use,
+permission refusal, unknown model, interrupt) plus scripted `nonzero`, `hold` and `escape` modes. What it is not:
+model behaviour, the real SIGTERM behaviour or the real wording of refused arguments (all unmeasured), or evidence
+about permission enforcement. Only the lifecycle of the process tree is observed. The seam is Darwin only, like the
+observer.
 
 ```sh
 .venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse HEAD^{commit})" \
   --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
   --manifest-sha256 7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68 \
   --product-version 0.0.14 --seam none --output /path/to/new-dir
-.venv/bin/python -m pytest conformance/tests_lifecycle -q   # self-checks
+# same target with the scripted fake `claude` (Darwin only)
+.venv/bin/python -m conformance.lifecycle --source-repo "$PWD" --commit "$(git rev-parse HEAD^{commit})" \
+  --python "$PWD/.venv/bin/python" --manifest contracts/v1/manifest.json \
+  --manifest-sha256 7a2041be1fcef87178c38308a41c48f13b9fc8ee1325f8bad70bfc88d1c3ee68 \
+  --product-version 0.0.14 --seam path-fake --resume-probe --output /path/to/another-new-dir
+.venv/bin/python -m pytest conformance/tests conformance/tests_lifecycle conformance/tests_claude_fake -q   # self-checks
 ```
