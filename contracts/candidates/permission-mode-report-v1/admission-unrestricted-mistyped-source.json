@@ -1,0 +1,17 @@
+{
+  "candidate": "permission-mode-report-v1",
+  "document": {
+    "decision": "admit",
+    "reason": "explicit_unrestricted"
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "current": null,
+    "evidence": null,
+    "opt_in_source": false,
+    "requested_mode": "unrestricted",
+    "tool_level_opt_in": false
+  },
+  "kind": "admission",
+  "v": 1
+}

@@ -1,0 +1,21 @@
+{
+  "candidate": "permission-mode-report-v1",
+  "document": {
+    "enforcement": {
+      "freedom": "unrestricted",
+      "os_enforced": false,
+      "permission": {
+        "ambient_configuration": "uncontrolled",
+        "established_mode": "unrestricted",
+        "evidence": "null",
+        "inherited_rules_may_change_behaviour": true,
+        "opt_in_source": "explicit_request",
+        "requested_mode": "unrestricted",
+        "tool_level_opt_in": false
+      }
+    }
+  },
+  "format": "harflow.c1.candidate",
+  "kind": "report",
+  "v": 1
+}

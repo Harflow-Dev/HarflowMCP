@@ -79,3 +79,22 @@ unmeasured evidence.
   here and needs owner confirmation before it can be advertised.
 - Python's existing `os_enforced` booleans were produced without qualification evidence; this candidate
   does not reinterpret them.
+
+## Explicit unrestricted branch (2026-11-17, accepted O1)
+
+Requested and established mode additionally accept `unrestricted`; evidence mode continues to accept
+only `os_enforced` and `tool_level`. An explicit unrestricted report requires freedom `unrestricted`,
+`os_enforced: false`, `tool_level_opt_in: false`, `opt_in_source: explicit_request`, a present
+`evidence: null`, ambient configuration `uncontrolled`, and inherited-rules disclosure `true`.
+Establishment may be `unrestricted` or `unknown`; unknown makes no establishment success claim.
+No qualification, binary or grants binding is fabricated for this branch. The qualified-evidence
+invariants above apply only to the other modes, whose rules remain unchanged. Neither strict nor
+tool-level requests may fall back to unrestricted.
+
+Unrestricted admission retains requested mode and tool-level opt-in and requires present, exactly
+null `evidence` and `current`. Tool-level opt-in must be false. Only `opt_in_source: explicit_request`
+admits with reason `explicit_unrestricted`; missing source, `none`, or `freedom_level_d6` refuses
+`explicit_request_required`. Mistyped fields remain invalid; unknown source vocabulary remains
+unsupported. This is permission selection only, never caller authority. A report cannot establish
+that a request was explicit: the runtime must obtain that fact from its validated immutable request.
+This candidate remains unimplemented and unadvertised and changes no production launch behavior.

@@ -223,3 +223,40 @@ def test_d6_strict_mode_keeps_configuration_and_protected_path_binding():
     assert expected_of(p, 'admission-ambient-change-is-not-binding.json')['decision'] == 'admit'
     changed = load(p, 'admission-strict-ambient-change-is-binding.json')['input']
     assert changed['evidence']['ambient'] != changed['current']['ambient']
+
+
+def test_explicit_unrestricted_has_no_qualification_claim_or_fallback():
+    p = permission.CANDIDATE
+    report = load(p, 'report-explicit-unrestricted.json')['document']['enforcement']
+    assert report == {'freedom': 'unrestricted', 'os_enforced': False, 'permission': {
+        'requested_mode': 'unrestricted', 'established_mode': 'unrestricted',
+        'tool_level_opt_in': False, 'opt_in_source': 'explicit_request', 'evidence': None,
+        'ambient_configuration': 'uncontrolled', 'inherited_rules_may_change_behaviour': True}}
+    assert expected_of(p, 'admission-explicit-unrestricted.json') == {
+        'parse': 'valid', 'decision': 'admit', 'reason': 'explicit_unrestricted'}
+    assert expected_of(p, 'admission-unrestricted-needs-explicit-request.json') == {
+        'parse': 'valid', 'decision': 'refuse', 'reason': 'explicit_request_required'}
+    assert expected_of(p, 'report-unrestricted-unknown-establishment.json')['established_mode'] == 'unknown'
+    for name in ('report-unrestricted-missing-evidence', 'report-unrestricted-fabricated-evidence',
+                 'admission-unrestricted-fabricated-evidence', 'admission-os-enforced-null-evidence',
+                 'admission-tool-level-null-evidence'):
+        assert expected_of(p, name + '.json') == {'parse': 'invalid', 'reason': 'fields'}
+    assert expected_of(p, 'report-strict-fallback-unrestricted.json') == {'parse': 'invalid', 'reason': 'fallback'}
+
+
+@pytest.mark.parametrize('source', ['none', 'freedom_level_d6'])
+def test_unrestricted_admission_requires_actual_explicit_source(source):
+    p = permission.CANDIDATE
+    value = load(p, 'admission-explicit-unrestricted.json')
+    value['input']['opt_in_source'] = source
+    value['document'] = {'decision': 'refuse', 'reason': 'explicit_request_required'}
+    assert common.classify(p, common.canonical(value)) == {
+        'parse': 'valid', 'decision': 'refuse', 'reason': 'explicit_request_required'}
+
+
+@pytest.mark.parametrize('field', ['evidence', 'current'])
+def test_unrestricted_admission_requires_present_null_bindings(field):
+    p = permission.CANDIDATE
+    value = load(p, 'admission-explicit-unrestricted.json')
+    del value['input'][field]
+    assert common.classify(p, common.canonical(value)) == {'parse': 'invalid', 'reason': 'fields'}

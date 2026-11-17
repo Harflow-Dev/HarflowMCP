@@ -364,3 +364,12 @@ Actual indefinite I/O, failed OS sync, ENOSPC, power, stock backend enforcement,
 production caller/containment, cross-platform/filesystem and scale qualification
 remain distinct evidence gates. A synthetic profile or successful helper does not
 advertise a supported public runtime or accept full R03/R04/P2.
+
+### Explicit unrestricted candidate addendum (2026-11-17)
+
+Accepted O1 separately permits an explicitly requested unrestricted selection for the first Rust
+fake-CLI path. Its candidate representation and admission are defined in
+[C1 permission reporting](C1-permission-mode-report.md#explicit-unrestricted-branch-2026-11-17-accepted-o1).
+The qualified strict/tool-level tables above retain their existing meaning; they do not require
+qualification evidence for unrestricted or authorize fallback. This addendum does not extend this
+profile's policy/permission specimen grammar or establish caller authority or runtime support.

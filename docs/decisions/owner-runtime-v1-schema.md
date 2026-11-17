@@ -211,3 +211,11 @@ manifest bytes followed by a newline. No public capability
 or real-runtime specimen is generated. Reject symlinks, multiply linked files, extra/missing files,
 unsafe inventory paths and inconsistent hashes. Unknown schemas cannot silently
 be marked accepted by updating expected outputs from the evaluator.
+
+### Explicit unrestricted candidate addendum (2026-11-17)
+
+The permission table above specifies this profile's qualified boundary observations only. The
+separate [C1 permission candidate](C1-permission-mode-report.md#explicit-unrestricted-branch-2026-11-17-accepted-o1)
+adds accepted O1's explicit unrestricted branch, with null evidence and current binding, explicit
+request provenance and no tool-level opt-in or OS claim. No strict/tool-level fallback is allowed.
+This does not change this profile's grammar, production behavior or caller authority.

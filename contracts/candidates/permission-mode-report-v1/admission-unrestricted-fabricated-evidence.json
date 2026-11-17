@@ -1,0 +1,25 @@
+{
+  "candidate": "permission-mode-report-v1",
+  "document": {
+    "decision": "admit",
+    "reason": "explicit_unrestricted"
+  },
+  "format": "harflow.c1.candidate",
+  "input": {
+    "current": null,
+    "evidence": {
+      "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "grants_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "tool_level",
+      "platform": "darwin-arm64",
+      "probe_revision": "r1",
+      "state": "passed",
+      "version": "2.1.318"
+    },
+    "opt_in_source": "explicit_request",
+    "requested_mode": "unrestricted",
+    "tool_level_opt_in": false
+  },
+  "kind": "admission",
+  "v": 1
+}

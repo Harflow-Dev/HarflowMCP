@@ -669,11 +669,11 @@
   "specifications": [
     {
       "path": "docs/decisions/owner-runtime-v1.md",
-      "sha256": "448c74da6acf5955de5114bdfee2ec149e20e43656c287f44b3c6300c3a53897"
+      "sha256": "4a732b8ac62bafe042cc80280267235481f39f6cb8184a74955a6224b308f6e9"
     },
     {
       "path": "docs/decisions/owner-runtime-v1-schema.md",
-      "sha256": "92ecc534085ccc27550a1377bbce4273906366792a3f4c313384bf2d808847de"
+      "sha256": "5882d7e5a6943d986a56e33427f6bb60f7caa72806b335bc89b058e6591cdc88"
     }
   ],
   "status": "specified_unimplemented",

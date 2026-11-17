@@ -37,6 +37,16 @@
       "sha256": "5912cd3f24dfab39b7763ed03eea6e4cb439f39e40ccf7284352976da1ae9ae4"
     },
     {
+      "bytes": 371,
+      "expected": {
+        "decision": "admit",
+        "parse": "valid",
+        "reason": "explicit_unrestricted"
+      },
+      "filename": "admission-explicit-unrestricted.json",
+      "sha256": "72880c61dd877161b28e3f57d9182a299777c7b0b78633d1603610efbc5ff738"
+    },
+    {
       "bytes": 912,
       "expected": {
         "parse": "unsupported",
@@ -63,6 +73,15 @@
       },
       "filename": "admission-os-enforced-evidence-cannot-admit-tool-level.json",
       "sha256": "b8a572103487fcda41bf94ed71c647a35cb248480362e5e37d48a1430e4419a8"
+    },
+    {
+      "bytes": 370,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-os-enforced-null-evidence.json",
+      "sha256": "0528339bf4c1f953829785145a2f823625cb090c1def219bf0efeec49c4fbf00"
     },
     {
       "bytes": 926,
@@ -234,6 +253,15 @@
       "sha256": "9cc9a330f3bf826c7422dc20bfa8ffa675eeb8814522a6b55a00dd073bd2e087"
     },
     {
+      "bytes": 369,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-tool-level-null-evidence.json",
+      "sha256": "a1f174be015b8c6309d360821fa1f4f799ea71975af245622ba1ac77b88f7fb9"
+    },
+    {
       "bytes": 920,
       "expected": {
         "decision": "admit",
@@ -252,6 +280,70 @@
       },
       "filename": "admission-unqualified.json",
       "sha256": "d5bbed96b7b30ed414d7fb2ca2a41c739893c48331a45aaedc9bc5546ef5a3f9"
+    },
+    {
+      "bytes": 367,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-unrestricted-boolean-as-int.json",
+      "sha256": "db3f8c8760c378c701bdbb2f43bf16a0250ba2aa3050768ed73f7885f779248e"
+    },
+    {
+      "bytes": 647,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-unrestricted-fabricated-current.json",
+      "sha256": "17848ea79912bb5f11fb239e661467b1ec0d11edba8a0a45bbb930e5c574c8ae"
+    },
+    {
+      "bytes": 700,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-unrestricted-fabricated-evidence.json",
+      "sha256": "6a887bbd791ece2254c973fc6c965c2a2b1f15b74b43767bcc2d4c23a7af67a7"
+    },
+    {
+      "bytes": 373,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-unrestricted-mistyped-null.json",
+      "sha256": "76556a3620302f8d5693b7015cbfca6fd784f7d5f14e2288e6c79b8a1ed05b0c"
+    },
+    {
+      "bytes": 358,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "admission-unrestricted-mistyped-source.json",
+      "sha256": "e489bf24e642ef5b63b3e59f57724ee732025a46d84b0aa1cff3503c7c5193ad"
+    },
+    {
+      "bytes": 335,
+      "expected": {
+        "decision": "refuse",
+        "parse": "valid",
+        "reason": "explicit_request_required"
+      },
+      "filename": "admission-unrestricted-needs-explicit-request.json",
+      "sha256": "ae5eb38a31bba4407a3cdcbb36544d325983ab6e7b60d3cfcd635fa783d50666"
+    },
+    {
+      "bytes": 370,
+      "expected": {
+        "parse": "invalid",
+        "reason": "opt_in"
+      },
+      "filename": "admission-unrestricted-tool-opt-in.json",
+      "sha256": "afb16f77d84204e92e01b6192552ddafad66aa00ba86272942e17a3de0ef20f9"
     },
     {
       "bytes": 904,
@@ -307,6 +399,16 @@
       },
       "filename": "report-explicit-tool-level.json",
       "sha256": "8472c865159270433edc6ec31e15339e44351aaf601c50920a19be39c1da517d"
+    },
+    {
+      "bytes": 547,
+      "expected": {
+        "established_mode": "unrestricted",
+        "os_enforced": false,
+        "parse": "valid"
+      },
+      "filename": "report-explicit-unrestricted.json",
+      "sha256": "5cd3a9b4e737d3b26280e677e07b7bfe1aa9df0e84677e6402504bb927ec09be"
     },
     {
       "bytes": 843,
@@ -383,6 +485,15 @@
       "sha256": "9d607aea235738184995d3e0747994e10700261b0ea2258bcfc3ba159c49d962"
     },
     {
+      "bytes": 896,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fallback"
+      },
+      "filename": "report-strict-fallback-unrestricted.json",
+      "sha256": "3a06dd4f9542d97925e0b78aca3dd9ea4570d347ac6713ad3fff7416edc65f35"
+    },
+    {
       "bytes": 903,
       "expected": {
         "parse": "invalid",
@@ -418,6 +529,88 @@
       },
       "filename": "report-unqualified-claims-os.json",
       "sha256": "e575750ff22ea97e9738e67e17ec146c55b980a04de8d5bec8238de4747aebca"
+    },
+    {
+      "bytes": 543,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "report-unrestricted-boolean-as-int.json",
+      "sha256": "1450af02936c18283be305056480bf77c6d24157c303f3cdfebeb8ef1fa6f8ee"
+    },
+    {
+      "bytes": 546,
+      "expected": {
+        "parse": "invalid",
+        "reason": "overclaim"
+      },
+      "filename": "report-unrestricted-claims-os.json",
+      "sha256": "38d77bdc4e165421110eeb09c9c98d29f4f8f5d595e4a04b5b59a48fa52d6409"
+    },
+    {
+      "bytes": 908,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "report-unrestricted-fabricated-evidence.json",
+      "sha256": "08c19a2168ef2405b296c7235f847830b4671282962922e406ba23820ebdd416"
+    },
+    {
+      "bytes": 521,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "report-unrestricted-missing-evidence.json",
+      "sha256": "9ec01d20b619dc54d9bbea80bc7f5205fe7f7d30cf9571eef13d155646e1518d"
+    },
+    {
+      "bytes": 549,
+      "expected": {
+        "parse": "invalid",
+        "reason": "fields"
+      },
+      "filename": "report-unrestricted-mistyped-null.json",
+      "sha256": "b66cc64cf8a2dac5b75eda2013d0891da3f360ff20901492c0b0a8537abf896f"
+    },
+    {
+      "bytes": 535,
+      "expected": {
+        "parse": "invalid",
+        "reason": "opt_in"
+      },
+      "filename": "report-unrestricted-nonexplicit.json",
+      "sha256": "2ae68d93893c6bbfc6b1fae679d8293d99503035fda3f935e1b3d0f467b017c6"
+    },
+    {
+      "bytes": 546,
+      "expected": {
+        "parse": "invalid",
+        "reason": "opt_in"
+      },
+      "filename": "report-unrestricted-tool-opt-in.json",
+      "sha256": "942922e24ea9a9ccb5bd1bd659aa89a9c9f06a977b080ba9b7ebb749ccd9f2d3"
+    },
+    {
+      "bytes": 542,
+      "expected": {
+        "established_mode": "unknown",
+        "os_enforced": false,
+        "parse": "valid"
+      },
+      "filename": "report-unrestricted-unknown-establishment.json",
+      "sha256": "f1cea6d224c5133aadd343c3b0a9c763274dc12ab7e8ca68967761e776b8ddc9"
+    },
+    {
+      "bytes": 548,
+      "expected": {
+        "parse": "invalid",
+        "reason": "freedom"
+      },
+      "filename": "report-unrestricted-wrong-freedom.json",
+      "sha256": "aaac48637905a2712b62e8479dbc4081dc9a807a3471351fb0d0b6ed6a2f357f"
     }
   ],
   "format": "harflow.c1.candidate.component",
@@ -426,7 +619,7 @@
   "specifications": [
     {
       "path": "docs/decisions/C1-permission-mode-report.md",
-      "sha256": "64a9399caff0016c92d6a546aa64992035653271fbde3965614f9fe2e5643e4d"
+      "sha256": "e5293126b2fe6d9fa120f9ecc651d3d3ff2833988b2fa3ed2c82bb2d9ba33c85"
     }
   ],
   "status": "specified_unimplemented",

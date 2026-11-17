@@ -35,9 +35,17 @@ def report(kind, value):
     block = value['document'].get('enforcement')
     require(isinstance(block, dict) and type(block.get('os_enforced')) is bool and isinstance(block.get('freedom'), str), 'fields')
     permission = block.get('permission')
-    enums(permission, {'requested_mode': MODES, 'established_mode': 'os_enforced tool_level unknown',
+    enums(permission, {'requested_mode': MODES + ' unrestricted', 'established_mode': 'os_enforced tool_level unrestricted unknown',
                        'opt_in_source': 'none explicit_request freedom_level_d6', 'ambient_configuration': 'uncontrolled'},
           ('tool_level_opt_in', 'inherited_rules_may_change_behaviour'))
+    if permission['requested_mode'] == 'unrestricted':
+        require('evidence' in permission and permission['evidence'] is None, 'fields')
+        require(permission['established_mode'] in ('unrestricted', 'unknown'), 'fallback')
+        require(block['freedom'] == 'unrestricted', 'freedom')
+        require(block['os_enforced'] is False, 'overclaim')
+        require(not permission['tool_level_opt_in'] and permission['opt_in_source'] == 'explicit_request', 'opt_in')
+        require(permission['inherited_rules_may_change_behaviour'] is True, 'disclosure')
+        return {'parse': 'valid', 'os_enforced': False, 'established_mode': permission['established_mode']}
     evidence(permission.get('evidence'))
     proof = permission['evidence']
     # No silent fallback: the established mode is the requested mode, or unknown.
@@ -55,7 +63,18 @@ def report(kind, value):
 def admission(kind, value):
     data = value.get('input')
     require(isinstance(data, dict), 'fields')
-    enums(data, {'requested_mode': MODES}, ('tool_level_opt_in',))
+    enums(data, {'requested_mode': MODES + ' unrestricted'}, ('tool_level_opt_in',))
+    if data['requested_mode'] == 'unrestricted':
+        require(all(key in data and data[key] is None for key in ('evidence', 'current')), 'fields')
+        require(not data['tool_level_opt_in'], 'opt_in')
+        if 'opt_in_source' in data:
+            enums(data, {'opt_in_source': 'none explicit_request freedom_level_d6'})
+        explicit = data.get('opt_in_source') == 'explicit_request'
+        decision, reason = ('admit', 'explicit_unrestricted') if explicit else ('refuse', 'explicit_request_required')
+        document = value['document']
+        require(document.get('decision') in ('admit', 'refuse') and isinstance(document.get('reason'), str), 'fields')
+        require((document['decision'], document['reason']) == (decision, reason), 'projection_mismatch')
+        return {'parse': 'valid', 'decision': decision, 'reason': reason}
     evidence(data.get('evidence'))
     evidence(data.get('current'), with_state=False)
     # Tool-level policy is measured without the user's ambient configuration, which is disclosed as uncontrolled and
@@ -130,6 +149,50 @@ def cases():
 
     def valid(osx, mode):
         return {'parse': 'valid', 'os_enforced': osx, 'established_mode': mode}
+
+    unrestricted = block(freedom='unrestricted', requested='unrestricted', established='unrestricted',
+                         opt_in=False, source='explicit_request', evidence=None)
+    add('report-explicit-unrestricted', 'report', unrestricted, valid(False, 'unrestricted'))
+    unknown = copy.deepcopy(unrestricted); unknown['enforcement']['permission']['established_mode'] = 'unknown'
+    add('report-unrestricted-unknown-establishment', 'report', unknown, valid(False, 'unknown'))
+    for name, field, changed, reason in (
+        ('fabricated-evidence', 'evidence', ev(), 'fields'),
+        ('tool-opt-in', 'tool_level_opt_in', True, 'opt_in'),
+        ('nonexplicit', 'opt_in_source', 'none', 'opt_in'),
+        ('mistyped-null', 'evidence', 'null', 'fields'),
+        ('boolean-as-int', 'tool_level_opt_in', 0, 'fields'),
+    ):
+        bad = copy.deepcopy(unrestricted); bad['enforcement']['permission'][field] = changed
+        reject('report-unrestricted-' + name, specimen(NAME, 'report', bad), 'invalid', reason)
+    missing = copy.deepcopy(unrestricted); del missing['enforcement']['permission']['evidence']
+    reject('report-unrestricted-missing-evidence', specimen(NAME, 'report', missing), 'invalid', 'fields')
+    for name, field, changed, reason in (('claims-os', 'os_enforced', True, 'overclaim'),
+                                       ('wrong-freedom', 'freedom', 'write_in_repo', 'freedom')):
+        bad = copy.deepcopy(unrestricted); bad['enforcement'][field] = changed
+        reject('report-unrestricted-' + name, specimen(NAME, 'report', bad), 'invalid', reason)
+    reject('report-strict-fallback-unrestricted', specimen(NAME, 'report', strict(established='unrestricted')), 'invalid', 'fallback')
+    unrestricted_input = {'requested_mode': 'unrestricted', 'tool_level_opt_in': False,
+                          'opt_in_source': 'explicit_request', 'evidence': None, 'current': None}
+    for name, source in (('explicit-unrestricted', 'explicit_request'), ('unrestricted-needs-explicit-request', None)):
+        data = {**unrestricted_input}
+        if source is None:
+            del data['opt_in_source']
+        else:
+            data['opt_in_source'] = source
+        decision, reason = ('admit', 'explicit_unrestricted') if source == 'explicit_request' else ('refuse', 'explicit_request_required')
+        add('admission-' + name, 'admission', {'decision': decision, 'reason': reason},
+            {'parse': 'valid', 'decision': decision, 'reason': reason}, data)
+    for name, field, changed, reason in (
+        ('fabricated-evidence', 'evidence', ev(), 'fields'), ('fabricated-current', 'current', CURRENT, 'fields'),
+        ('mistyped-null', 'current', 'null', 'fields'), ('boolean-as-int', 'tool_level_opt_in', 0, 'fields'),
+        ('tool-opt-in', 'tool_level_opt_in', True, 'opt_in'), ('mistyped-source', 'opt_in_source', False, 'fields'),
+    ):
+        data = {**unrestricted_input, field: changed}
+        reject('admission-unrestricted-' + name, specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'explicit_unrestricted'}, data), 'invalid', reason)
+    for mode in ('os_enforced', 'tool_level'):
+        data = {**unrestricted_input, 'requested_mode': mode}
+        reject('admission-' + mode.replace('_', '-') + '-null-evidence',
+               specimen(NAME, 'admission', {'decision': 'admit', 'reason': 'explicit_unrestricted'}, data), 'invalid', 'fields')
 
     add('report-stock-claude-tool-level', 'report', block(), valid(False, 'tool_level'))
     add('report-explicit-tool-level', 'report', block(source='explicit_request'), valid(False, 'tool_level'))
