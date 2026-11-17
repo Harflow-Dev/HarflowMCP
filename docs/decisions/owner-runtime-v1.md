@@ -178,6 +178,18 @@ and blocks dependent actions. Counts unavailable from the source are null/unknow
 not zero. Historical observed results remain historical; they are not recomputed
 from today's repository or permission settings.
 
+### First Rust execution-observation checkpoint
+
+The first Rust checkpoint qualifies ordinary `run`, public task observation and observed completion independently of caller-authenticated cancellation. Only the pinned fake backend is executed during this qualification. This split is not full owner-runtime acceptance, production readiness or permission to select Rust in an existing client.
+
+A successful run reply requires a positively acknowledged private T2 transaction publishing the exact task and independently observed original child, prepared/bound raw capture sources, a registered independent reader, and a retained original owner/writer able to continue capture and task observation after the dispatcher exits. Reply bytes alone do not supply any of these facts. The actual inherited same-binary channel and live bootstrap identity checks remain mandatory.
+
+The public reply preserves the existing launch-acceptance meaning and exact `result.task_id` shape. It acknowledges the observed owned spawn, not task completion, workflow settlement, descendant containment, cancellation readiness or permission to retry. The internal `AcceptanceRecorded` milestone remains reserved for genuinely qualified operational control and is not written for this checkpoint. A task may finish directly from `SpawnObserved` only after all existing original-child exit, actual EOF/drain, input, capture and final-publication gates pass.
+
+Cancellation is unavailable in this checkpoint. Every syntactically valid cancel request returns an ordinary refused ctl result before target lookup, cancel-intent commit, signal, withdrawal or cleanup. No control endpoint or absence of a capability is treated as a stopped task. The existing narrow standalone caller policy is unchanged; detected agents and incomplete identity evidence still refuse run admission. This limitation does not grant a human, administrative or recovery credential.
+
+Missing or ambiguous spawn/readiness acknowledgments preserve existing exit3/unknown semantics: execution may exist, the original owner retains custody and claims, and no automatic retry, replacement, adoption or release occurs. The independent result, terminal execution, workflow settlement and release boundaries remain unchanged.
+
 ## Permission admission
 
 `os_enforced` requires a qualified effective filesystem boundary covering the
