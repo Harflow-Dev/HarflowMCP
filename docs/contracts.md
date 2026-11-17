@@ -96,6 +96,28 @@ Ordinary startup refuses unfinished recovery. Explicit same-operation retries va
 
 The fresh marker's `recovery_operation_id` is the irreversible commit point. After it is published, same-operation retries reconcile only receipt/journal metadata and never inventory, move or initialize newly authored data. This preserves writes by an older same-line participant between commit and response. A durable receipt answers response-loss repeats even after subsequent operations. A later distinct recovery archives an earlier completed journal byte-for-byte as `previous-recovery.json`; it does not replay the earlier reset.
 
+Rust recovery qualification preserves these public shapes, fixtures and capability names;
+HarflowMCP remains their canonical owner. On Rust roots, the durable `store.recovery`
+record in state `committed` for the operation replaces the fresh Python marker as
+commit point, after an initialized empty Rust store is published with its identity
+last. The selected root inode, stable `store.lock`, `io.lock` and recovery
+infrastructure stay in place. Layout-2 roots refuse before confirmation validation;
+roots carrying Python state receive no Rust proposal and are never archived by Rust.
+
+Rust fencing and `CommitLost` refuse ordinary access. Explicit archive/reset is
+available only after a safe bounded inventory, eligible proposal and exclusive
+maintenance lock proof, with every readable owner row qualified and checked;
+unreadable or unqualifiable evidence refuses. Store-state faults can retain an
+eligible proposal under `infrastructure_unavailable`. Accepted Q1(b′) explicitly
+relaxes the current-evidence rule above: consistent earlier rows may qualify when
+acknowledged commits were lost, a watermark is missing/invalid, or a lost WAL is
+read through a private copy. Lock proof and those rows cannot reveal a live orphan
+whose acknowledged claim exists only in lost commits: recovery can move its files
+while retained descriptors still modify the archive, and an archived reservation
+cannot prevent a duplicate launch. This evidence-basis residual is accepted, not
+an absence-of-owner guarantee. Q2(a) is archive-only; in-place WAL acceptance,
+watermark rollback/recreation and fence clearing are deferred (Rust B9/E8).
+
 Success returns `state_root`, `engine_version`, `operation_id`, `backup_id` (the operation ID), `backup_path`, `status: "completed"`, `phase: "completed"` and `recovery_supported`. Recovery failures preserve `code`/`message`; codes add `state_recovery_failed`, `state_recovery_stale`, `state_recovery_unsafe`, while `state_busy` remains contention/owner refusal. Data retains known operation/backup/path/phase evidence, including partial failures. Stable failure reasons include `stale_confirmation`, `active_owner`, `ambiguous_owner`, `backup_conflict`, `recovery_interrupted`, `unsafe_root` and `infrastructure_unavailable`.
 
 The pure version-info capability `state-recovery.v1` advertises these commands. An older engine without it or returning usage is unsupported. Executable readiness remains independent of store readiness; an incompatible store does not disqualify a correctly identified executable. Ownership is cooperative: unsupported pre-ownership engines, external editors and vendor processes cannot be certified solely through the root flock. Recovery conservatively checks known process/lock evidence, but it cannot guarantee coordination with arbitrary nonparticipants. Selecting a separate fresh state root remains available.
