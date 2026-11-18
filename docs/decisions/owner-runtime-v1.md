@@ -289,6 +289,24 @@ known loss. Reader-discarded, acknowledged, abandoned-after-poison, uncertain
 in-flight and unknown unread-tail bytes remain distinct. EOF alone, exit alone and
 writer acknowledgment alone cannot produce a lossless terminal record.
 
+2026-11-19 amendment, coordinator-approved under owner delegation: bounded
+backpressure removes burst loss from fast children while keeping known loss for
+stalled owners. Known loss records its cause privately. `loss.raw` holds exactly
+`capture-known-loss stall\n` (FIFO full, pending batch held, no dequeue for
+STALL_BOUND) or `capture-known-loss disconnect\n` (consumer gone); the private
+finish frame carries the same cause (stall or disconnect) and any other cause is
+refused. A record written before causes existed, `capture-known-loss\n`, reads as
+unspecified loss; any other content, or an absent file where loss is flagged, reads
+as unknown cause. The public loss flag stays boolean.
+
+A retained-uncertain owner writes, once and best effort, a private
+`owner-retained.cause` file under its attempt's private payload directory before its
+retained wait: exclusive create, mode0600, no symlinked component, at most4096
+bytes ending with an `end` line, then fsync. It holds only structured fields (phase,
+error kind, errno, writer source tag) and never prompt, output, environment or
+paths. A failed write leaves retention unchanged and is not retried. The file is
+never public.
+
 Closing writer input stops future commands; it does not undo an admitted mutation.
 A Close frame is permitted only while healthy with no pending command. After a
 partial/uncertain TX, close input instead of interleaving another frame. Normal
@@ -321,7 +339,7 @@ defaults or performance acceptance:
 | --- | --- |
 | Operation/processes |One operation, one original agent and one storage process; no reuse/restart queue. |
 | Threads |Owner main plus one reader; writer one application thread. |
-| Reader FIFO |Four batches, at most16384 bytes per stream; sticky discard after first Full/disconnect. |
+| Reader FIFO |Four batches plus one pending batch, at most16384 bytes per stream per batch, filled from one reused16384-byte read buffer (4×32+32+16=176KiB, inside the192KiB reader envelope). Sticky discard on disconnect, or when the FIFO is full with a non-empty pending batch and no dequeue for STALL_BOUND (2s). Requested discard and stop count pending bytes as discarded. |
 | IPC |One pending mutation, one TX and one RX frame, at most24576 bytes each; append one stream, at most16384 raw bytes. |
 | Owner-loop I/O step |At most4096 bytes each of TX, response RX and writer stderr, one child-wait observation per child, and one poll≤20ms. No Store call or blocking full-frame RPC. |
 | Writer diagnostic stderr |Retain at most4096 bytes, count/discard thereafter, read at most1MiB total. Exhaustion reports unavailable diagnostics/attention; it is not agent-output loss or termination proof. |
