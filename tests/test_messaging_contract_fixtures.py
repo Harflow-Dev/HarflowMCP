@@ -68,10 +68,10 @@ def test_generator_check_mode_passes():
 
 
 def test_manifest_inventory_digest_and_file_hashes(manifest):
-    assert len(manifest['files']) == 381 and set(manifest['files']) == set(manifest['cases'])
+    assert len(manifest['files']) == 394 and set(manifest['files']) == set(manifest['cases'])
     raw = (BUNDLE / 'manifest.json').read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
-    assert digest == 'bc4d4cf5d8caaab46020188075e68854e50cd16bfc77bab56fb25bbeb51af8c8'
+    assert digest == '7e8e151c137af933dd6bd000baa4ff2fd6afcab2dcb96614d48f8027eb42cfef'
     assert (BUNDLE / 'manifest.sha256').read_bytes() == (digest + '  manifest.json\n').encode()
     for name, expected in manifest['files'].items():
         assert hashlib.sha256((BUNDLE / name).read_bytes()).hexdigest() == expected, name

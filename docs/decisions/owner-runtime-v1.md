@@ -186,7 +186,23 @@ A successful run reply requires a positively acknowledged private T2 transaction
 
 The public reply preserves the existing launch-acceptance meaning and exact `result.task_id` shape. It acknowledges the observed owned spawn, not task completion, workflow settlement, descendant containment, cancellation readiness or permission to retry. The internal `AcceptanceRecorded` milestone remains reserved for genuinely qualified operational control and is not written for this checkpoint. A task may finish directly from `SpawnObserved` only after all existing original-child exit, actual EOF/drain, input, capture and final-publication gates pass.
 
-Cancellation is unavailable in this checkpoint. Every syntactically valid cancel request returns an ordinary refused ctl result before target lookup, cancel-intent commit, signal, withdrawal or cleanup. No control endpoint or absence of a capability is treated as a stopped task. The existing narrow standalone caller policy is unchanged; detected agents and incomplete identity evidence still refuse run admission. This limitation does not grant a human, administrative or recovery credential.
+The first execution-observation checkpoint refuses cancellation before target lookup.
+The 2026-11-20 owner-approved durable cancel request amendment lifts that refusal
+for admitted standalone callers in E2-D. `AcceptanceRecorded` stays reserved.
+
+Rust schema 9 adds `cancel_requests`, a first-request ledger keyed by task and
+bound to the operation, attempt and root generation. Schema 8 roots are refused.
+The request transaction leaves lifecycle and ownership revisions and the watch
+unchanged. The writer adopts the request into fenced `CancelCommitted`, copying the
+request's fixed `user_requested` reason and timestamp into the intent.
+
+While the child has no observed exit, the owner polls for adoption at 100 ms
+intervals of loop time. Once the owner observes exit it stops polling. Any
+unadopted request remains as evidence and natural completion wins. After an
+adoption acknowledgement the owner rechecks the child before sending SIGTERM
+at most once to that PID. If the child remains unreaped five seconds after
+adoption, it attempts one SIGKILL. An adopted intent produces a cancelled
+terminal record only at the ordinary exit and drain boundary.
 
 Missing or ambiguous spawn/readiness acknowledgments preserve existing exit3/unknown semantics: execution may exist, the original owner retains custody and claims, and no automatic retry, replacement, adoption or release occurs. The independent result, terminal execution, workflow settlement and release boundaries remain unchanged.
 
@@ -258,8 +274,15 @@ a caller; the inherited channel and qualified original process handles do that.
 The closed executor supports bootstrap, claim, child recording, raw creation,
 acceptance, capture begin, single-stream append/publication, known-loss publication,
 terminal capture and resource close. It accepts no arbitrary command/SQL/path,
-repair, reset, release, adoption or agent-control request. Append performs raw
+repair, reset, release or agent-control request. Append performs raw
 append, sync, path/length revalidation, fenced index/event commit, then acknowledgment.
+
+The same-binary writer command uses `HFTQ\x01` and adds top-level opcode 6
+(`PollCancel`). Its acknowledgement uses `HFTA\x02` and a closed outcome byte.
+`Plain` (0) applies to existing operations only. `NoRequest` (1) leaves both
+revisions unchanged; `Adopted` (2) advances each by one. Both apply only to the
+poll. The owner verifies the outcome and corresponding envelope before updating
+its acknowledged state. A poll without a pending request is read-only.
 
 Durable storage-participant provenance is separate from the prepared payload,
 because storage identity is learned later. Persist an immutable bounded association
@@ -321,6 +344,12 @@ If the owner crashes, the writer's independent root claim remains while it may
 write or close. After its admitted operation returns, private-channel loss admits
 no further mutation. Neither a saved PID nor pipe EOF permits another actor to
 adopt/control the writer or replay the command. Durable claims remain protected.
+On zero-byte EOF at a healthy, unpoisoned command boundary after the previous
+acknowledgement was fully sent, the writer closes its descriptors while holding
+the independent root claim, emits `owner_lost`, and exits successfully. This
+settlement performs no lifecycle write. Partial frames, failed parent checks
+on buffered frames, failed acknowledgement sends, poison and uncertain commits
+retain the writer and classify the failure.
 
 No universal bounded owner shutdown or process death is promised under arbitrary
 kernel I/O. The supported design goal concerns storage data-I/O isolation after

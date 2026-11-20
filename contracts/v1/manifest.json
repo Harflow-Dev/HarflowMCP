@@ -3879,6 +3879,151 @@
         "synthetic": true,
         "runtime_qualification": false
       }
+    },
+    "ctl-task-cancel-intent-requested.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-already-requested.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-recorded-after-settlement.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-already-terminal.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-request-lost-to-natural-exit.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-prefix-resolved.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-error-unknown-task.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-error-ambiguous-prefix.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-error-refused-caller.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-error-unavailable-schema.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 1,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-cancel-intent-unknown-storage.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 3,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "ctl-task-status-cancelled-by-intent.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": true,
+      "exit_code": 0,
+      "provenance": "Authored from contract text, not produced by a reference engine."
+    },
+    "invalid-cancel-intent-without-capability.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.14",
+      "format": "harflow.version-info",
+      "required_capabilities": [
+        "task-cancel-intent.v1"
+      ],
+      "valid": false,
+      "exit_code": 1,
+      "provenance": "Authored from contract text, not produced by a reference engine.",
+      "rejection_reason": "cancel_intent requires task-cancel-intent.v1",
+      "reply_fixture": "ctl-task-cancel-intent-requested.json"
     }
   },
   "files": {
@@ -4262,6 +4407,19 @@
     "ctl-messaging-workflow-queued-target-settled-completed.json": "95e3abae34acbf6e6fbaefdb3e38ed2cc7586548baf92134632dde28617cbb23",
     "ctl-messaging-workflow-send.json": "5cddaf57041f08af6c64b11ad0ce1e5b4e85c9c7991f2bb86a8a5c7bab5b594f",
     "ctl-messaging-workflow-status-truncated.json": "b57e76a35c7fae863c8dc43433c5c0a6289513a8a8e8e1c727ca87ef7494475a",
-    "ctl-messaging-workflow-status-undeliverable.json": "f94a96d1c1ce0913b78160e3fdc8ac1de50e3bddd3e33061fb42149f0afab766"
+    "ctl-messaging-workflow-status-undeliverable.json": "f94a96d1c1ce0913b78160e3fdc8ac1de50e3bddd3e33061fb42149f0afab766",
+    "ctl-task-cancel-intent-requested.json": "04a7fceed71faa9256d94033328bc9a1e838488523b0d7213bc67bd713db02be",
+    "ctl-task-cancel-intent-already-requested.json": "577397d8385ef7dbcdf01d743dff783467c33dc981d9d2f64fff80c6305cd449",
+    "ctl-task-cancel-intent-recorded-after-settlement.json": "a451275bb821520ebfa62bb9d50f1ba75daad618784403bbc4cd8fd02e843907",
+    "ctl-task-cancel-intent-already-terminal.json": "4d5d1a1f56934737111de5495909ec04aab9f048ad429e16bebee093f6268bb9",
+    "ctl-task-cancel-intent-request-lost-to-natural-exit.json": "df95cc0ed82484380b5a38816d9ea17e8afe99749defecdbf382d57bb0e638fa",
+    "ctl-task-cancel-intent-prefix-resolved.json": "62a153c60a824a3df8cb22ddd6c9030748013a5222a8fe1a20882981ab30bb03",
+    "ctl-task-cancel-intent-error-unknown-task.json": "ef35f887d94b1cfeed11dec2c618e375ec33242ac51e662a49fbc30e0394003e",
+    "ctl-task-cancel-intent-error-ambiguous-prefix.json": "b32490e031b392b85e9f04bd8b00d11791b53b6087e62931224c96c23a61fce4",
+    "ctl-task-cancel-intent-error-refused-caller.json": "5c40c45630e06e7b01819b7d1d5c0606f714f59e6976152bc9de33ceb6beca2b",
+    "ctl-task-cancel-intent-error-unavailable-schema.json": "acdb7c841118672876a2682ed858ad494db91958eb61143b2952013d0851d332",
+    "ctl-task-cancel-intent-unknown-storage.json": "7c9e5c045f34928c770fd74737e836ff17362a4be6a3a24d0240818d2abba700",
+    "ctl-task-status-cancelled-by-intent.json": "f559fc642313f7c435f78982775ed19a32e0007ff8018d32e63d457066d29168",
+    "invalid-cancel-intent-without-capability.json": "ae655cf7393f55f8513f3e2a6993a24b5ec35b7212d07d08d5d5e3e3bb695149"
   }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 from functools import partial
 import importlib.util
@@ -99,10 +100,20 @@ def test_manifest_cases_reach_the_wire_validator():
                 validate_envelope(document, case["format"], live=True)
                 with pytest.raises(ValueError, match="product/format"):
                     validate_envelope(document["result"]["events"][0], EVENT_FORMAT, live=False)
-            elif name == "invalid-missing-capabilities.json" or name.startswith(("invalid-s05-missing-", "invalid-steering-missing-")):
+            elif name == "invalid-missing-capabilities.json" or name.startswith(
+                ("invalid-s05-missing-", "invalid-steering-missing-", "invalid-cancel-intent-without-capability")
+            ):
                 validate_envelope(document, case["format"], live=True)
                 required = set(case["required_capabilities"]) or {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
                 assert not required.issubset(set(document.get("capabilities", [])))
+                if name == "invalid-cancel-intent-without-capability.json":
+                    assert required == {"task-cancel-intent.v1"}
+                    reply_name = case["reply_fixture"]
+                    assert manifest["cases"][reply_name]["required_capabilities"] == sorted(required)
+                    reply = json.loads((root / reply_name).read_text())
+                    with pytest.raises(ValueError) as refused:
+                        decode_cancel_intent_reply(reply, document)
+                    assert str(refused.value) == case["rejection_reason"]
             else:
                 with pytest.raises((ValueError, workflow_definition_documents.WorkflowDefinitionDocumentError, workflow_run_documents.WorkflowRunDocumentError)) as caught:
                     if case["format"] == workflow_definition_documents.DEFINITION_FORMAT:
@@ -130,6 +141,67 @@ def test_manifest_cases_reach_the_wire_validator():
                     assert "product/format" in reason
                 elif name == "invalid-workflow-run.json":
                     assert "document version" in reason.lower()
+
+
+def decode_cancel_intent_reply(reply, handshake):
+    """Apply the negotiated-capability rule for the optional cancel reply field."""
+    payload = reply.get("result", reply.get("task", {}))
+    if "cancel_intent" in payload and "task-cancel-intent.v1" not in handshake.get("capabilities", []):
+        raise ValueError("cancel_intent requires task-cancel-intent.v1")
+    return payload.get("cancel_intent")
+
+
+def test_cancel_intent_contract_fixtures_cover_shape_and_optional_handling():
+    root = Path(__file__).parents[1] / "contracts" / "v1"
+
+    def document(name):
+        return json.loads((root / name).read_text())
+
+    expected_states = {
+        "ctl-task-cancel-intent-requested.json": "requested",
+        "ctl-task-cancel-intent-already-requested.json": "already_requested",
+        "ctl-task-cancel-intent-recorded-after-settlement.json": "recorded",
+        "ctl-task-cancel-intent-prefix-resolved.json": "requested",
+    }
+    for name, expected_state in expected_states.items():
+        result = document(name)["result"]
+        intent = result["cancel_intent"]
+        assert intent["sequence"] == 1
+        assert intent["state"] == expected_state
+        assert result["cascade"]["cascade_incomplete"] is True
+        assert result["cascade"]["observation"]["coverage"] == "incomplete"
+        accepted_at = intent["accepted_at"]
+        parsed = datetime.fromisoformat(accepted_at.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
+
+    already_terminal = document("ctl-task-cancel-intent-already-terminal.json")["result"]
+    assert "cancel_intent" not in already_terminal
+
+    lost_request = document("ctl-task-cancel-intent-request-lost-to-natural-exit.json")["result"]
+    assert lost_request["status"] == "completed"
+    assert "cancel_intent" not in lost_request
+    prefix_resolved = document("ctl-task-cancel-intent-prefix-resolved.json")
+    assert prefix_resolved["result"]["resolved_from"]
+
+    requested_reply = document("ctl-task-cancel-intent-requested.json")
+    handshake = document("version-info.json")
+    with pytest.raises(ValueError, match="task-cancel-intent.v1"):
+        decode_cancel_intent_reply(requested_reply, handshake)
+    capabilities = [name for name in handshake["capabilities"] if name != "task-cancel-cascade.v1"]
+    capable_handshake = {**handshake, "capabilities": [*capabilities, "task-cancel-intent.v1"]}
+    assert decode_cancel_intent_reply(requested_reply, capable_handshake) == requested_reply["result"]["cancel_intent"]
+    assert decode_cancel_intent_reply({"result": {}}, handshake) is None
+
+    cancelled = document("ctl-task-status-cancelled-by-intent.json")["task"]
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancel_intent"]["sequence"] == 1
+    assert cancelled["cancel_intent"]["state"] == "recorded"
+    assert cancelled["summary"]
+    assert decode_cancel_intent_reply({"task": cancelled}, capable_handshake) == cancelled["cancel_intent"]
+
+    # Existing status documents without cancellation metadata remain valid.
+    ordinary_status = document("ctl-task-status-continuation-stopped.json")
+    validate_envelope(ordinary_status, "harflow.ctl", live=False)
 
 
 def test_resource_slot_contract_fixtures_cover_aggregate_semantics():

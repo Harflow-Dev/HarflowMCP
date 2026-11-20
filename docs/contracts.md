@@ -43,6 +43,9 @@ The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` 
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
+`task-cancel-intent.v1` qualifies the durable cancel request reply. Engines advertise it
+only when they implement that reply. The Python reference does not advertise it.
+
 `task-artifacts.v1`, `task-continuation-stop.v1` and `task-cancel-cascade.v1` qualify bounded artifact metadata
 reads, advisory ctl continuation-stop observations and final ctl cancellation observations;
 `task-pending-launch.v1` qualifies `task-pending-page` and `task-pending-status`; `backend-models.v1` qualifies
@@ -350,6 +353,8 @@ Input closure can precede process exit; only observed settlement ends the runnin
 terminal history retains its observed status. `last_captured_output_at` is the
 raw stream file modification time in UTC, or null when unavailable; supervision
 labels its source `raw_stream_log_mtime`.
+For a non-terminal task, engines derive `owner_state` and capture supervision,
+including `lost_with_owner`, at read time by observing the recorded owner's identity.
 
 `recovery-activity TASK_ID --json [--cursor CURSOR] [--limit N]` is an additive
 ctl command. Its `recovery_activity` page carries `source: backend_transcript`,
@@ -779,6 +784,8 @@ The task record is read again after the log, and the state is judged from that. 
 is a presentation heuristic, not closure evidence: an `incomplete` log may later become `final`, so
 keep polling until `final`. `capture_state` is the supervision `output_capture` evidence and
 `task_status` the status recorded in the task record (it is not re-resolved, which would replay the raw stream on every poll; the lifecycle is `capture_state`'s job).
+For a readable non-terminal log, the same owner verdict used for capture supervision
+determines the log state. Alive gives `open`, dead gives `incomplete`, and undecidable gives `unknown`.
 
 `change_token` digests the record file's identity, size and mtime, the log's identity and size, the
 computed `log` object and the cursor generation. Equal tokens mean equal sampled sources and
@@ -2212,6 +2219,55 @@ manifest cases require `task-continue.v1` and record exit codes 0, 1 and 3.
 `invalid-s05-missing-task-continue.json` is a handshake without the capability, for testing a
 consumer's gate. Evidence that the real `continue` dispatch produces these documents is in
 `tests/test_ctl_continue_contract.py`.
+
+### Durable cancel request (`task-cancel-intent.v1`)
+
+2026-11-20 amendment, owner-approved (addendum rev 4, Q1–Q13).
+
+This section applies to engines that advertise `task-cancel-intent.v1`.
+
+`harflow-ctl cancel TASK_ID --json` checks caller admission before resolving a
+full ID or unique prefix. A resolved prefix adds `resolved_from`. In one
+transaction, the engine returns an adopted intent if present, then checks for
+an existing request on a non-terminal task, then checks whether the task is
+already terminal. A fresh request requires a published, unreleased task at
+`SpawnObserved` with a matching lifecycle binding. Its fixed reason is
+`user_requested`; retries preserve the initial request.
+
+| Outcome | Reply | Exit |
+| --- | --- | --- |
+| Request committed | `result.cancel_intent.state: "requested"` | 0 |
+| Request already committed and unadopted | `result.cancel_intent.state: "already_requested"` | 0 |
+| Intent adopted | `result.cancel_intent.state: "recorded"` | 0 |
+| Already terminal without an adopted intent | Terminal status, no `cancel_intent` | 0 |
+| Unknown or non-public task, or a non-terminal task outside the eligible phase or already released | `error.code: "unknown_task"` | 1 |
+| Ambiguous or too-short prefix | Existing prefix error | 1 |
+| Caller refused | `error.code: "invalid_params"` | 1 |
+| Lifecycle binding mismatch | `error.code: "invalid_params"` | 1 |
+| Unsupported store schema | `error.code: "state_incompatible"`, `error.data.reason: "unsupported_layout"` | 1 |
+| Commit outcome unknown | `unknown.message` | 3 |
+| Invalid invocation | Usage | 2 |
+
+Exit 3 means the request commit outcome is unknown and retrying cancel is safe.
+Successful replies carry the current stored status and the legacy `cascade`
+compatibility block with `cascade_incomplete: true`. A running status is valid
+after a durable request. Acceptance conveys no process-stop guarantee.
+The compatibility block can carry an incomplete `observation`. Consumers treat
+it as unqualified unless the engine separately advertises `task-cancel-cascade.v1`
+on the fresh handshake.
+
+When present, `result.cancel_intent` has `sequence: 1`, the state above, and
+`accepted_at` as a timezone-bearing ISO 8601 timestamp. The original owner can
+act only after its writer adopts the request. A natural exit the owner already
+observed wins over an unadopted request. The request remains as evidence, and
+subsequent cancel replies report already terminal without intent. Adoption
+before the owner observes exit produces `cancelled` with the actual exit code.
+Terminal `cancelled` snapshots retain the intent with `state: "recorded"` and
+keep the result summary when a successful result witness exists.
+
+Consumers require `task-cancel-intent.v1` on a fresh handshake before accepting
+this field. A reply carrying the field without that capability is invalid.
+The field is optional on cancel replies and terminal snapshots.
 
 ### Task cancellation observation (`task-cancel-cascade.v1`)
 

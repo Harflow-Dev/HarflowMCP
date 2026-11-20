@@ -669,7 +669,7 @@
   "specifications": [
     {
       "path": "docs/decisions/owner-runtime-v1.md",
-      "sha256": "453276c55706d6ee65e8c676afb7adc6a8d431950cfa1573a861843143bcf8da"
+      "sha256": "dc83a2db95f51a38a74ccceebe98a8f5d2c3fac16da83e9b8e27dc74a89230b2"
     },
     {
       "path": "docs/decisions/owner-runtime-v1-schema.md",

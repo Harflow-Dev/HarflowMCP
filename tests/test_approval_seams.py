@@ -282,8 +282,8 @@ def test_approved_writes_disclose_one_path_unchanged_and_several_additively(repo
 
 def test_contract_fixtures_are_byte_identical_to_the_pinned_manifest():
     root = Path(__file__).parents[1] / "contracts" / "v1"
-    assert hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest() == "bc4d4cf5d8caaab46020188075e68854e50cd16bfc77bab56fb25bbeb51af8c8"
-    assert (root / "manifest.sha256").read_text().split()[0] == "bc4d4cf5d8caaab46020188075e68854e50cd16bfc77bab56fb25bbeb51af8c8"
+    assert hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest() == "7e8e151c137af933dd6bd000baa4ff2fd6afcab2dcb96614d48f8027eb42cfef"
+    assert (root / "manifest.sha256").read_text().split()[0] == "7e8e151c137af933dd6bd000baa4ff2fd6afcab2dcb96614d48f8027eb42cfef"
     manifest = json.loads((root / "manifest.json").read_text())
     for name, digest in manifest["files"].items():
         assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
