@@ -4,7 +4,7 @@ A case never writes a file under the state root. It calls one of the named opera
 adapter turns the layout-neutral request into whatever store the engine under test uses (the engine
 may keep a SQLite root; no file layout is part of this interface).
 
-The twenty operations (all take the state root first):
+The twenty-one operations (all take the state root first):
 
      1. initialize_empty(root)                 a compatible, empty, initialized store
      2. remove_root(root)                      the selected root no longer exists
@@ -26,6 +26,11 @@ The twenty operations (all take the state root first):
     18. stop_chain(root, spec)                 the chain-stop marker of a chain root (spec below)
     19. add_launch(root, spec)                 a launch receipt without an ordinary record (spec below)
     20. add_invalid_launch_name(root, name)    a launch-receipt file whose name is not a task identity
+    21. make_own_lock_only_root(root)          a root holding only the engine's own lock files (nothing else)
+
+`make_own_lock_only_root` is engine-specific (delta tag `own-lock-names`): the Python adapter writes
+`.harflow-store.lock`, the Rust adapter writes `store.lock` and `io.lock`. `root_state` reports such a root
+as `other` for both engines (no marker); the cases compare outcomes, never file names.
 
 `add_task` spec: always present are `task_id`, `backend`, `repo_path`, `freedom`, `session_id`, `status`,
 `exit_code`, `started_at`, `finished_at`, `output_drained` and `prompt` (see `world.task`). Optional keys are
@@ -82,7 +87,7 @@ from . import seed, world as worldmod
 OPERATIONS = ('initialize_empty', 'remove_root', 'make_foreign_root', 'root_state', 'seed_world', 'add_task',
               'add_live_caller', 'damage_task', 'append_event', 'append_malformed_line', 'append_partial_line',
               'truncate_log', 'remove_log', 'tamper_prompt', 'write_artifacts', 'change_artifact_target',
-              'authoritative_digest', 'stop_chain', 'add_launch', 'add_invalid_launch_name')
+              'authoritative_digest', 'stop_chain', 'add_launch', 'add_invalid_launch_name', 'make_own_lock_only_root')
 DERIVED = ('.listing', '.task-list-revision', '.statistics')
 
 
@@ -111,6 +116,10 @@ class PythonLayoutAdapter:
     def make_foreign_root(self, root):
         Path(root).mkdir()
         (Path(root) / 'stranger.txt').write_text('not harflow')
+
+    def make_own_lock_only_root(self, root):
+        Path(root).mkdir()
+        (Path(root) / '.harflow-store.lock').write_bytes(b'')
 
     def root_state(self, root):
         root = Path(root)

@@ -34,15 +34,16 @@ def framework_identity():
     return {str(p.relative_to(root)): digest(read_regular(p)) for p in paths}
 
 
-DELTAS = ('interim-6.1', 'U10', 'pending-prefix-paging')
+DELTAS = ('interim-6.1', 'U10', 'pending-prefix-paging', 'own-lock-names')
+ENGINES = ('python', 'rust')
 
 
-def run_cases(command, identity, check, output, selected=None, probe=False, port=None, deltas=()):
+def run_cases(command, identity, check, output, selected=None, probe=False, port=None, deltas=(), engine='python'):
     results = []
     for name, (capabilities, function, tag) in case_module.CASES.items():
         if selected and name not in selected:
             continue
-        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe, port=port, default_tag=tag, deltas=deltas)
+        ctx = Ctx(name, Path(output) / 'cases' / name, command, capabilities, probe=probe, port=port, default_tag=tag, deltas=deltas, engine=engine)
         try:
             function(ctx)
         except Exception as exc:  # a crashing case is a failure, never a pass
@@ -84,11 +85,12 @@ def run(args):
     manifest = verify_manifest(args.manifest, args.manifest_sha256)
     port = ExternalAdapter(args.fixture_adapter, args.fixture_adapter_sha256) if args.fixture_adapter else PythonLayoutAdapter()
     deltas = sorted(set(args.delta or ()))
+    engine = args.engine or ('rust' if args.engine_bin else 'python')
     exclusions = sorted(set(args.exclude_unverified or ()))
     framework_before = framework_identity()
     report = {'format': 'harflow.conformance.e1-report', 'v': 1, 'invocation_id': invocation_id, 'ok': False,
               'manifest_sha256': args.manifest_sha256, 'fixture_count': len(manifest['files']),
-              'framework_sha256': framework_before, 'fixture_adapter': port.identity(), 'deltas': deltas, 'platform': [sys.platform, platform.machine()], 'cases': []}
+              'framework_sha256': framework_before, 'fixture_adapter': port.identity(), 'deltas': deltas, 'engine': engine, 'platform': [sys.platform, platform.machine()], 'cases': []}
     try:
         if args.engine_bin:
             command, identity, check, _ = binary_target(args.engine_bin, args.engine_sha256)
@@ -96,7 +98,7 @@ def run(args):
             command, identity, check, _ = source_target(args.source_repo, args.commit, args.python, output)
         report['target'] = identity
         check()
-        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe, port, deltas)
+        report['cases'] = run_cases(command, identity, check, output, args.case, args.probe, port, deltas, engine)
         check()
         if framework_identity() != framework_before:
             raise ConformanceError('framework source changed during execution')
@@ -153,6 +155,7 @@ def main(argv=None):
     parser.add_argument('--fixture-adapter', help='absolute path of a pinned external fixture tool (default: the Python 0.0.13 layout adapter)')
     parser.add_argument('--fixture-adapter-sha256')
     parser.add_argument('--delta', action='append', choices=DELTAS, help='expect a proposed delta profile instead of the Python baseline (recorded in the report); repeatable')
+    parser.add_argument('--engine', choices=ENGINES, help='engine family under test (default: rust for --engine-bin, python for a source target); selects engine-specific expectations such as lock names')
     parser.add_argument('--exclude-unverified', action='append', metavar='NAME', help='record an owner-accepted exclusion of a named unverified item')
     parser.add_argument('--invocation-id')
     parser.add_argument('--case', action='append', help='run only this case; repeat for several (a subset is not the complete matrix)')

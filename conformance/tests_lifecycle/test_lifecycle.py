@@ -318,7 +318,7 @@ def test_a_refusal_that_succeeds_fails_the_case(tmp_path):
         cases.refusals(cases.Lifecycle(seam))
 
 
-@pytest.mark.parametrize('name', ['complete', 'nonzero', 'detached-resume', 'cancel', 'owner-death'])
+@pytest.mark.parametrize('name', ['complete', 'nonzero', 'detached-resume', 'cancel', 'owner-death', 'pre-state-run'])
 def test_agent_cases_are_blocked_not_passed_without_a_seam(tmp_path, name):
     with pytest.raises(seams.SeamRequired):
         cases.CASES[name](cases.Lifecycle(seams.NoSeam(None, tmp_path)))
@@ -364,7 +364,7 @@ def test_vocabulary_distinguishes_no_failures_all_passed_complete_and_subsets():
     assert runner.assess(passed, None) == {'no_failures': True, 'all_passed': True, 'failed': [], 'blocked': [], 'subset': False, 'complete': True}
     blocked = [dict(e, status='blocked') if e['name'] != 'refusals' else e for e in passed]
     summary = runner.assess(blocked, None)
-    assert summary['no_failures'] and not summary['all_passed'] and not summary['complete'] and len(summary['blocked']) == 5
+    assert summary['no_failures'] and not summary['all_passed'] and not summary['complete'] and len(summary['blocked']) == 6
     subset = runner.assess(passed[:1], ['refusals'])
     assert subset['all_passed'] and subset['subset'] and not subset['complete']
     failed = [dict(passed[0], status='failed')] + passed[1:]
@@ -381,3 +381,87 @@ def test_refusals_run_against_python_source_and_are_blocked_on_missing_spawn_evi
         cases.refusals(cases.Lifecycle(seam))
     assert raised.value.partial['refusals'] == 4 and raised.value.partial['codes_and_no_task_record'] is True
     assert [op['exit_code'] for op in seam.operations][:3] == [1, 1, 1]
+
+
+def test_the_pre_state_is_read_from_the_root_the_case_was_given(tmp_path):
+    from conformance.lifecycle.prestate import prepare_root
+    states = {}
+    for state, engine in (('missing', 'python'), ('empty', 'python'), ('own-lock-only', 'python'), ('own-lock-only', 'rust'),
+                          ('stray', 'python')):
+        root = tmp_path / f'{state}-{engine}'
+        prepare_root(root, state, engine)
+        states[(state, engine)] = cases.pre_state_of(root)
+    assert all(found == state for (state, _), found in states.items()), states
+    assert cases.pre_state_of(None) == 'missing'
+    mixed = tmp_path / 'mixed'
+    prepare_root(mixed, 'own-lock-only', 'rust')
+    (mixed / 'stranger.txt').write_bytes(b'x')
+    assert cases.pre_state_of(mixed) == 'stray'
+
+
+class RootSeam(StubSeam):
+    """A seam whose engine only names the selected root, answering `run` with a scripted refusal."""
+
+    def __init__(self, tmp_path, root, error, **kwargs):
+        super().__init__(tmp_path, **kwargs)
+        self.engine = SimpleNamespace(env={'HARFLOW_STATE_ROOT': str(root)})
+        self.error, self.calls = error, []
+
+    def call(self, argv, *, refused=False):
+        self.calls.append(argv)
+        return {'error': self.error}
+
+
+def stray_root(tmp_path):
+    from conformance.lifecycle.prestate import prepare_root
+    root = tmp_path / 'state'
+    prepare_root(root, 'stray', 'python')
+    return root
+
+
+def test_a_stray_root_must_be_refused_as_unmarked_nonempty_and_left_unchanged(tmp_path):
+    root = stray_root(tmp_path)
+    good = {'code': 'state_incompatible', 'message': 'no', 'data': {'reason': 'unmarked_nonempty'}}
+    seam = RootSeam(tmp_path, root, good)
+    evidence = cases.pre_state_run(cases.Lifecycle(seam))
+    assert evidence['pre_state'] == 'stray' and evidence['code'] == 'state_incompatible' and evidence['root_unchanged'] is True
+    assert seam.calls[0][0] == 'run'
+    for error, fragment in (({'code': 'invalid_params', 'message': 'no'}, 'not state_incompatible'),
+                            ({'code': 'state_incompatible', 'message': 'no', 'data': {'reason': 'foreign_store'}}, 'unmarked_nonempty'),
+                            ({'code': 'state_incompatible', 'message': 'no'}, 'unmarked_nonempty')):
+        with pytest.raises(ConformanceError, match=fragment):
+            cases.pre_state_run(cases.Lifecycle(RootSeam(tmp_path, root, error)))
+
+
+def test_a_refused_run_that_changes_the_root_fails_the_case(tmp_path):
+    root = stray_root(tmp_path)
+    good = {'code': 'state_incompatible', 'message': 'no', 'data': {'reason': 'unmarked_nonempty'}}
+    seam = RootSeam(tmp_path, root, good)
+    call = seam.call
+
+    def writes(argv, *, refused=False):
+        (root / 'store.lock').write_bytes(b'')
+        return call(argv, refused=refused)
+    seam.call = writes
+    with pytest.raises(ConformanceError, match='changed the root'):
+        cases.pre_state_run(cases.Lifecycle(seam))
+
+
+def test_a_stray_root_run_without_spawn_evidence_is_withheld_with_its_partial_evidence(tmp_path):
+    root = stray_root(tmp_path)
+    good = {'code': 'state_incompatible', 'message': 'no', 'data': {'reason': 'unmarked_nonempty'}}
+    seam = seams.NoSeam(SimpleNamespace(env={'HARFLOW_STATE_ROOT': str(root)}), tmp_path, ['nothing-matches-this'])
+    seam.call = lambda argv, *, refused=False: {'error': good}
+    with pytest.raises(seams.SpawnEvidenceUnavailable) as raised:
+        cases.pre_state_run(cases.Lifecycle(seam))
+    assert raised.value.partial['root_unchanged'] is True and raised.value.partial['no_spawn'] == 'unverified'
+
+
+def test_a_started_pre_state_needs_an_agent_seam(tmp_path):
+    from conformance.lifecycle.prestate import prepare_root
+    for state in ('missing', 'empty', 'own-lock-only'):
+        root = tmp_path / state
+        prepare_root(root, state, 'rust')
+        seam = seams.NoSeam(SimpleNamespace(env={'HARFLOW_STATE_ROOT': str(root)}), tmp_path)
+        with pytest.raises(seams.SeamRequired):
+            cases.pre_state_run(cases.Lifecycle(seam))

@@ -55,8 +55,9 @@ class Result:
 class Ctx:
     """One case: a fresh isolated root, a way to run the engine, and recorded checks."""
 
-    def __init__(self, name, folder, command, capabilities, probe=False, port=None, default_tag='baseline', deltas=()):
+    def __init__(self, name, folder, command, capabilities, probe=False, port=None, default_tag='baseline', deltas=(), engine='python'):
         self.deltas = frozenset(deltas)
+        self.engine = engine  # 'python' or 'rust': selects engine-specific expectations (own lock names)
         self.port = port or PythonLayoutAdapter()
         self.default_tag = default_tag
         self.skips = []

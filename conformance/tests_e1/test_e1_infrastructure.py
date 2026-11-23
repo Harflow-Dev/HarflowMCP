@@ -96,7 +96,7 @@ def test_external_adapter_requires_its_pinned_digest(tmp_path):
 
 
 def test_every_case_is_registered_with_capabilities_and_a_default_tag():
-    assert len(cases.CASES) == 56
+    assert len(cases.CASES) == 58
     for name, (capabilities, function, tag) in cases.CASES.items():
         assert name.count('.') == 1 and callable(function) and 'ctl.v1' in capabilities and tag in ('baseline', 'contract')
 
@@ -307,6 +307,21 @@ def test_delta_profiles_have_live_alternate_expectations(tmp_path):
     assert not interim['ok'] and any('interim-6.1' in m for m in interim['failures'])
     base = run_selected(tmp_path / 'b', 'passthrough', ['list.missing_root_initializes'])['list.missing_root_initializes']
     assert base['ok']
+    for name in ('list.empty_root', 'list.own_lock_only_root'):
+        proposed = run_selected(tmp_path / name / 'u10', 'passthrough', [name], deltas=['U10'])[name]
+        assert not proposed['ok'] and any('U10' in m for m in proposed['failures']), name
+        assert run_selected(tmp_path / name / 'base', 'passthrough', [name])[name]['ok'], name
+
+
+def test_own_lock_names_follow_the_engine_under_test(tmp_path):
+    from conformance.e1 import cases as case_module
+    python = harness.Ctx('list.own_lock_only_root', tmp_path / 'p', ['unused'], ())
+    assert case_module._own_locks(python) == ['.harflow-store.lock']
+    rust = harness.Ctx('list.own_lock_only_root', tmp_path / 'r', ['unused'], (), engine='rust')
+    assert case_module._own_locks(rust) == ['io.lock', 'store.lock']
+    tagged = harness.Ctx('list.own_lock_only_root', tmp_path / 't', ['unused'], (), deltas=['own-lock-names'])
+    assert case_module._own_locks(tagged) == ['io.lock', 'store.lock']
+    assert 'own-lock-names' in scenarios.DELTAS and scenarios.ENGINES == ('python', 'rust')
 
 
 def test_prefix_paging_delta_fails_python_only_in_the_bug_assertion(tmp_path):
@@ -349,9 +364,9 @@ def test_artifact_items_are_complete_and_the_adapter_has_no_defaults(tmp_path):
         (world.ARTIFACT_KIND, world.ARTIFACT_NOTE, world.ARTIFACT_REGISTERED_AT, world.ABSENT_OBSERVATION)
 
 
-def test_port_docstring_names_all_twenty_operations():
+def test_port_docstring_names_all_operations():
     from conformance.e1 import port
-    assert len(port.OPERATIONS) == 20
+    assert len(port.OPERATIONS) == 21
     for op in port.OPERATIONS:
         assert f'{op}(' in port.__doc__, op
 

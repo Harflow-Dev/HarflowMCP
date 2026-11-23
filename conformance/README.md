@@ -262,9 +262,16 @@ scoped-read refusals around them. Case groups live in `cases.py`, `cases_stop.py
   only when `ok` and `complete`.
 - **Delta profiles.** `--delta interim-6.1` and `--delta U10` replace the Python baseline expectations with
   the proposed alternatives of C1 section 6.1 and U10 (tagged `[proposed, ...]`) and are recorded in the
-  report. `--delta pending-prefix-paging` replaces the one assertion that pins a Python 0.0.13 paging defect
+  report. `--delta own-lock-names` selects the Rust lock-name expectations. `--delta pending-prefix-paging` replaces the one assertion that pins a Python 0.0.13 paging defect
   (`task-pending-page` resumes by bare task id, so with receipts `ab-c` and `ab` and `--limit 1` it skips
   `ab`) with the complete traversal. Python fails these profiles on purpose.
+- **Engine flag and own lock names.** `--engine python|rust` (default: rust for `--engine-bin`, python for a source
+  target) is recorded in the report and carried as `ctx.engine`. The delta tag `own-lock-names` marks the one
+  expectation that differs by engine on a root holding only the engine's own lock files: the port method
+  `make_own_lock_only_root` writes `.harflow-store.lock` (Python adapter) or `store.lock` and `io.lock` (Rust
+  adapter). Cases compare outcome classes, error codes and `data.reason`, never the file names. The lifecycle
+  runner takes `--pre-state missing|empty|own-lock-only|stray` and `--engine`; new lifecycle cases change the
+  completeness count, so earlier baselines are historical.
 - **Launch receipts and markers.** `add_launch` writes a qualified receipt (a receipt with a `refusal` fails exactly
   that qualification) and replaces an existing name in place, so the set of names, and therefore the namespace
   revision and cursors, is unchanged. `stop_chain` writes the continuation-stop marker (`valid`, `invalid`,

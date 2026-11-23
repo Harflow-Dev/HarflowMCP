@@ -5,6 +5,8 @@ seam), never from engine state. A case that needs an agent on a seam without one
 reported as blocked, not passed. Each requirement carries a tag: `[contract]` follows the published contract,
 `[baseline]` pins Python 0.0.11 behaviour the contract does not spell out.
 """
+import os
+from pathlib import Path
 import time
 
 from ..oracles import ConformanceError
@@ -122,8 +124,52 @@ def owner_death(c):
     return seam.raw_evidence(task)
 
 
+def _root_entries(root):
+    """Name, inode, mode and size of every entry directly under the root; a refused request must not change them."""
+    return sorted((e.name, e.inode(), e.stat(follow_symlinks=False).st_mode, e.stat(follow_symlinks=False).st_size)
+                  for e in os.scandir(root))
+
+
+def pre_state_of(root):
+    """`missing`, `empty`, `own-lock-only` or `stray`, read from the root the case was given (see `prestate.py`)."""
+    if root is None or not os.path.lexists(root):
+        return 'missing'
+    names = {entry.name for entry in os.scandir(root)}
+    if not names:
+        return 'empty'
+    return 'own-lock-only' if names <= {'.harflow-store.lock', 'store.lock', 'io.lock'} else 'stray'
+
+
+def pre_state_run(c):
+    """`run` on the root the case was given. A missing, empty or own-lock-only root is initialized and the task runs
+    to completion; a root that holds anything else is refused as `state_incompatible` with reason `unmarked_nonempty`
+    and is left exactly as found, with no agent started."""
+    seam = c.seam
+    root = Path(seam.engine.env['HARFLOW_STATE_ROOT']) if getattr(seam, 'engine', None) else None
+    state = pre_state_of(root)
+    if state != 'stray':
+        task = seam.launch()
+        c.terminal(task)
+        return {'pre_state': state, **seam.raw_evidence(task, completed=True)}
+    before = _root_entries(root)
+    verify = seam.watch_spawns()
+    doc = seam.call(['run', '--backend', 'claude', '--freedom', 'unrestricted', '--repo', str(seam.workspace),
+                     '--prompt', 'must not spawn'], refused=True)
+    error = doc['error']
+    require(error.get('code') == 'state_incompatible', f'a run on a stray root gave {error.get("code")!r}, not state_incompatible', 'contract')
+    require((error.get('data') or {}).get('reason') == 'unmarked_nonempty', 'a run on a stray root lacks reason unmarked_nonempty', 'contract')
+    require(_root_entries(root) == before, 'a refused run changed the root it was given', 'contract')
+    verified = {'pre_state': state, 'code': error['code'], 'reason': error['data']['reason'], 'root_unchanged': True}
+    try:
+        verify()
+    except SpawnEvidenceUnavailable as exc:
+        exc.partial = {**verified, 'spawn_check': seam.evidence.get('spawn_check'), 'no_spawn': 'unverified'}
+        raise
+    return {**verified, 'spawn_check': seam.evidence.get('spawn_check')}
+
+
 CASES = {'refusals': refusals, 'complete': complete, 'nonzero': nonzero, 'detached-resume': detached_resume,
-         'cancel': cancel, 'owner-death': owner_death}
+         'cancel': cancel, 'owner-death': owner_death, 'pre-state-run': pre_state_run}
 
 
 def resume_probe(c):

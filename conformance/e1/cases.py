@@ -179,6 +179,46 @@ def _(ctx):
            else 'an ordinary read initializes a missing root [contract, pending U10]')
 
 
+def _entries(root):
+    """Name, inode and mode of every entry directly under the root (a read must not change them)."""
+    return sorted((e.name, e.inode(), e.stat(follow_symlinks=False).st_mode) for e in os.scandir(root))
+
+
+def _own_locks(ctx):
+    """The lock names the engine under test creates: Rust `store.lock` and `io.lock`, Python `.harflow-store.lock`."""
+    if ctx.engine == 'rust' or delta(ctx, 'own-lock-names'):
+        return ['io.lock', 'store.lock']
+    return ['.harflow-store.lock']
+
+
+@case('list.empty_root')
+def _(ctx):
+    os.mkdir(ctx.root, 0o700)  # the pre-state itself: an existing, empty, owner-only directory
+    ctx.eq(ctx.fx.root_state(), 'other', 'precondition: an empty directory is not an initialized store')
+    doc = success(ctx, ctx.ctl('list', '--json'))
+    ctx.eq(doc['tasks'], [], 'an empty root lists no tasks [contract]')
+    if delta(ctx, 'U10'):
+        ctx.eq(_entries(ctx.root), [], 'an ordinary read leaves an empty root empty [proposed, U10]')
+        ctx.eq(ctx.fx.root_state(), 'other', 'an ordinary read does not initialize an empty root [proposed, U10]')
+    else:
+        ctx.eq(ctx.fx.root_state(), 'initialized', 'an ordinary read initializes an empty root [contract, pending U10]')
+
+
+@case('list.own_lock_only_root')
+def _(ctx):
+    ctx.fx.make_own_lock_only_root()
+    ctx.eq(ctx.fx.root_state(), 'other', 'precondition: the engine\'s own lock files are not an initialized store')
+    ctx.eq(sorted(entry.name for entry in os.scandir(ctx.root)), _own_locks(ctx), 'precondition: only the own lock names [own-lock-names]')
+    before = _entries(ctx.root)
+    doc = success(ctx, ctx.ctl('list', '--json'))
+    ctx.eq(doc['tasks'], [], 'a root holding only the engine\'s own locks lists no tasks [contract]')
+    if delta(ctx, 'U10'):
+        ctx.eq(_entries(ctx.root), before, 'an ordinary read creates and changes nothing [proposed, U10]')
+        ctx.eq(ctx.fx.root_state(), 'other', 'an ordinary read does not initialize it [proposed, U10]')
+    else:
+        ctx.eq(ctx.fx.root_state(), 'initialized', 'an ordinary read initializes it [contract, pending U10]')
+
+
 @case('list.foreign_root_refused')
 def _(ctx):
     ctx.fx.make_foreign_root()
